@@ -76,6 +76,7 @@ let package = Package(
                 "MacpoolPool",
                 "MacpoolVM",
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Subprocess", package: "swift-subprocess"),
             ],
             swiftSettings: strictSwiftSettings,
         ),

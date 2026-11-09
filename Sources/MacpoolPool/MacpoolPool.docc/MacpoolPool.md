@@ -22,6 +22,15 @@ keeps the VM alive while the daemon restarts. The supervisor reports a ``Supervi
 own socket through a ``SupervisorServer`` and accepts a ``SupervisorCommand`` that stops the VM.
 When its VM ends, it writes the ``MachineOutcome`` to an exit record before it exits.
 
+A supervisor holds its lease's ``SupervisorLock`` from its start until its exit. The daemon treats
+a supervisor as gone only once that lock is free. It waits for the lock before it boots the lease
+again or deletes the clone, so an earlier supervisor's socket and exit record never mix with a
+later one's.
+
+A supervisor whose connection ends while it holds the lock gets reconnected. One that does not
+answer, ignores a stop, or reports another protocol version gets a stop command, then `SIGTERM`,
+and then `SIGKILL` as a ``SupervisorSignal``. Its run then counts as a failure.
+
 ### Lease lifetime
 
 A lease's time to live starts when its VM is first ready, and a renewal sets the expiry to the time
@@ -37,7 +46,9 @@ between restarts double up to a limit, and ``PoolPolicy`` sets the number of res
 
 The daemon stores its leases in a JSON file in the data directory after every change and holds an
 exclusive lock on the directory while it runs. A new daemon reads the file, reconnects to the
-supervisors that still run, and treats a supervisor that ended meanwhile as a stopped VM. Clients
+supervisors that still run, and treats a supervisor that ended meanwhile as a stopped VM. A file
+that cannot be read moves aside, and the daemon starts without leases. It then stops the
+supervisors and deletes the clones that belong to no lease. Clients
 of attached leases get a grace period to reattach. ``LaunchAgent`` describes the launchd job that
 starts the daemon at login and again after it exits.
 
@@ -67,6 +78,8 @@ starts the daemon at login and again after it exits.
 
 - ``SupervisorLauncher``
 - ``SupervisorLaunch``
+- ``SupervisorSignal``
+- ``SupervisorLock``
 - ``ProcessSupervisorLauncher``
 - ``SupervisorServer``
 - ``SupervisorStatus``

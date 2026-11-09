@@ -70,4 +70,22 @@ struct PoolStoreTests {
             }
         }
     }
+
+    /// Writes the state for the owner only and moves an unreadable file aside.
+    @Test func protectsAndSetsAsideStateFiles() throws {
+        let directory = try ShortDirectory()
+        let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        try store.save(.empty)
+        let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path(percentEncoded: false))
+        #expect(attributes[.posixPermissions] as? Int == 0o600)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.url.path(percentEncoded: false)) == [
+            "state.json",
+        ])
+
+        try Data("{".utf8).write(to: store.file)
+        let moved = try store.quarantine(at: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(moved.lastPathComponent == "state.json.invalid-1800000000")
+        #expect(try Data(contentsOf: moved) == Data("{".utf8))
+        #expect(try store.load() == .empty)
+    }
 }

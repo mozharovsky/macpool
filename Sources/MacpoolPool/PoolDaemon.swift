@@ -1,8 +1,6 @@
 public import Foundation
 public import Logging
 import MacpoolVM
-import Subprocess
-import System
 
 /// The daemon that owns a host's VM slots, its lease queue, and the supervisors of leased VMs.
 ///
@@ -14,13 +12,17 @@ import System
 ///
 /// The daemon writes every change of its leases to ``PoolDirectory/stateFile``. Supervisors run in
 /// their own sessions and keep their VMs while the daemon is away. A new daemon reads the state,
-/// reconnects to the supervisors, and resumes the leases. Supervisors that ended meanwhile count as
-/// stopped VMs under each lease's restart policy, and clients of attached leases get a grace period
-/// to reattach.
+/// reconnects to the supervisors, and resumes the leases. Clients of attached leases get a grace
+/// period to reattach.
+///
+/// The daemon treats a supervisor as gone only once its ``SupervisorLock`` is free. A supervisor
+/// whose connection ends while it holds the lock gets reconnected. One that does not answer within
+/// the reconnect window, ignores a stop, or speaks another protocol version gets `SIGTERM` and then
+/// `SIGKILL`. A run that the daemon ended this way counts as a failure under the restart policy.
 ///
 /// A lease ends on release, on expiry, when its attached client disconnects, or when its VM stops
-/// and the restart policy does not boot it again. The daemon then stops the VM, deletes the clone,
-/// and grants the slot to the next request.
+/// and the restart policy does not boot it again. The daemon then stops the VM, waits until the
+/// supervisor exits, deletes the clone, and grants the slot to the next request.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -30,10 +32,10 @@ public actor PoolDaemon {
         /// The limits and timings.
         public var policy: PoolPolicy
 
-        /// The launcher that starts supervisor processes.
+        /// The launcher that starts and signals supervisor processes.
         public var launcher: any SupervisorLauncher
 
-        /// The source of the current time.
+        /// The source of the current time for expiries, restarts, and stop deadlines.
         public var now: @Sendable () -> Date
 
         /// The interval between checks of expiries and restart times, or `nil` when only explicit
@@ -43,8 +45,23 @@ public actor PoolDaemon {
         /// The longest wait for a new supervisor's socket.
         public var supervisorConnectTimeout: Duration
 
-        /// The longest wait for a stopped VM's supervisor to release the clone.
+        /// How long the daemon tries to reconnect to a supervisor that still runs before it ends
+        /// the supervisor by signal.
+        public var reconnectWindow: Duration
+
+        /// The time after a stop command at which the daemon signals a supervisor that still runs,
+        /// measured with ``now``.
+        public var stopGrace: Duration
+
+        /// The wait for a supervisor to exit after the daemon asked it to stop or signaled it.
+        public var signalGrace: Duration
+
+        /// The longest wait for a supervisor to exit on its own before a new boot or the deletion
+        /// of the clone, after which the daemon stops it.
         public var releaseTimeout: Duration
+
+        /// How long a supervisor log stays after its lease ends.
+        public var logRetention: Duration
 
         /// The logger for lease events.
         public var logger: Logger
@@ -54,11 +71,16 @@ public actor PoolDaemon {
         /// - Parameters:
         ///   - directory: The data directory.
         ///   - policy: The limits and timings.
-        ///   - launcher: The launcher that starts supervisor processes.
+        ///   - launcher: The launcher that starts and signals supervisor processes.
         ///   - now: The source of the current time.
         ///   - tickInterval: The interval between checks of expiries and restart times, or `nil`.
         ///   - supervisorConnectTimeout: The longest wait for a new supervisor's socket.
-        ///   - releaseTimeout: The longest wait for a supervisor to release a stopped clone.
+        ///   - reconnectWindow: How long the daemon reconnects to a running supervisor before it
+        ///     signals it.
+        ///   - stopGrace: The time after a stop command at which a running supervisor gets signals.
+        ///   - signalGrace: The wait for a supervisor to exit after each stop request or signal.
+        ///   - releaseTimeout: The longest wait for a supervisor to exit on its own.
+        ///   - logRetention: How long a supervisor log stays after its lease ends.
         ///   - logger: The logger for lease events.
         public init(
             directory: PoolDirectory,
@@ -67,7 +89,11 @@ public actor PoolDaemon {
             now: @escaping @Sendable () -> Date = { Date() },
             tickInterval: Duration? = .seconds(1),
             supervisorConnectTimeout: Duration = .seconds(30),
-            releaseTimeout: Duration = .seconds(120),
+            reconnectWindow: Duration = .seconds(30),
+            stopGrace: Duration = .seconds(30),
+            signalGrace: Duration = .seconds(10),
+            releaseTimeout: Duration = .seconds(60),
+            logRetention: Duration = .seconds(7 * 24 * 3600),
             logger: Logger = Logger(label: "macpool.daemon"),
         ) {
             self.directory = directory
@@ -76,7 +102,11 @@ public actor PoolDaemon {
             self.now = now
             self.tickInterval = tickInterval
             self.supervisorConnectTimeout = supervisorConnectTimeout
+            self.reconnectWindow = reconnectWindow
+            self.stopGrace = stopGrace
+            self.signalGrace = signalGrace
             self.releaseTimeout = releaseTimeout
+            self.logRetention = logRetention
             self.logger = logger
         }
     }
@@ -89,6 +119,16 @@ public actor PoolDaemon {
         let token: UInt64
         /// The time at which the daemon asked the supervisor to stop, if it did.
         var stopSentAt: Date?
+    }
+
+    /// How a supervisor ended while the daemon waited for it.
+    private enum SupervisorEnding {
+        /// The supervisor exited on its own, and its exit record tells how the run ended.
+        case exited
+        /// The daemon had to stop the supervisor by command or signal.
+        case endedByDaemon
+        /// The supervisor still holds its lock after `SIGKILL`.
+        case stuck
     }
 
     /// The settings and collaborators.
@@ -118,8 +158,11 @@ public actor PoolDaemon {
     /// The token of the next supervisor connection.
     private var nextToken: UInt64 = 0
 
-    /// The leases whose supervisor the daemon starts or reconnects to.
+    /// The leases whose supervisor the daemon starts, reconnects to, or waits for.
     private var connecting: Set<LeaseID> = []
+
+    /// The leases whose unresponsive supervisor the daemon ends by signal.
+    private var terminating: Set<LeaseID> = []
 
     /// The leases whose clone the daemon deletes.
     private var discarding: Set<LeaseID> = []
@@ -136,18 +179,20 @@ public actor PoolDaemon {
     /// instead and also covers detached leases.
     private var loggedPhases: [LeaseID: LeasePhase] = [:]
 
-    /// The wait between checks of a clone's lock and between connection attempts.
+    /// The wait between checks of a lock and between connection attempts.
     private static let pollInterval = Duration.milliseconds(100)
-
-    /// The time after a stop request at which the daemon ends an unresponsive supervisor.
-    private static let stopGrace: TimeInterval = 120
 
     /// Takes the data directory's lock and reads the stored leases.
     ///
+    /// A state file that cannot be read moves aside with an `.invalid-` suffix and the time, and
+    /// the daemon starts without leases. ``start()`` then stops the supervisors and deletes the
+    /// clones that belong to no lease.
+    ///
     /// - Parameter configuration: The settings and collaborators.
     /// - Throws: ``PoolError/daemonRunning(path:)`` when another daemon serves the directory,
-    ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range, or
-    ///   another ``PoolError`` when the directory or the state file is unusable.
+    ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range,
+    ///   ``PoolError/insecureDirectory(path:reason:)`` when another user could control the
+    ///   directory, or another ``PoolError`` when the directory or the state file cannot be used.
     public init(configuration: Configuration) throws(PoolError) {
         guard (1 ... PoolPolicy.maximumSlots).contains(configuration.policy.slots) else {
             throw .invalidRequest(reason: "the daemon takes 1 to \(PoolPolicy.maximumSlots) slots")
@@ -155,11 +200,21 @@ public actor PoolDaemon {
         try configuration.directory.prepare()
         lock = try DaemonLock(directory: configuration.directory)
         store = PoolStore(file: configuration.directory.stateFile)
-        ledger = try LeaseLedger(
-            policy: configuration.policy,
-            directory: configuration.directory,
-            state: store.load(),
-        )
+        let state: PoolState
+        do {
+            state = try store.load()
+        } catch let .invalidState(path, reason) {
+            let moved = try store.quarantine(at: Date())
+            configuration.logger.error("The pool state is unusable and starts empty", metadata: [
+                "path": "\(path)",
+                "reason": "\(reason)",
+                "moved_to": "\(moved.path(percentEncoded: false))",
+            ])
+            state = .empty
+        } catch {
+            throw error
+        }
+        ledger = LeaseLedger(policy: configuration.policy, directory: configuration.directory, state: state)
         self.configuration = configuration
         loggedPhases = ledger.leases.mapValues(\.phase)
     }
@@ -169,6 +224,7 @@ public actor PoolDaemon {
     /// - Throws: ``PoolError`` when the client socket cannot listen.
     public func start() async throws(PoolError) {
         removeOrphans()
+        pruneLogs()
         perform(ledger.recover(now: configuration.now()))
         let listener = try await SocketListener(socket: configuration.directory.daemonSocket)
         self.listener = listener
@@ -217,22 +273,33 @@ public actor PoolDaemon {
         configuration.logger.info("Stopped listening. Supervisors keep running.")
     }
 
-    /// Applies expiries, restart times, and the reattach grace, and retries unfinished clean-ups.
+    /// Applies expiries, restart times, and the reattach grace, signals supervisors that ignore a
+    /// stop, and retries unfinished clean-ups.
     public func tick() {
         guard !isShutDown else {
             return
         }
         let now = configuration.now()
         perform(ledger.tick(now: now))
-        for (id, record) in ledger.leases where record.phase == .stopping {
-            if var link = links[id] {
-                if let sent = link.stopSentAt, now.timeIntervalSince(sent) > Self.stopGrace {
-                    link.stopSentAt = now
-                    links[id] = link
-                    terminateSupervisor(of: id, processID: record.supervisorProcessID)
+        let stopGrace = configuration.stopGrace / .seconds(1)
+        for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
+            let idle = links[id] == nil && !connecting.contains(id)
+            switch record.phase {
+            case .stopping:
+                if let sent = links[id]?.stopSentAt, now.timeIntervalSince(sent) >= stopGrace,
+                   !terminating.contains(id) {
+                    terminating.insert(id)
+                    Task { await self.terminateUnresponsive(id) }
+                } else if idle, !discarding.contains(id) {
+                    startDiscard(id)
                 }
-            } else if !connecting.contains(id), !discarding.contains(id) {
-                startDiscard(id)
+            case .starting, .ready:
+                // A supervisor that could not be ended earlier gets another attempt.
+                if idle {
+                    startRecovery(id)
+                }
+            case .restarting:
+                break
             }
         }
     }
@@ -271,7 +338,10 @@ public actor PoolDaemon {
             do {
                 request = try await channel.receive(PoolRequest.self)
             } catch {
+                // The reply must leave before the connection closes, or the client sees only the
+                // closed connection.
                 try? channel.send(PoolReply.failure(error.description))
+                await channel.finish()
                 break
             }
             guard let request, !isShutDown else {
@@ -296,7 +366,7 @@ public actor PoolDaemon {
             switch request {
             case let .lease(terms):
                 try terms.validate()
-                try Self.checkSource(terms.source)
+                try checkSource(of: terms)
                 configuration.logger.info("Queued a lease request", metadata: ["source": "\(terms.source)"])
                 perform(ledger.request(terms, from: client, now: configuration.now()))
             case let .attach(id):
@@ -325,12 +395,18 @@ public actor PoolDaemon {
         try? clients[client]?.send(reply)
     }
 
-    /// Checks that a source is a bundle that a clone can start from.
+    /// Checks that a request's source and shared directory can serve a lease.
     ///
-    /// - Parameter source: The source bundle's path.
-    /// - Throws: ``PoolError/library(_:)`` when the settings cannot be read or the source's own
-    ///   credential rotation did not finish.
-    private static func checkSource(_ source: String) throws(PoolError) {
+    /// A request that fails these checks would only fail its boots, so it is refused before it
+    /// takes a place in the queue.
+    ///
+    /// - Parameter terms: The requested terms.
+    /// - Throws: ``PoolError/library(_:)`` when the source's settings cannot be read, its own
+    ///   credential rotation did not finish, or another process holds it, or
+    ///   ``PoolError/invalidRequest(reason:)`` when the source never booted, lies on another
+    ///   volume than the data directory, or the shared directory is missing.
+    private func checkSource(of terms: LeaseTerms) throws(PoolError) {
+        let source = terms.source
         let bundle = VMBundle(root: URL(filePath: source))
         let settings: BundleSettings
         do {
@@ -340,6 +416,28 @@ public actor PoolDaemon {
         }
         guard settings.credentialRotation != .started else {
             throw .library(.credentialRotationIncomplete(path: source))
+        }
+        guard settings.hasBooted != false else {
+            throw .invalidRequest(reason: "the source \(source) never booted, so its clones have no guest account")
+        }
+        guard !BundleLock.isHeld(on: bundle) else {
+            throw .library(.bundleInUse(path: source))
+        }
+        let manager = FileManager.default
+        let sourceVolume = try? manager.attributesOfItem(atPath: source)[.systemNumber] as? Int
+        let poolVolume = try? manager.attributesOfItem(
+            atPath: configuration.directory.leasesDirectory.path(percentEncoded: false),
+        )[.systemNumber] as? Int
+        guard sourceVolume == poolVolume else {
+            throw .invalidRequest(
+                reason: "the source \(source) is not on the data directory's volume, so it cannot be cloned",
+            )
+        }
+        if let shared = terms.sharedDirectory {
+            var isDirectory: ObjCBool = false
+            guard manager.fileExists(atPath: shared, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
+            }
         }
     }
 
@@ -370,7 +468,7 @@ public actor PoolDaemon {
             case let .discard(id):
                 startDiscard(id)
             case let .reconnect(id):
-                startReconnect(id)
+                startRecovery(id)
             }
         }
     }
@@ -417,51 +515,76 @@ public actor PoolDaemon {
         Task { await self.launch(id, terms: record.terms) }
     }
 
-    /// Prepares the clone, starts the supervisor, and connects to it.
+    /// Waits for the lease's earlier supervisor, prepares the clone, starts the supervisor, and
+    /// connects to it.
     ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - terms: The lease's terms.
     private func launch(_ id: LeaseID, terms: LeaseTerms) async {
         let directory = configuration.directory
-        var processID: Int32?
-        do throws(PoolError) {
-            let clone = directory.bundle(for: id)
-            // A record that remains from an earlier boot would otherwise describe this one.
-            try? FileManager.default.removeItem(at: directory.exitRecord(for: id))
-            // An earlier supervisor of the same clone may still be exiting.
-            guard await waitForRelease(of: clone) else {
-                throw .supervisorLaunch(reason: "another process still holds \(clone.root.path(percentEncoded: false))")
+        // An earlier supervisor writes its exit record and closes its socket before it releases
+        // its lock. Its files are therefore final once the lock is free, and only then can they go.
+        let earlier = await endSupervisor(id, waitingFirst: configuration.releaseTimeout)
+        guard !isShutDown else {
+            return
+        }
+        guard earlier != .stuck else {
+            connecting.remove(id)
+            configuration.logger.error("An earlier supervisor of a lease does not exit", metadata: ["lease": "\(id)"])
+            return
+        }
+        // The lease may have ended while the earlier supervisor exited.
+        guard ledger.leases[id]?.phase == .starting else {
+            connecting.remove(id)
+            if ledger.leases[id]?.phase == .stopping {
+                startDiscard(id)
             }
+            return
+        }
+        try? FileManager.default.removeItem(at: directory.exitRecord(for: id))
+        try? FileManager.default.removeItem(at: directory.supervisorSocket(for: id))
+        do {
             try prepareClone(id, terms: terms)
-            try? FileManager.default.removeItem(at: directory.supervisorSocket(for: id))
-            let launched = try await configuration.launcher.launch(SupervisorLaunch(
+        } catch {
+            connecting.remove(id)
+            let actions = ledger.bootFailed(id, reason: error.description)
+            perform(actions.isEmpty ? [.discard(id)] : actions)
+            return
+        }
+        let processID: Int32
+        do {
+            processID = try await configuration.launcher.launch(SupervisorLaunch(
                 lease: id,
                 directory: directory,
                 sharedDirectory: terms.sharedDirectory,
                 bootTimeout: terms.bootTimeout,
             ))
-            processID = launched
-            ledger.supervisorLaunched(id, processID: launched)
-            perform([])
-            let channel = try await connectToSupervisor(of: id)
-            connecting.remove(id)
-            attach(channel, to: id)
         } catch {
             connecting.remove(id)
-            if let processID {
-                terminateSupervisor(of: id, processID: processID)
-            }
-            let outcome = directory.readExitRecord(for: id) ?? .failed(error.description)
-            perform(ledger.machineExited(id, outcome, now: configuration.now()))
+            perform(ledger.machineExited(id, .failed(error.description), now: configuration.now()))
+            return
         }
+        guard !isShutDown else {
+            return
+        }
+        ledger.supervisorLaunched(id, processID: processID)
+        perform([])
+        if let channel = await connectToNewSupervisor(of: id) {
+            connecting.remove(id)
+            attach(channel, to: id)
+            return
+        }
+        let reason = "the supervisor did not listen within \(configuration.supervisorConnectTimeout)"
+        await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
     }
 
     /// Creates the lease's clone unless a usable one exists.
     ///
-    /// A clone whose credential rotation began and did not finish holds credentials that nothing
-    /// can use, so the boot starts from a fresh clone instead. A clone from an earlier boot keeps
-    /// the guest's disk otherwise.
+    /// The copy happens under a temporary name and takes the lease's name only once it has its own
+    /// identity. A clone whose credential rotation began and did not finish holds credentials that
+    /// nothing can use, so the boot starts from a fresh clone instead. A clone from an earlier boot
+    /// keeps the guest's disk otherwise.
     ///
     /// - Parameters:
     ///   - id: The lease.
@@ -469,96 +592,145 @@ public actor PoolDaemon {
     /// - Throws: ``PoolError`` when the old clone cannot be removed, or the source is in use or
     ///   cannot be cloned.
     private func prepareClone(_ id: LeaseID, terms: LeaseTerms) throws(PoolError) {
+        let manager = FileManager.default
         let clone = configuration.directory.bundle(for: id)
-        let path = clone.root.path(percentEncoded: false)
-        if FileManager.default.fileExists(atPath: path) {
+        if manager.fileExists(atPath: clone.root.path(percentEncoded: false)) {
             if let settings = try? clone.settings(), settings.credentialRotation != .started {
                 return
             }
             do {
-                try FileManager.default.removeItem(at: clone.root)
+                try manager.removeItem(at: clone.root)
             } catch {
                 throw .fileSystem("removing the unusable clone", clone.root, error)
             }
         }
+        let partial = configuration.directory.partialBundle(for: id)
+        try? manager.removeItem(at: partial)
         let source = VMBundle(root: URL(filePath: terms.source))
         do throws(MacpoolError) {
             let sourceLock = try BundleLock(bundle: source)
             defer { withExtendedLifetime(sourceLock) {} }
-            let cloned = try source.clone(to: clone.root)
+            let cloned = try source.clone(to: partial)
             do {
                 try cloned.assignIdentity()
             } catch {
-                try? FileManager.default.removeItem(at: clone.root)
+                try? manager.removeItem(at: partial)
                 throw error
             }
         } catch {
             throw .library(error)
+        }
+        do {
+            try manager.moveItem(at: partial, to: clone.root)
+        } catch {
+            try? manager.removeItem(at: partial)
+            throw .fileSystem("naming the clone", clone.root, error)
         }
     }
 
     /// Connects to a new supervisor's socket, retrying until it listens.
     ///
     /// - Parameter id: The lease.
-    /// - Returns: The connection.
-    /// - Throws: ``PoolError/supervisorLaunch(reason:)`` when the socket does not answer within the
-    ///   configured timeout.
-    private func connectToSupervisor(of id: LeaseID) async throws(PoolError) -> MessageChannel {
-        let socket = configuration.directory.supervisorSocket(for: id)
+    /// - Returns: The connection, or `nil` when the supervisor exited before it listened or did
+    ///   not listen within the configured timeout.
+    private func connectToNewSupervisor(of id: LeaseID) async -> MessageChannel? {
+        let directory = configuration.directory
+        let socket = directory.supervisorSocket(for: id)
         let clock = ContinuousClock()
         let deadline = clock.now + configuration.supervisorConnectTimeout
-        while true {
+        while !isShutDown {
             if let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2)) {
                 return channel
             }
-            // A supervisor that already exited leaves its record, and waiting longer cannot help.
-            if FileManager.default
-                .fileExists(atPath: configuration.directory.exitRecord(for: id).path(percentEncoded: false)) {
-                throw .supervisorLaunch(reason: "the supervisor exited before it listened")
+            // The daemon removed the earlier record before the launch, so a record now belongs to
+            // this boot. It is final once the lock is free.
+            let record = directory.exitRecord(for: id).path(percentEncoded: false)
+            if FileManager.default.fileExists(atPath: record), SupervisorLock.holder(of: id, in: directory) == nil {
+                return nil
             }
             guard clock.now < deadline else {
-                throw .supervisorLaunch(
-                    reason: "the supervisor did not listen within \(configuration.supervisorConnectTimeout)",
-                )
+                return nil
             }
             try? await Task.sleep(for: Self.pollInterval)
         }
+        return nil
     }
 
-    /// Reconnects to the supervisor that a lease had before the daemon started.
+    /// Starts to reconnect to a lease's supervisor unless a connection or an attempt exists.
     ///
     /// - Parameter id: The lease.
-    private func startReconnect(_ id: LeaseID) {
-        guard !connecting.contains(id), links[id] == nil else {
+    private func startRecovery(_ id: LeaseID) {
+        guard ledger.leases[id] != nil, !connecting.contains(id), links[id] == nil else {
             return
         }
         connecting.insert(id)
-        Task {
-            let socket = configuration.directory.supervisorSocket(for: id)
-            let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2))
-            self.reconnected(id, channel: channel)
-        }
+        Task { await self.recover(id) }
     }
 
-    /// Resumes a lease with its reconnected supervisor, or reports the supervisor as gone.
+    /// Reconnects to a lease's supervisor, or concludes its run once the supervisor is gone.
+    ///
+    /// The supervisor sends its current status to every new connection, so a reconnect loses
+    /// nothing. A supervisor that holds its lock but does not answer within the reconnect window
+    /// is stopped by command or signal, and its run counts as a failure.
+    ///
+    /// - Parameter id: The lease.
+    private func recover(_ id: LeaseID) async {
+        let directory = configuration.directory
+        let socket = directory.supervisorSocket(for: id)
+        let clock = ContinuousClock()
+        let deadline = clock.now + configuration.reconnectWindow
+        while !isShutDown {
+            if SupervisorLock.holder(of: id, in: directory) == nil {
+                await conclude(id, ending: .exited, reason: "")
+                return
+            }
+            if let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2)) {
+                connecting.remove(id)
+                if links[id] == nil {
+                    configuration.logger.info("Reconnected to a supervisor", metadata: ["lease": "\(id)"])
+                    attach(channel, to: id)
+                } else {
+                    channel.close()
+                }
+                return
+            }
+            guard clock.now < deadline else {
+                break
+            }
+            try? await Task.sleep(for: Self.pollInterval * 5)
+        }
+        guard !isShutDown else {
+            return
+        }
+        configuration.logger.warning("A running supervisor does not answer", metadata: ["lease": "\(id)"])
+        let reason = "the supervisor did not answer within \(configuration.reconnectWindow)"
+        await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
+    }
+
+    /// Applies the end of a supervisor's run to the ledger.
+    ///
+    /// A supervisor that the daemon had to stop counts as failed, because a stop that the daemon
+    /// sent for its own reasons does not mean that the lease ended. A supervisor that is stuck
+    /// leaves the lease as it is, and a later tick tries again.
     ///
     /// - Parameters:
     ///   - id: The lease.
-    ///   - channel: The connection, or `nil` when the supervisor did not answer.
-    private func reconnected(_ id: LeaseID, channel: MessageChannel?) {
+    ///   - ending: How the supervisor ended.
+    ///   - reason: Why the daemon stopped the supervisor, for ``SupervisorEnding/endedByDaemon``.
+    private func conclude(_ id: LeaseID, ending: SupervisorEnding, reason: String) async {
         connecting.remove(id)
-        guard !isShutDown else {
-            channel?.close()
+        guard !isShutDown, ledger.leases[id] != nil else {
             return
         }
-        if let channel {
-            configuration.logger.info("Reconnected to a supervisor", metadata: ["lease": "\(id)"])
-            attach(channel, to: id)
+        let outcome: MachineOutcome
+        switch ending {
+        case .exited:
+            outcome = configuration.directory.readExitRecord(for: id) ?? .lost
+        case .endedByDaemon:
+            outcome = .failed(reason)
+        case .stuck:
+            configuration.logger.error("A supervisor survives SIGKILL", metadata: ["lease": "\(id)"])
             return
-        }
-        let outcome = configuration.directory.readExitRecord(for: id) ?? .lost
-        if outcome == .lost {
-            terminateSupervisor(of: id, processID: ledger.leases[id]?.supervisorProcessID)
         }
         perform(ledger.machineExited(id, outcome, now: configuration.now()))
     }
@@ -584,15 +756,35 @@ public actor PoolDaemon {
 
     /// Applies a supervisor's statuses until its connection ends.
     ///
+    /// A connection that ends without an exited status leads to a reconnect, because the
+    /// supervisor may still run. A status from another protocol version, or one that cannot be
+    /// read, ends the supervisor by signal.
+    ///
     /// - Parameters:
     ///   - channel: The supervisor connection.
     ///   - id: The lease.
     ///   - token: The connection's token.
     private func follow(_ channel: MessageChannel, of id: LeaseID, token: UInt64) async {
         var exited = false
-        while let status = try? await channel.receive(SupervisorStatus.self) {
+        var incompatibility: String?
+        while true {
+            let status: SupervisorStatus?
+            do {
+                status = try await channel.receive(SupervisorStatus.self)
+            } catch {
+                incompatibility = error.description
+                break
+            }
+            guard let status else {
+                break
+            }
             guard !isShutDown, links[id]?.token == token else {
+                channel.close()
                 return
+            }
+            guard status.protocolVersion == SupervisorStatus.currentProtocol else {
+                incompatibility = "protocol \(status.protocolVersion) instead of \(SupervisorStatus.currentProtocol)"
+                break
             }
             if status.phase == .exited {
                 exited = true
@@ -612,20 +804,25 @@ public actor PoolDaemon {
             return
         }
         links[id] = nil
-        // A supervisor that writes its record and then loses the connection still says how it
-        // ended.
-        let outcome = configuration.directory.readExitRecord(for: id) ?? .lost
-        configuration.logger.warning("A supervisor connection ended", metadata: [
-            "lease": "\(id)",
-            "outcome": "\(outcome)",
-        ])
-        perform(ledger.machineExited(id, outcome, now: configuration.now()))
+        if let incompatibility {
+            configuration.logger.warning("A supervisor is incompatible", metadata: [
+                "lease": "\(id)",
+                "reason": "\(incompatibility)",
+            ])
+            connecting.insert(id)
+            let reason = "the supervisor is incompatible: \(incompatibility)"
+            await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
+            return
+        }
+        configuration.logger.warning("A supervisor connection ended", metadata: ["lease": "\(id)"])
+        startRecovery(id)
     }
 
     /// Asks a lease's supervisor to stop the VM.
     ///
-    /// A lease without a connection either connects soon, and the connection then sends the stop,
-    /// or has no supervisor, and its clone goes at once.
+    /// A lease without a connection either has a launch or a reconnect under way, which sends the
+    /// stop once it connects, or gets a reconnect now. The reconnect concludes the run when the
+    /// supervisor is gone.
     ///
     /// - Parameter id: The lease.
     private func stopMachine(_ id: LeaseID) {
@@ -633,40 +830,81 @@ public actor PoolDaemon {
             try? link.channel.send(SupervisorCommand(.stop))
             link.stopSentAt = configuration.now()
             links[id] = link
-        } else if !connecting.contains(id) {
-            perform(ledger.machineExited(id, .lost, now: configuration.now()))
+        } else {
+            startRecovery(id)
         }
     }
 
-    /// Ends a supervisor process that no longer answers on its socket.
+    /// Ends a supervisor that did not stop within the stop grace period.
     ///
-    /// The call sends `SIGTERM` only when the process's command line shows that it is this lease's
-    /// supervisor, because a stored process identifier can belong to another process after a host
-    /// restart. The supervisor answers the signal by stopping its VM.
+    /// The connection to the supervisor ends with the process, and following it concludes the
+    /// run.
+    ///
+    /// - Parameter id: The lease.
+    private func terminateUnresponsive(_ id: LeaseID) async {
+        configuration.logger.warning("A supervisor ignores its stop", metadata: ["lease": "\(id)"])
+        if await endSupervisor(id, waitingFirst: .zero) == .stuck {
+            configuration.logger.error("A supervisor survives SIGKILL", metadata: ["lease": "\(id)"])
+        }
+        terminating.remove(id)
+    }
+
+    /// Waits for a lease's supervisor to exit and ends it when it does not.
+    ///
+    /// After the first wait the daemon sends a stop command on the socket, then `SIGTERM`, then
+    /// `SIGKILL`, and waits ``Configuration/signalGrace`` after each step.
     ///
     /// - Parameters:
     ///   - id: The lease.
-    ///   - processID: The stored process identifier, or `nil` when none is known.
-    private func terminateSupervisor(of id: LeaseID, processID: Int32?) {
-        guard let processID, processID > 0 else {
-            return
+    ///   - wait: The wait for the supervisor to exit on its own.
+    /// - Returns: How the supervisor ended.
+    private func endSupervisor(_ id: LeaseID, waitingFirst wait: Duration) async -> SupervisorEnding {
+        let directory = configuration.directory
+        if await waitForSupervisorExit(of: id, within: wait) {
+            return .exited
         }
-        let directory = configuration.directory.root.path(percentEncoded: false)
-        let logger = configuration.logger
-        Task.detached {
-            let result = try? await run(
-                .path("/bin/ps"),
-                arguments: ["-o", "command=", "-p", String(processID)],
-                output: .string(limit: 1 << 16),
-            )
-            guard let command = result?.standardOutput, command.contains(" supervise "),
-                  command.contains(directory), command.contains("--lease \(id.rawValue)")
-            else {
-                return
+        let socket = directory.supervisorSocket(for: id)
+        if let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2)) {
+            try? channel.send(SupervisorCommand(.stop))
+            await channel.finish()
+            if await waitForSupervisorExit(of: id, within: configuration.signalGrace) {
+                return .endedByDaemon
             }
-            logger.warning("Ending an unresponsive supervisor", metadata: ["lease": "\(id)", "pid": "\(processID)"])
-            kill(processID, SIGTERM)
         }
+        for signal in [SupervisorSignal.terminate, .kill] {
+            // The lock records the process that holds it, which covers a supervisor whose launch
+            // the daemon could not store.
+            let recorded = SupervisorLock.holder(of: id, in: directory) ?? 0
+            let processID = recorded > 0 ? recorded : ledger.leases[id]?.supervisorProcessID ?? 0
+            configuration.logger.warning("Signaling a supervisor", metadata: [
+                "lease": "\(id)",
+                "pid": "\(processID)",
+                "signal": "\(signal)",
+            ])
+            await configuration.launcher.signal(signal, processID: processID, of: id, in: directory)
+            if await waitForSupervisorExit(of: id, within: configuration.signalGrace) {
+                return .endedByDaemon
+            }
+        }
+        return .stuck
+    }
+
+    /// Waits until no process holds a lease's supervisor lock.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - wait: The longest wait. A zero wait checks once.
+    /// - Returns: Whether the lock is free.
+    private func waitForSupervisorExit(of id: LeaseID, within wait: Duration) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + wait
+        while SupervisorLock.holder(of: id, in: configuration.directory) != nil {
+            guard clock.now < deadline else {
+                return false
+            }
+            try? await Task.sleep(for: Self.pollInterval)
+        }
+        return true
     }
 
     // MARK: Clean-up
@@ -682,42 +920,65 @@ public actor PoolDaemon {
         Task { await self.discard(id) }
     }
 
-    /// Deletes a lease's clone, socket, and exit record once no process holds the clone, and frees
-    /// the slot.
+    /// Deletes a lease's clone and files once its supervisor exited, and frees the slot.
     ///
-    /// When a process still holds the clone after the release timeout, the lease stays stopping
-    /// and a later tick tries again.
+    /// A supervisor that still runs after the release timeout is stopped by command or signal.
+    /// When it survives that, or another process holds the clone, the lease stays stopping and a
+    /// later tick tries again.
     ///
     /// - Parameter id: The lease.
     private func discard(_ id: LeaseID) async {
         let directory = configuration.directory
         let clone = directory.bundle(for: id)
+        guard await endSupervisor(id, waitingFirst: configuration.releaseTimeout) != .stuck else {
+            discarding.remove(id)
+            configuration.logger.error("A stopped lease's supervisor does not exit", metadata: ["lease": "\(id)"])
+            return
+        }
         guard await waitForRelease(of: clone) else {
             discarding.remove(id)
             configuration.logger.error("A stopped lease's clone is still in use", metadata: ["lease": "\(id)"])
-            terminateSupervisor(of: id, processID: ledger.leases[id]?.supervisorProcessID)
             return
         }
         do {
-            if FileManager.default.fileExists(atPath: clone.root.path(percentEncoded: false)) {
-                try FileManager.default.removeItem(at: clone.root)
-            }
+            try removeFiles(of: id)
         } catch {
             discarding.remove(id)
             configuration.logger.error("A stopped lease's clone could not be deleted", metadata: [
                 "lease": "\(id)",
-                "error": "\(error.localizedDescription)",
+                "error": "\(error)",
             ])
             return
         }
-        try? FileManager.default.removeItem(at: directory.supervisorSocket(for: id))
-        try? FileManager.default.removeItem(at: directory.exitRecord(for: id))
         discarding.remove(id)
         links[id] = nil
         guard !isShutDown else {
             return
         }
         perform(ledger.discarded(id, now: configuration.now()))
+        pruneLogs()
+    }
+
+    /// Deletes a lease's clone, partial clone, socket, exit record, and supervisor lock.
+    ///
+    /// The supervisor log stays for ``Configuration/logRetention``.
+    ///
+    /// - Parameter id: The lease, whose supervisor must have exited.
+    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the clone cannot be deleted.
+    private func removeFiles(of id: LeaseID) throws(PoolError) {
+        let directory = configuration.directory
+        let manager = FileManager.default
+        for clone in [directory.bundle(for: id).root, directory.partialBundle(for: id)]
+            where manager.fileExists(atPath: clone.path(percentEncoded: false)) {
+            do {
+                try manager.removeItem(at: clone)
+            } catch {
+                throw .fileSystem("deleting the clone", clone, error)
+            }
+        }
+        try? manager.removeItem(at: directory.supervisorSocket(for: id))
+        try? manager.removeItem(at: directory.exitRecord(for: id))
+        try? manager.removeItem(at: directory.supervisorLock(for: id))
     }
 
     /// Waits until no process holds a bundle's lock.
@@ -736,42 +997,68 @@ public actor PoolDaemon {
         return true
     }
 
-    /// Removes clones, sockets, and exit records that belong to no stored lease.
+    /// Stops supervisors and deletes clones and run files that belong to no stored lease.
     ///
-    /// They remain when the daemon stopped between writing them and recording the lease. A
-    /// supervisor that still listens on an unknown socket receives a stop, and its clone goes on a
-    /// later start. Entries whose names are not lease identifiers stay untouched.
+    /// They remain when the daemon stopped between writing them and recording the lease, or when
+    /// an unusable state file was set aside. A supervisor that still runs gets a stop, and its
+    /// files go once it exited. Partial clones always go, because only a running daemon writes
+    /// them. Entries whose names are not lease identifiers stay untouched.
     private func removeOrphans() {
         let directory = configuration.directory
         let manager = FileManager.default
-        for name in (try? manager.contentsOfDirectory(atPath: directory.leasesDirectory.path(percentEncoded: false))) ??
-            [] {
-            guard let id = LeaseID(name), ledger.leases[id] == nil else {
+        var orphans: Set<LeaseID> = []
+        let names = [directory.leasesDirectory, directory.runDirectory].flatMap { folder in
+            (try? manager.contentsOfDirectory(atPath: folder.path(percentEncoded: false))) ?? []
+        }
+        for name in names {
+            let stem = name.split(separator: ".").first.map(String.init) ?? ""
+            guard let id = LeaseID(stem) else {
                 continue
             }
-            let clone = directory.bundle(for: id)
-            if !BundleLock.isHeld(on: clone) {
-                configuration.logger.notice("Removing a clone without a lease", metadata: ["lease": "\(id)"])
-                try? manager.removeItem(at: clone.root)
+            if ledger.leases[id] == nil {
+                orphans.insert(id)
+            } else if name.hasSuffix(".partial") {
+                try? manager.removeItem(at: directory.partialBundle(for: id))
             }
         }
-        for name in (try? manager.contentsOfDirectory(atPath: directory.runDirectory.path(percentEncoded: false))) ??
-            [] {
-            let stem = name.split(separator: ".").first.map(String.init) ?? ""
-            guard let id = LeaseID(stem), ledger.leases[id] == nil else {
-                continue
-            }
-            let file = directory.runDirectory.appending(path: name)
-            if name.hasSuffix(".sock") {
-                Task.detached {
-                    if let channel = try? await MessageChannel.connect(to: file, timeout: .seconds(2)) {
-                        try? channel.send(SupervisorCommand(.stop))
-                        channel.close()
-                    } else {
-                        try? FileManager.default.removeItem(at: file)
+        for id in orphans.sorted() {
+            if SupervisorLock.holder(of: id, in: directory) == nil {
+                removeOrphan(id)
+            } else {
+                configuration.logger.notice("Stopping a supervisor without a lease", metadata: ["lease": "\(id)"])
+                Task {
+                    if await self.endSupervisor(id, waitingFirst: .zero) != .stuck {
+                        self.removeOrphan(id)
                     }
                 }
-            } else {
+            }
+        }
+    }
+
+    /// Deletes the files of a lease that the ledger does not know, unless another process holds
+    /// its clone.
+    ///
+    /// - Parameter id: The unknown lease.
+    private func removeOrphan(_ id: LeaseID) {
+        guard ledger.leases[id] == nil, !BundleLock.isHeld(on: configuration.directory.bundle(for: id)) else {
+            return
+        }
+        configuration.logger.notice("Removing files without a lease", metadata: ["lease": "\(id)"])
+        try? removeFiles(of: id)
+    }
+
+    /// Deletes supervisor logs of leases that ended longer ago than the retention period.
+    private func pruneLogs() {
+        let manager = FileManager.default
+        let folder = configuration.directory.logsDirectory
+        let cutoff = Date().addingTimeInterval(-(configuration.logRetention / .seconds(1)))
+        for name in (try? manager.contentsOfDirectory(atPath: folder.path(percentEncoded: false))) ?? [] {
+            guard name.hasSuffix(".log"), let id = LeaseID(String(name.dropLast(4))), ledger.leases[id] == nil else {
+                continue
+            }
+            let file = folder.appending(path: name)
+            let modified = try? manager.attributesOfItem(atPath: file.path(percentEncoded: false))[.modificationDate]
+            if let modified = modified as? Date, modified < cutoff {
                 try? manager.removeItem(at: file)
             }
         }

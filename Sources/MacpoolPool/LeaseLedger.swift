@@ -431,7 +431,8 @@ struct LeaseLedger {
         guard var record = leases[id] else {
             return []
         }
-        record.supervisorProcessID = nil
+        // The process identifier stays until the next launch or the discard, because the daemon
+        // may still need to signal a supervisor that has not exited yet.
         record.address = nil
         leases[id] = record
         switch record.phase {
@@ -455,6 +456,19 @@ struct LeaseLedger {
             return []
         }
         return [.notify(client, .restarting(summary(of: record), reason: outcome.description))]
+    }
+
+    /// Ends a lease whose boot cannot succeed, without a restart.
+    ///
+    /// A failure to prepare the clone does not go away on its own, so restarting would only keep
+    /// the slot busy.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - reason: Why the boot cannot succeed.
+    /// - Returns: The notice and the discard that follow.
+    mutating func bootFailed(_ id: LeaseID, reason: String) -> [LedgerAction] {
+        end(id, reason: reason, machineExited: true)
     }
 
     /// Removes a lease whose clone the daemon deleted and grants its slot.

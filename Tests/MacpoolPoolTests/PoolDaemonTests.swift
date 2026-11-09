@@ -168,10 +168,21 @@ struct PoolDaemonTests {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
         let missing = pool.root.url.appending(path: "missing").path(percentEncoded: false)
+        let fresh = VMBundle(root: pool.root.url.appending(path: "fresh", directoryHint: .isDirectory))
+        try FileManager.default.createDirectory(at: fresh.root, withIntermediateDirectories: false)
+        try fresh.writeSettings(BundleSettings(
+            cpuCount: 2,
+            memoryByteCount: 4 << 30,
+            macAddress: "02:00:00:00:00:02",
+            build: "25A1",
+            hasBooted: false,
+        ))
         let requests: [PoolRequest] = try [
             .lease(LeaseTerms(source: missing, timeToLive: 60)),
             .lease(LeaseTerms(source: "relative", timeToLive: 60)),
             .lease(pool.terms(timeToLive: 0)),
+            .lease(LeaseTerms(source: fresh.root.path(percentEncoded: false), timeToLive: 60)),
+            .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: missing)),
             .release(#require(LeaseID("0a1b2c3d"))),
             .renew(#require(LeaseID("0a1b2c3d"))),
             .attach(#require(LeaseID("0a1b2c3d"))),
@@ -187,8 +198,66 @@ struct PoolDaemonTests {
                 }
             }
         }
+        // A source that a VM uses cannot be cloned.
+        let lock = try BundleLock(bundle: VMBundle(root: URL(filePath: pool.source)))
+        let inUse = PoolError.library(.bundleInUse(path: pool.source)).description
+        await #expect(throws: PoolError.daemonRefused(message: inUse)) {
+            try await PoolClient.send(.lease(pool.terms()), to: pool.directory)
+        }
+        withExtendedLifetime(lock) {}
         #expect(await daemon.summary().leases.isEmpty)
         #expect(await daemon.summary().queue.isEmpty)
+        await daemon.shutdown()
+    }
+
+    /// Refuses a data directory that another user could replace or write to.
+    @Test func refusesDirectoryOthersControl() throws {
+        let pool = try PoolFixture()
+        let root = pool.directory.root.path(percentEncoded: false)
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: false)
+        #expect(chmod(root, 0o777) == 0)
+        #expect {
+            try pool.daemon()
+        } throws: { error in
+            if case let .insecureDirectory(_, reason) = error as? PoolError {
+                reason == "its permissions 777 let other users in"
+            } else {
+                false
+            }
+        }
+        #expect(chmod(root, 0o700) == 0)
+        try FileManager.default.removeItem(atPath: root + "run")
+        let elsewhere = pool.root.url.appending(path: "elsewhere", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(
+            atPath: root + "run",
+            withDestinationPath: elsewhere.path(percentEncoded: false),
+        )
+        #expect {
+            try pool.daemon()
+        } throws: { error in
+            if case let .insecureDirectory(_, reason) = error as? PoolError {
+                reason == "it is not a directory"
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Moves an unreadable state file aside, starts without leases, and removes their clones.
+    @Test func setsAsideUnreadableState() async throws {
+        let pool = try PoolFixture()
+        try pool.directory.prepare()
+        try Data("{".utf8).write(to: pool.directory.stateFile)
+        let orphan = try #require(LeaseID("0a1b2c3d"))
+        let clone = pool.directory.bundle(for: orphan).root
+        try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: false)
+
+        let daemon = try await pool.start()
+        #expect(await daemon.summary().leases.isEmpty)
+        let names = try FileManager.default.contentsOfDirectory(atPath: pool.directory.root.path(percentEncoded: false))
+        #expect(names.contains { $0.hasPrefix("state.json.invalid-") }, "\(names)")
+        #expect(!FileManager.default.fileExists(atPath: clone.path(percentEncoded: false)))
         await daemon.shutdown()
     }
 
@@ -209,7 +278,8 @@ struct PoolDaemonTests {
         _ = try pool.daemon()
     }
 
-    /// Removes clones and run files that belong to no stored lease, and keeps other entries.
+    /// Removes clones, partial clones, run files, and old logs that belong to no stored lease, and
+    /// keeps other entries.
     @Test func removesFilesWithoutLeasesOnStart() async throws {
         let pool = try PoolFixture()
         try pool.directory.prepare()
@@ -217,13 +287,26 @@ struct PoolDaemonTests {
         let manager = FileManager.default
         try manager.createDirectory(at: pool.directory.bundle(for: orphan).root, withIntermediateDirectories: false)
         try pool.directory.writeExitRecord(.lost, for: orphan)
+        let partial = pool.directory.partialBundle(for: orphan)
+        try manager.createDirectory(at: partial, withIntermediateDirectories: false)
         let other = pool.directory.leasesDirectory.appending(path: "keep")
         try manager.createDirectory(at: other, withIntermediateDirectories: false)
+        let logs = pool.directory.logsDirectory
+        let old = Date().addingTimeInterval(-8 * 24 * 3600)
+        for name in ["0a1b2c3d.log", "1a2b3c4d.log", "daemon.log"] {
+            try Data().write(to: logs.appending(path: name))
+        }
+        for name in ["0a1b2c3d.log", "daemon.log"] {
+            try manager.setAttributes([.modificationDate: old], ofItemAtPath: logs.appending(path: name).path())
+        }
 
         let daemon = try await pool.start()
         #expect(!manager.fileExists(atPath: pool.directory.bundle(for: orphan).root.path(percentEncoded: false)))
+        #expect(!manager.fileExists(atPath: partial.path(percentEncoded: false)))
         #expect(!manager.fileExists(atPath: pool.directory.exitRecord(for: orphan).path(percentEncoded: false)))
         #expect(manager.fileExists(atPath: other.path(percentEncoded: false)))
+        let kept = try manager.contentsOfDirectory(atPath: logs.path(percentEncoded: false)).sorted()
+        #expect(kept == ["1a2b3c4d.log", "daemon.log"])
         await daemon.shutdown()
     }
 }

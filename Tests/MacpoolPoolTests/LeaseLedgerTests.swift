@@ -252,7 +252,29 @@ struct LeaseLedgerTests {
         #expect(ledger.leases[id]?.restarts == 2)
     }
 
+    /// Ends a lease without a restart when its boot cannot succeed, and keeps the supervisor's
+    /// process identifier after a run ends.
+    @Test func endsLeaseWhoseBootCannotSucceed() throws {
+        var ledger = Self.ledger()
+        let id = try Self.readyLease(in: &ledger, for: Self.client(1))
+        ledger.supervisorLaunched(id, processID: 4242)
+        _ = ledger.machineExited(id, .lost, now: Self.at(10))
+        #expect(ledger.leases[id]?.supervisorProcessID == 4242)
+        _ = ledger.tick(now: Self.at(15))
+        #expect(ledger.leases[id]?.phase == .starting)
+
+        let failed = ledger.bootFailed(id, reason: "the clone failed")
+        #expect(failed == [.notify(Self.client(1), .ended(id, reason: "the clone failed")), .discard(id)])
+        #expect(ledger.leases[id]?.restarts == 1)
+        #expect(ledger.bootFailed(id, reason: "again").isEmpty)
+    }
+
     /// Applies each restart policy to each outcome.
+    ///
+    /// - Parameters:
+    ///   - policy: The lease's restart policy.
+    ///   - outcome: How the VM's run ended.
+    ///   - restarts: Whether the policy boots the VM again after that outcome.
     @Test(arguments: [
         (RestartPolicy.never, MachineOutcome.failed("x"), false),
         (.never, .guestShutdown, false),

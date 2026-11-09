@@ -66,6 +66,18 @@ struct MessageTests {
         }
     }
 
+    /// Writes the supervisor protocol version into every status and requires it when reading.
+    @Test func carriesSupervisorProtocolVersion() throws {
+        let status = SupervisorStatus(phase: .ready, address: "192.168.64.2")
+        let text = try String(decoding: MessageCoding.encoder.encode(status), as: UTF8.self)
+        #expect(text.contains(#""protocol":\#(SupervisorStatus.currentProtocol)"#), "\(text)")
+        #expect(try MessageCoding.decoder.decode(SupervisorStatus.self, from: Data(text.utf8)) == status)
+        // A supervisor from before the version field cannot be trusted.
+        #expect(throws: DecodingError.self) {
+            try MessageCoding.decoder.decode(SupervisorStatus.self, from: Data(#"{"phase":"ready"}"#.utf8))
+        }
+    }
+
     /// Rejects terms with relative paths or durations out of range.
     @Test func validatesTerms() {
         #expect(throws: Never.self) {

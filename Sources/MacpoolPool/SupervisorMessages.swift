@@ -97,7 +97,18 @@ public enum SupervisorPhase: String, Codable, Sendable {
 ///
 /// The supervisor sends its current status to every new connection and each later change on its
 /// own line.
+///
+/// Every status carries the supervisor's protocol version. A supervisor keeps running while a
+/// newer daemon replaces the old one, so the daemon checks the version before it trusts a status.
+/// A supervisor with another version, or one whose status the daemon cannot read, is stopped by
+/// signal and its lease boots again with a current supervisor.
 public struct SupervisorStatus: Codable, Sendable, Equatable {
+    /// The protocol version that this build's supervisors speak.
+    public static let currentProtocol = 1
+
+    /// The protocol version of the supervisor that sent the status.
+    public var protocolVersion: Int
+
     /// The VM's stage.
     public var phase: SupervisorPhase
 
@@ -107,13 +118,33 @@ public struct SupervisorStatus: Codable, Sendable, Equatable {
     /// How the run ended, once the phase is ``SupervisorPhase/exited``.
     public var outcome: MachineOutcome?
 
+    /// The JSON keys of a status.
+    private enum CodingKeys: String, CodingKey {
+        /// The `protocol` key.
+        case protocolVersion = "protocol"
+        /// The `phase` key.
+        case phase
+        /// The `address` key.
+        case address
+        /// The `outcome` key.
+        case outcome
+    }
+
     /// Creates a status.
     ///
     /// - Parameters:
     ///   - phase: The VM's stage.
     ///   - address: The guest's address once the VM is ready.
     ///   - outcome: How the run ended, for the exited phase.
-    public init(phase: SupervisorPhase, address: String? = nil, outcome: MachineOutcome? = nil) {
+    ///   - protocolVersion: The sender's protocol version, which is this build's own outside of
+    ///     tests.
+    public init(
+        phase: SupervisorPhase,
+        address: String? = nil,
+        outcome: MachineOutcome? = nil,
+        protocolVersion: Int = currentProtocol,
+    ) {
+        self.protocolVersion = protocolVersion
         self.phase = phase
         self.address = address
         self.outcome = outcome

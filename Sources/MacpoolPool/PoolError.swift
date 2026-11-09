@@ -85,6 +85,18 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// - Parameter reason: Why the start failed.
     case supervisorLaunch(reason: String)
 
+    /// Another supervisor of the lease still runs.
+    ///
+    /// - Parameter id: The lease's identifier.
+    case supervisorRunning(id: String)
+
+    /// The data directory could let another user reach the daemon's socket or its clones.
+    ///
+    /// - Parameters:
+    ///   - path: The directory that fails the check.
+    ///   - reason: What is wrong with its owner, type, or permissions.
+    case insecureDirectory(path: String, reason: String)
+
     /// A one-line description for logs and command output.
     public var description: String {
         switch self {
@@ -118,6 +130,10 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "the daemon closed the connection"
         case let .supervisorLaunch(reason):
             "the VM supervisor did not start: \(reason)"
+        case let .supervisorRunning(id):
+            "another supervisor of lease \(id) still runs"
+        case let .insecureDirectory(path, reason):
+            "the data directory \(path) is unsafe: \(reason)"
         }
     }
 

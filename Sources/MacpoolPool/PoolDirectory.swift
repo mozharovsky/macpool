@@ -72,6 +72,25 @@ public struct PoolDirectory: Sendable, Hashable {
         VMBundle(root: leasesDirectory.appending(path: id.rawValue))
     }
 
+    /// The place where the daemon builds a lease's clone before it gives the clone its identity.
+    ///
+    /// The clone moves to ``bundle(for:)`` only once it has its own machine identifier and MAC
+    /// address, so a crash in between never leaves a clone that shares its source's identity.
+    ///
+    /// - Parameter id: The lease's identifier.
+    /// - Returns: The partial clone's location.
+    func partialBundle(for id: LeaseID) -> URL {
+        leasesDirectory.appending(path: "\(id.rawValue).partial")
+    }
+
+    /// The file that a lease's supervisor locks for its whole life.
+    ///
+    /// - Parameter id: The lease's identifier.
+    /// - Returns: The lock file's location.
+    public func supervisorLock(for id: LeaseID) -> URL {
+        runDirectory.appending(path: "\(id.rawValue).lock")
+    }
+
     /// The socket on which a lease's supervisor reports its status.
     ///
     /// - Parameter id: The lease's identifier.
@@ -98,11 +117,18 @@ public struct PoolDirectory: Sendable, Hashable {
         logsDirectory.appending(path: "\(id.rawValue).log")
     }
 
-    /// Creates the directories and restricts the run directory to its owner.
+    /// Creates the directories, restricts the run directory to its owner, and checks that no other
+    /// user controls them.
+    ///
+    /// Another user who could replace the run directory could take over the daemon's socket, so
+    /// every directory must be a real directory that the current user owns and that others cannot
+    /// write to. Nobody else may enter the run directory.
     ///
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be
-    ///   created or its permissions cannot be set, or ``PoolError/socketPathTooLong(path:)`` when
-    ///   the sockets would not fit in a Unix socket address.
+    ///   created or its permissions cannot be set, ``PoolError/insecureDirectory(path:reason:)``
+    ///   when a directory is a symbolic link, belongs to another user, or is writable by others, or
+    ///   ``PoolError/socketPathTooLong(path:)`` when the sockets would not fit in a Unix socket
+    ///   address.
     public func prepare() throws(PoolError) {
         for directory in [root, runDirectory, leasesDirectory, logsDirectory] {
             do {
@@ -118,8 +144,43 @@ public struct PoolDirectory: Sendable, Hashable {
         guard chmod(runDirectory.path(percentEncoded: false), 0o700) == 0 else {
             throw .systemCall("restricting", runDirectory)
         }
+        for directory in [root, leasesDirectory, logsDirectory] {
+            try Self.checkOwnership(of: directory, forbidden: 0o022)
+        }
+        try Self.checkOwnership(of: runDirectory, forbidden: 0o077)
         try SocketPath.check(daemonSocket.path(percentEncoded: false))
         try SocketPath.check(supervisorSocket(for: LeaseID.random()).path(percentEncoded: false))
+    }
+
+    /// Checks that a directory is a real directory of the current user without forbidden
+    /// permissions.
+    ///
+    /// - Parameters:
+    ///   - directory: The directory to check.
+    ///   - forbidden: The permission bits that must be clear, such as `0o022` for write access by
+    ///     the group and others.
+    /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the check fails, or
+    ///   ``PoolError/fileSystem(operation:path:reason:)`` when the directory cannot be inspected.
+    private static func checkOwnership(of directory: URL, forbidden: mode_t) throws(PoolError) {
+        var path = directory.path(percentEncoded: false)
+        // A trailing slash would make lstat follow a symbolic link.
+        while path.count > 1, path.hasSuffix("/") {
+            path.removeLast()
+        }
+        var status = stat()
+        guard lstat(path, &status) == 0 else {
+            throw .systemCall("inspecting", directory)
+        }
+        guard status.st_mode & S_IFMT == S_IFDIR else {
+            throw .insecureDirectory(path: path, reason: "it is not a directory")
+        }
+        guard status.st_uid == getuid() else {
+            throw .insecureDirectory(path: path, reason: "another user owns it")
+        }
+        guard status.st_mode & forbidden == 0 else {
+            let mode = String(status.st_mode & 0o777, radix: 8)
+            throw .insecureDirectory(path: path, reason: "its permissions \(mode) let other users in")
+        }
     }
 
     /// Writes the record of how a supervisor's run ended.

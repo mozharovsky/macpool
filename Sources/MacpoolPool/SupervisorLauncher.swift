@@ -17,10 +17,20 @@ public struct SupervisorLaunch: Sendable, Equatable {
     public var bootTimeout: Int
 }
 
-/// Starts the supervisor process of a lease.
+/// A signal that ends a supervisor that does not stop on request.
+public enum SupervisorSignal: Sendable, Equatable {
+    /// Asks the supervisor to stop its VM and exit, as a stop command does.
+    case terminate
+
+    /// Ends the supervisor at once. Its VM ends with it.
+    case kill
+}
+
+/// Starts and signals the supervisor processes of leases.
 ///
-/// The daemon calls the launcher for every boot of a lease. The supervisor then listens on the
-/// lease's socket from ``PoolDirectory/supervisorSocket(for:)``, and the daemon connects to it.
+/// The daemon calls the launcher for every boot of a lease. The supervisor then takes the lease's
+/// ``SupervisorLock``, listens on the lease's socket from ``PoolDirectory/supervisorSocket(for:)``,
+/// and the daemon connects to it.
 public protocol SupervisorLauncher: Sendable {
     /// Starts a supervisor and returns once its process exists.
     ///
@@ -28,6 +38,18 @@ public protocol SupervisorLauncher: Sendable {
     /// - Returns: The supervisor's process identifier.
     /// - Throws: ``PoolError/supervisorLaunch(reason:)`` when the process cannot start.
     func launch(_ launch: SupervisorLaunch) async throws(PoolError) -> Int32
+
+    /// Sends a signal to a lease's supervisor.
+    ///
+    /// A process identifier can belong to another process after the supervisor exited, so an
+    /// implementation signals only a process that it can identify as the lease's supervisor.
+    ///
+    /// - Parameters:
+    ///   - signal: The signal to send.
+    ///   - processID: The identifier that the supervisor recorded in its lock.
+    ///   - id: The lease.
+    ///   - directory: The data directory.
+    func signal(_ signal: SupervisorSignal, processID: Int32, of id: LeaseID, in directory: PoolDirectory) async
 }
 
 /// Starts supervisors as `macpool supervise` processes in their own sessions.
@@ -124,5 +146,39 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
             }
         }
         return try started.get()
+    }
+
+    /// Sends a signal to a lease's supervisor after checking its command line.
+    ///
+    /// The process must run `supervise` with the data directory and the lease's identifier, so a
+    /// reused process identifier never reaches another process. A process identifier of 0 or less
+    /// is ignored.
+    ///
+    /// - Parameters:
+    ///   - signal: The signal to send.
+    ///   - processID: The identifier that the supervisor recorded in its lock.
+    ///   - id: The lease.
+    ///   - directory: The data directory.
+    public func signal(
+        _ signal: SupervisorSignal,
+        processID: Int32,
+        of id: LeaseID,
+        in directory: PoolDirectory,
+    ) async {
+        guard processID > 0 else {
+            return
+        }
+        let result = try? await run(
+            .path("/bin/ps"),
+            arguments: ["-ww", "-o", "command=", "-p", String(processID)],
+            output: .string(limit: 1 << 16),
+        )
+        // The arguments appear in the order that arguments(for:) writes them. Matching them as one
+        // run keeps a data directory that is a prefix of another from matching.
+        let expected = " supervise --data-dir \(directory.root.path(percentEncoded: false)) --lease \(id.rawValue) "
+        guard let command = result?.standardOutput, command.contains(expected) else {
+            return
+        }
+        kill(processID, signal == .kill ? SIGKILL : SIGTERM)
     }
 }
