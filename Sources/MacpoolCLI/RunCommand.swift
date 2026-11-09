@@ -243,6 +243,7 @@ struct RunCommand: AsyncParsableCommand {
             Report.measure("rotate_seconds", Report.seconds(clock.now - rotating, decimals: 1))
             Report.measure("host_key", key.fingerprint)
         }
+        try checkStopRequest(target)
         Report.line("ready")
 
         // Memory is sampled while the guest still runs, because a shutdown from inside the guest
