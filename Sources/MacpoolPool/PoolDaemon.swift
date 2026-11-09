@@ -130,6 +130,14 @@ public actor PoolDaemon {
         case endedByDaemon
         /// The supervisor still holds its lock after `SIGKILL`.
         case stuck
+        /// The supervisor still runs, because its lease ended and the state file does not record
+        /// that yet.
+        case deferred
+
+        /// Whether the supervisor no longer holds its lock.
+        var hasEnded: Bool {
+            self == .exited || self == .endedByDaemon
+        }
     }
 
     /// The settings and collaborators.
@@ -546,7 +554,8 @@ public actor PoolDaemon {
             configuration.logger.error("An earlier supervisor of a lease does not exit", metadata: ["lease": "\(id)"])
             return
         }
-        // The lease may have ended while the earlier supervisor exited.
+        // The lease may have ended while the daemon waited for the earlier supervisor. A deferred
+        // ending also arrives here, because only an ending lease defers its stop.
         guard ledger.leases[id]?.phase == .starting else {
             connecting.remove(id)
             if ledger.leases[id]?.phase == .stopping {
@@ -585,10 +594,6 @@ public actor PoolDaemon {
         if let channel = await connectToNewSupervisor(of: id) {
             connecting.remove(id)
             attach(channel, to: id)
-            return
-        }
-        guard !isStopDeferred(id) else {
-            connecting.remove(id)
             return
         }
         let reason = "the supervisor did not listen within \(configuration.supervisorConnectTimeout)"
@@ -687,8 +692,7 @@ public actor PoolDaemon {
     ///
     /// The supervisor sends its current status to every new connection, so a reconnect loses
     /// nothing. A supervisor that holds its lock but does not answer within the reconnect window
-    /// is stopped by command or signal, and its run counts as a failure. The supervisor of an
-    /// ending lease keeps running instead while ``isStopDeferred(_:)`` holds.
+    /// is stopped by command or signal, and its run counts as a failure.
     ///
     /// - Parameter id: The lease.
     private func recover(_ id: LeaseID) async {
@@ -719,10 +723,6 @@ public actor PoolDaemon {
         guard !isShutDown else {
             return
         }
-        guard !isStopDeferred(id) else {
-            connecting.remove(id)
-            return
-        }
         configuration.logger.warning("A running supervisor does not answer", metadata: ["lease": "\(id)"])
         let reason = "the supervisor did not answer within \(configuration.reconnectWindow)"
         await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
@@ -731,8 +731,8 @@ public actor PoolDaemon {
     /// Applies the end of a supervisor's run to the ledger.
     ///
     /// A supervisor that the daemon had to stop counts as failed, because a stop that the daemon
-    /// sent for its own reasons does not mean that the lease ended. A supervisor that is stuck
-    /// leaves the lease as it is, and a later tick tries again.
+    /// sent for its own reasons does not mean that the lease ended. A supervisor that is stuck or
+    /// deferred leaves the lease as it is, and a later tick tries again.
     ///
     /// - Parameters:
     ///   - id: The lease.
@@ -751,6 +751,8 @@ public actor PoolDaemon {
             outcome = .failed(reason)
         case .stuck:
             configuration.logger.error("A supervisor survives SIGKILL", metadata: ["lease": "\(id)"])
+            return
+        case .deferred:
             return
         }
         perform(ledger.machineExited(id, outcome, now: configuration.now()))
@@ -830,9 +832,6 @@ public actor PoolDaemon {
                 "lease": "\(id)",
                 "reason": "\(incompatibility)",
             ])
-            guard !isStopDeferred(id) else {
-                return
-            }
             connecting.insert(id)
             let reason = "the supervisor is incompatible: \(incompatibility)"
             await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
@@ -893,19 +892,29 @@ public actor PoolDaemon {
     /// Waits for a lease's supervisor to exit and ends it when it does not.
     ///
     /// After the first wait the daemon sends a stop command on the socket, then `SIGTERM`, then
-    /// `SIGKILL`, and waits ``Configuration/signalGrace`` after each step.
+    /// `SIGKILL`, and waits ``Configuration/signalGrace`` after each step. Other requests run during
+    /// these waits, so the lease can end in the meantime. Each step therefore checks
+    /// ``isStopDeferred(_:)`` first and leaves the supervisor running while it holds.
     ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - wait: The wait for the supervisor to exit on its own.
-    /// - Returns: How the supervisor ended.
+    /// - Returns: How the supervisor ended, or ``SupervisorEnding/deferred`` when it keeps running
+    ///   until a write of the state.
     private func endSupervisor(_ id: LeaseID, waitingFirst wait: Duration) async -> SupervisorEnding {
         let directory = configuration.directory
         if await waitForSupervisorExit(of: id, within: wait) {
             return .exited
         }
+        guard !isStopDeferred(id) else {
+            return .deferred
+        }
         let socket = directory.supervisorSocket(for: id)
         if let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2)) {
+            guard !isStopDeferred(id) else {
+                channel.close()
+                return .deferred
+            }
             try? channel.send(SupervisorCommand(.stop))
             await channel.finish()
             if await waitForSupervisorExit(of: id, within: configuration.signalGrace) {
@@ -913,6 +922,9 @@ public actor PoolDaemon {
             }
         }
         for signal in [SupervisorSignal.terminate, .kill] {
+            guard !isStopDeferred(id) else {
+                return .deferred
+            }
             // The lock records the process that holds it, which covers a supervisor whose launch
             // the daemon could not store.
             let recorded = SupervisorLock.holder(of: id, in: directory) ?? 0
@@ -968,16 +980,22 @@ public actor PoolDaemon {
     /// Deletes a lease's clone and files once its supervisor exited, and frees the slot.
     ///
     /// A supervisor that still runs after the release timeout is stopped by command or signal.
-    /// When it survives that, or another process holds the clone, the lease stays stopping and a
-    /// later tick tries again.
+    /// When it survives that, another process holds the clone, or a failed write of the state
+    /// defers the stop, the lease stays stopping and a later tick tries again.
     ///
     /// - Parameter id: The lease.
     private func discard(_ id: LeaseID) async {
         let directory = configuration.directory
         let clone = directory.bundle(for: id)
-        guard await endSupervisor(id, waitingFirst: configuration.releaseTimeout) != .stuck else {
+        switch await endSupervisor(id, waitingFirst: configuration.releaseTimeout) {
+        case .exited, .endedByDaemon:
+            break
+        case .stuck:
             discarding.remove(id)
             configuration.logger.error("A stopped lease's supervisor does not exit", metadata: ["lease": "\(id)"])
+            return
+        case .deferred:
+            discarding.remove(id)
             return
         }
         guard await waitForRelease(of: clone) else {
@@ -1072,7 +1090,7 @@ public actor PoolDaemon {
             } else {
                 configuration.logger.notice("Stopping a supervisor without a lease", metadata: ["lease": "\(id)"])
                 Task {
-                    if await self.endSupervisor(id, waitingFirst: .zero) != .stuck {
+                    if await self.endSupervisor(id, waitingFirst: .zero).hasEnded {
                         self.removeOrphan(id)
                     }
                 }

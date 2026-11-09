@@ -108,6 +108,34 @@ struct SupervisorRecoveryTests {
         await daemon.shutdown()
     }
 
+    /// Holds back the next signal when a release that the state file does not record arrives
+    /// while the daemon ends an unreachable supervisor.
+    @Test func releaseDuringSignalsDefersTheNextSignal() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        pool.launcher.plan(FakeBehavior(ignoresTerminate: true))
+        let granted = try await pool.readyLease(pool.terms(detached: true))
+        let id = granted.lease.id
+        granted.client.close()
+        await pool.launcher.dropConnections(id)
+        // After the reconnect window the daemon sends `SIGTERM` and waits half a second.
+        #expect(await eventually { !pool.launcher.signals().isEmpty })
+        let root = pool.directory.root.path(percentEncoded: false)
+        #expect(chmod(root, 0o500) == 0)
+        defer { chmod(root, 0o700) }
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        try await Task.sleep(for: .seconds(1))
+        #expect(pool.launcher.signals().map(\.signal) == [.terminate])
+        #expect(pool.launcher.isRunning(id))
+
+        #expect(chmod(root, 0o700) == 0)
+        await daemon.tick()
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        #expect(pool.launcher.signals().map(\.signal) == [.terminate, .terminate, .kill])
+        #expect(!pool.launcher.isRunning(id))
+        await daemon.shutdown()
+    }
+
     /// Ends a supervisor with another protocol version by signal and boots a current one.
     @Test func replacesIncompatibleSupervisor() async throws {
         let pool = try PoolFixture()
