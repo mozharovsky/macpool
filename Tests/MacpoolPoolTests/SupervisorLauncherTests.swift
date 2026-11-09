@@ -79,6 +79,7 @@ struct SupervisorLauncherTests {
         let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/opt/macpool"))
         let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
         let id = try #require(LeaseID("0a1b2c3d"))
-        await launcher.signal(.kill, processID: 0, of: id, in: directory)
+        #expect(await !launcher.identifies(processID: 0, of: id, in: directory))
+        launcher.send(.kill, to: 0, of: id, in: directory)
     }
 }

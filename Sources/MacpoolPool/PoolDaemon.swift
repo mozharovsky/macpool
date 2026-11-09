@@ -929,12 +929,18 @@ public actor PoolDaemon {
             // the daemon could not store.
             let recorded = SupervisorLock.holder(of: id, in: directory) ?? 0
             let processID = recorded > 0 ? recorded : ledger.leases[id]?.supervisorProcessID ?? 0
-            configuration.logger.warning("Signaling a supervisor", metadata: [
-                "lease": "\(id)",
-                "pid": "\(processID)",
-                "signal": "\(signal)",
-            ])
-            await configuration.launcher.signal(signal, processID: processID, of: id, in: directory)
+            if await configuration.launcher.identifies(processID: processID, of: id, in: directory) {
+                // The check of the process suspends, so the lease may have ended meanwhile.
+                guard !isStopDeferred(id) else {
+                    return .deferred
+                }
+                configuration.logger.warning("Signaling a supervisor", metadata: [
+                    "lease": "\(id)",
+                    "pid": "\(processID)",
+                    "signal": "\(signal)",
+                ])
+                configuration.launcher.send(signal, to: processID, of: id, in: directory)
+            }
             if await waitForSupervisorExit(of: id, within: configuration.signalGrace) {
                 return .endedByDaemon
             }

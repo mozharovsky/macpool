@@ -155,6 +155,9 @@ struct FakeBehavior: Sendable {
     /// Whether the supervisor survives `SIGTERM`.
     var ignoresTerminate = false
 
+    /// How long the check of the supervisor's process takes before a signal, like a slow `ps`.
+    var identifyDelay: Duration = .zero
+
     /// How long the supervisor keeps its locks after it closed its socket at the end of a run.
     var lingerAfterExit: Duration = .zero
 
@@ -213,6 +216,8 @@ final class FakeLauncher: SupervisorLauncher {
         var plans: [FakeBehavior] = []
         /// The signals that the daemon sent, in order.
         var signals: [ReceivedSignal] = []
+        /// The number of process checks that the daemon started.
+        var identifications = 0
     }
 
     /// The launcher's state.
@@ -272,6 +277,30 @@ final class FakeLauncher: SupervisorLauncher {
         return processID
     }
 
+    /// Accepts every process identifier after the supervisor's planned delay, so that
+    /// ``signals()`` records each signal the daemon sends.
+    ///
+    /// - Parameters:
+    ///   - processID: The identifier that the daemon read.
+    ///   - id: The lease.
+    ///   - directory: The data directory.
+    /// - Returns: `true`.
+    func identifies(processID _: Int32, of id: LeaseID, in _: PoolDirectory) async -> Bool {
+        let delay = state.withLock { state in
+            state.identifications += 1
+            return state.supervisors[id]?.behavior.identifyDelay ?? .zero
+        }
+        try? await Task.sleep(for: delay)
+        return true
+    }
+
+    /// Counts the process checks that the daemon started.
+    ///
+    /// - Returns: The number of checks.
+    func identifications() -> Int {
+        state.withLock { $0.identifications }
+    }
+
     /// Applies a signal to the supervisor whose identifier the daemon passed.
     ///
     /// - Parameters:
@@ -279,7 +308,7 @@ final class FakeLauncher: SupervisorLauncher {
     ///   - processID: The identifier that the daemon read.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    func signal(_ signal: SupervisorSignal, processID: Int32, of id: LeaseID, in directory: PoolDirectory) async {
+    func send(_ signal: SupervisorSignal, to processID: Int32, of id: LeaseID, in directory: PoolDirectory) {
         // A copy of the supervisor would hold its lock, so only the facts leave the state.
         let target = state.withLock { state -> (ignoresTerminate: Bool, hasExited: Bool)? in
             state.signals.append(ReceivedSignal(lease: id, signal: signal, processID: processID))
@@ -297,7 +326,7 @@ final class FakeLauncher: SupervisorLauncher {
         case .terminate where !target.hasExited:
             exit(id, .requested, directory: directory)
         case .terminate, .kill:
-            await crash(id)
+            Task { await self.crash(id) }
         }
     }
 
