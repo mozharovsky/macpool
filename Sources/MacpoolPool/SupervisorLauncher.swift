@@ -39,17 +39,30 @@ public protocol SupervisorLauncher: Sendable {
     /// - Throws: ``PoolError/supervisorLaunch(reason:)`` when the process cannot start.
     func launch(_ launch: SupervisorLaunch) async throws(PoolError) -> Int32
 
-    /// Sends a signal to a lease's supervisor.
+    /// Checks that a process is a lease's supervisor.
     ///
-    /// A process identifier can belong to another process after the supervisor exited, so an
-    /// implementation signals only a process that it can identify as the lease's supervisor.
+    /// A process identifier can belong to another process after the supervisor exited, so the
+    /// daemon sends a signal only to a process that this check identifies.
     ///
     /// - Parameters:
-    ///   - signal: The signal to send.
     ///   - processID: The identifier that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    func signal(_ signal: SupervisorSignal, processID: Int32, of id: LeaseID, in directory: PoolDirectory) async
+    /// - Returns: Whether the process runs as the lease's supervisor. An identifier of 0 or less
+    ///   never matches.
+    func identifies(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async -> Bool
+
+    /// Sends a signal to a process that ``identifies(processID:of:in:)`` recognized.
+    ///
+    /// The call does not suspend. The daemon checks its own state and sends the signal in one
+    /// step, so a lease that ends in between cannot receive a signal meant for an earlier state.
+    ///
+    /// - Parameters:
+    ///   - signal: The signal to send.
+    ///   - processID: The supervisor's process identifier. An identifier of 0 or less is ignored.
+    ///   - id: The lease.
+    ///   - directory: The data directory.
+    func send(_ signal: SupervisorSignal, to processID: Int32, of id: LeaseID, in directory: PoolDirectory)
 }
 
 /// Starts supervisors as `macpool supervise` processes in their own sessions.
@@ -148,32 +161,42 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
         return try started.get()
     }
 
-    /// Sends a signal to a lease's supervisor after checking its command line.
+    /// Checks a process's command line with `ps`.
     ///
     /// The process must run `supervise` with the data directory and the lease's identifier, so a
-    /// reused process identifier never reaches another process. A process identifier of 0 or less
-    /// is ignored.
+    /// reused process identifier never reaches another process.
     ///
     /// - Parameters:
-    ///   - signal: The signal to send.
     ///   - processID: The identifier that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    public func signal(
-        _ signal: SupervisorSignal,
-        processID: Int32,
-        of id: LeaseID,
-        in directory: PoolDirectory,
-    ) async {
+    /// - Returns: Whether the process runs as the lease's supervisor. An identifier of 0 or less
+    ///   never matches.
+    public func identifies(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async -> Bool {
         guard processID > 0 else {
-            return
+            return false
         }
         let result = try? await run(
             .path("/bin/ps"),
             arguments: ["-ww", "-o", "command=", "-p", String(processID)],
             output: .string(limit: 1 << 16),
         )
-        guard let command = result?.standardOutput, Self.isSupervisor(command, of: id, in: directory) else {
+        guard let command = result?.standardOutput else {
+            return false
+        }
+        return Self.isSupervisor(command, of: id, in: directory)
+    }
+
+    /// Sends `SIGTERM` or `SIGKILL` to a supervisor.
+    ///
+    /// - Parameters:
+    ///   - signal: The signal to send.
+    ///   - processID: The supervisor's process identifier. An identifier of 0 or less is ignored,
+    ///     because `kill` would apply it to a process group.
+    ///   - id: The lease, which the process identifier already names.
+    ///   - directory: The data directory, which the process identifier already names.
+    public func send(_ signal: SupervisorSignal, to processID: Int32, of _: LeaseID, in _: PoolDirectory) {
+        guard processID > 0 else {
             return
         }
         kill(processID, signal == .kill ? SIGKILL : SIGTERM)
@@ -181,8 +204,11 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
 
     /// Checks whether a process's command line belongs to a lease's supervisor.
     ///
-    /// The arguments must appear in the order that ``arguments(for:)`` writes them. Matching them
-    /// as one run keeps a data directory that is a prefix of another from matching.
+    /// The command must run `supervise` with the lease's identifier and a data directory that
+    /// resolves to the same root. The resolution accepts supervisors that an earlier daemon
+    /// started with another spelling of the directory, such as one with a trailing slash. The
+    /// lease argument must follow the directory at once, so a data directory whose path extends
+    /// the root's path, such as `/a/pool2` for `/a/pool`, does not match.
     ///
     /// - Parameters:
     ///   - command: The command line as `ps` prints it, with the arguments separated by spaces.
@@ -190,6 +216,17 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
     ///   - directory: The data directory.
     /// - Returns: Whether the command runs `supervise` for the lease in the data directory.
     static func isSupervisor(_ command: String, of id: LeaseID, in directory: PoolDirectory) -> Bool {
-        command.contains(" supervise --data-dir \(directory.root.path(percentEncoded: false)) --lease \(id.rawValue) ")
+        guard let start = command.range(of: " supervise --data-dir ")?.upperBound,
+              let end = command.range(of: " --lease \(id.rawValue) ", range: start ..< command.endIndex)?.lowerBound
+        else {
+            return false
+        }
+        let written = String(command[start ..< end])
+        // A relative path would resolve against the daemon's directory instead of the supervisor's.
+        guard written.hasPrefix("/") else {
+            return false
+        }
+        let resolved = PoolDirectory(root: URL(filePath: written)).root
+        return resolved.path(percentEncoded: false) == directory.root.path(percentEncoded: false)
     }
 }
