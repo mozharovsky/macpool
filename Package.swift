@@ -16,12 +16,13 @@ let strictSwiftSettings: [SwiftSetting] = [
     .enableUpcomingFeature("InferIsolatedConformances"),
 ]
 
-/// The macpool library, command line, and their tests.
+/// The macpool libraries, command line, and their tests.
 let package = Package(
     name: "macpool",
     platforms: [.macOS("27.0")],
     products: [
         .library(name: "MacpoolVM", targets: ["MacpoolVM"]),
+        .library(name: "MacpoolPool", targets: ["MacpoolPool"]),
         .executable(name: "macpool", targets: ["MacpoolCLI"]),
     ],
     dependencies: [
@@ -41,10 +42,20 @@ let package = Package(
             ],
             swiftSettings: strictSwiftSettings,
         ),
+        .target(
+            name: "MacpoolPool",
+            dependencies: [
+                "MacpoolVM",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Subprocess", package: "swift-subprocess"),
+            ],
+            swiftSettings: strictSwiftSettings,
+        ),
         .executableTarget(
             name: "MacpoolCLI",
             dependencies: [
                 "MacpoolVM",
+                "MacpoolPool",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Subprocess", package: "swift-subprocess"),
@@ -60,9 +71,19 @@ let package = Package(
             swiftSettings: strictSwiftSettings,
         ),
         .testTarget(
+            name: "MacpoolPoolTests",
+            dependencies: [
+                "MacpoolPool",
+                "MacpoolVM",
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: strictSwiftSettings,
+        ),
+        .testTarget(
             name: "MacpoolCLITests",
             dependencies: [
                 "MacpoolCLI",
+                "MacpoolPool",
                 "MacpoolVM",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Subprocess", package: "swift-subprocess"),

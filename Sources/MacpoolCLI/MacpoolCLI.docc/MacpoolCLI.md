@@ -1,6 +1,7 @@
 # ``MacpoolCLI``
 
-The `macpool` command line, which drives one VM's lifecycle step by step.
+The `macpool` command line, which drives one VM's lifecycle step by step and leases clones from
+the pool daemon.
 
 ## Overview
 
@@ -52,6 +53,18 @@ writes. `ip` answers only while a `run` holds the bundle.
 `--provision` and `--provision` on a bundle that has booted, because the guest applies
 provisioning only once.
 
+### Pool
+
+`macpool daemon` runs the pool daemon from MacpoolPool in the foreground, and
+`macpool daemon install` registers it as a launchd job in the user's session. `macpool lease`
+waits for a slot, prints the clone's lease identifier, bundle, and address, and holds the lease
+until Control-C, the end of a command after `--`, or `--detach` hands it to the daemon.
+`macpool release`, `macpool renew`, and `macpool list` act on leases by their identifiers.
+
+The daemon boots each lease through the hidden `macpool supervise` subcommand, which runs a
+``MachineSession`` in a process of its own. `run` uses the same session for a bundle that a person
+names.
+
 ## Topics
 
 ### Commands
@@ -63,6 +76,18 @@ provisioning only once.
 - ``RunCommand``
 - ``AddressCommand``
 
+### Pool commands
+
+- ``DaemonCommand``
+- ``DaemonRunCommand``
+- ``DaemonInstallCommand``
+- ``DaemonUninstallCommand``
+- ``LeaseCommand``
+- ``ReleaseCommand``
+- ``RenewCommand``
+- ``ListCommand``
+- ``SuperviseCommand``
+
 ### Support
 
 - ``CommandError``
@@ -70,3 +95,10 @@ provisioning only once.
 - ``Report``
 - ``LoggingOptions``
 - ``LogLevel``
+- ``MachineSession``
+- ``PoolOptions``
+- ``LeaseOutput``
+- ``Executable``
+- ``StopFlag``
+- ``SignalWatch``
+- ``Launchctl``
