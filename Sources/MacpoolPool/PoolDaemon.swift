@@ -281,7 +281,7 @@ public actor PoolDaemon {
     }
 
     /// Writes the state, applies expiries, restart times, and the reattach grace, signals
-    /// supervisors that ignore a stop, and retries unfinished clean-ups.
+    /// supervisors that ignore a stop, and retries unfinished stops and clean-ups.
     public func tick() {
         guard !isShutDown else {
             return
@@ -293,8 +293,11 @@ public actor PoolDaemon {
             let idle = links[id] == nil && !connecting.contains(id)
             switch record.phase {
             case .stopping:
-                if let sent = links[id]?.stopSentAt, now.timeIntervalSince(sent) >= stopGrace,
-                   !terminating.contains(id) {
+                if let link = links[id], link.stopSentAt == nil {
+                    // The stop waited for a write of the state.
+                    stopMachine(id)
+                } else if let sent = links[id]?.stopSentAt, now.timeIntervalSince(sent) >= stopGrace,
+                          !terminating.contains(id) {
                     terminating.insert(id)
                     Task { await self.terminateUnresponsive(id) }
                 } else if idle, !discarding.contains(id) {
@@ -827,7 +830,11 @@ public actor PoolDaemon {
         startRecovery(id)
     }
 
-    /// Asks a lease's supervisor to stop the VM.
+    /// Asks a lease's supervisor to stop the VM once the state file records the lease as stopping.
+    ///
+    /// A daemon that restarts after a failed write reads the lease as running. It would apply the
+    /// restart policy to the stopped VM and could boot a released lease again. The VM therefore
+    /// keeps running until a write succeeds, and the tick after that write sends the stop.
     ///
     /// A lease without a connection either has a launch or a reconnect under way, which sends the
     /// stop once it connects, or gets a reconnect now. The reconnect concludes the run when the
@@ -835,6 +842,9 @@ public actor PoolDaemon {
     ///
     /// - Parameter id: The lease.
     private func stopMachine(_ id: LeaseID) {
+        guard isStateSaved else {
+            return
+        }
         if var link = links[id] {
             try? link.channel.send(SupervisorCommand(.stop))
             link.stopSentAt = configuration.now()

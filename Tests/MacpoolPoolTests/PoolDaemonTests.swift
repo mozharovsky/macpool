@@ -28,8 +28,8 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
-    /// Keeps a released lease's clone until the state file records the release.
-    @Test func keepsCloneUntilStateRecordsRelease() async throws {
+    /// Keeps a released lease's VM and clone until the state file records the release.
+    @Test func keepsMachineUntilStateRecordsRelease() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
         let granted = try await pool.readyLease(pool.terms())
@@ -40,18 +40,49 @@ struct PoolDaemonTests {
         defer { chmod(root, 0o700) }
         #expect(try await PoolClient.send(.release(lease.id), to: pool.directory) == .released(lease.id))
         #expect(try await next(granted.client) == .ended(lease.id, reason: "released by a client"))
-        #expect(await eventually { !pool.launcher.isRunning(lease.id) })
         try await Task.sleep(for: .milliseconds(300))
+        #expect(pool.launcher.isRunning(lease.id))
         #expect(await daemon.summary().leases.map(\.phase) == [.stopping])
         #expect(FileManager.default.fileExists(atPath: lease.bundle))
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.map(\.phase) == [.ready])
 
         #expect(chmod(root, 0o700) == 0)
         await daemon.tick()
+        #expect(await eventually { !pool.launcher.isRunning(lease.id) })
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         #expect(!FileManager.default.fileExists(atPath: lease.bundle))
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.isEmpty)
         await daemon.shutdown()
+    }
+
+    /// Keeps a lease that always restarts from booting again when its release never reached the
+    /// state file before the daemon stopped.
+    @Test func unstoredReleaseDoesNotBootAgain() async throws {
+        let pool = try PoolFixture()
+        let first = try await pool.start()
+        let terms = LeaseTerms(source: pool.source, timeToLive: 3600, restartPolicy: .always, detached: true)
+        let granted = try await pool.readyLease(terms)
+        let id = granted.lease.id
+        granted.client.close()
+        let root = pool.directory.root.path(percentEncoded: false)
+        #expect(chmod(root, 0o500) == 0)
+        defer { chmod(root, 0o700) }
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        try await Task.sleep(for: .milliseconds(300))
+        await first.shutdown()
+        #expect(chmod(root, 0o700) == 0)
+
+        // The state still records the lease as ready, and its VM still runs.
+        let second = try await pool.start()
+        try await Task.sleep(for: .milliseconds(500))
+        pool.clock.advance(by: 5)
+        await second.tick()
+        #expect(await second.summary().leases.map(\.phase) == [.ready])
+        #expect(pool.launcher.launches(of: id) == 1)
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        #expect(await eventually { await second.summary().leases.isEmpty })
+        #expect(pool.launcher.launches(of: id) == 1)
+        await second.shutdown()
     }
 
     /// Queues requests by priority and grants the slot when the attached client leaves.
