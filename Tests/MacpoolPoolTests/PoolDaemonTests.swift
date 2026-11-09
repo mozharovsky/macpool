@@ -252,11 +252,11 @@ struct PoolDaemonTests {
             }
         }
         #expect(chmod(root, 0o700) == 0)
-        try FileManager.default.removeItem(atPath: root + "run")
+        try FileManager.default.removeItem(atPath: root + "/run")
         let elsewhere = pool.root.url.appending(path: "elsewhere", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: false)
         try FileManager.default.createSymbolicLink(
-            atPath: root + "run",
+            atPath: root + "/run",
             withDestinationPath: elsewhere.path(percentEncoded: false),
         )
         #expect {

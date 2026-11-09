@@ -181,8 +181,11 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
 
     /// Checks whether a process's command line belongs to a lease's supervisor.
     ///
-    /// The arguments must appear in the order that ``arguments(for:)`` writes them. Matching them
-    /// as one run keeps a data directory that is a prefix of another from matching.
+    /// The command must run `supervise` with the lease's identifier and a data directory that
+    /// resolves to the same root. The resolution accepts supervisors that an earlier daemon
+    /// started with another spelling of the directory, such as one with a trailing slash. The
+    /// lease argument must follow the directory at once, so a data directory whose path extends
+    /// the root's path, such as `/a/pool2` for `/a/pool`, does not match.
     ///
     /// - Parameters:
     ///   - command: The command line as `ps` prints it, with the arguments separated by spaces.
@@ -190,6 +193,17 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
     ///   - directory: The data directory.
     /// - Returns: Whether the command runs `supervise` for the lease in the data directory.
     static func isSupervisor(_ command: String, of id: LeaseID, in directory: PoolDirectory) -> Bool {
-        command.contains(" supervise --data-dir \(directory.root.path(percentEncoded: false)) --lease \(id.rawValue) ")
+        guard let start = command.range(of: " supervise --data-dir ")?.upperBound,
+              let end = command.range(of: " --lease \(id.rawValue) ", range: start ..< command.endIndex)?.lowerBound
+        else {
+            return false
+        }
+        let written = String(command[start ..< end])
+        // A relative path would resolve against the daemon's directory instead of the supervisor's.
+        guard written.hasPrefix("/") else {
+            return false
+        }
+        let resolved = PoolDirectory(root: URL(filePath: written)).root
+        return resolved.path(percentEncoded: false) == directory.root.path(percentEncoded: false)
     }
 }

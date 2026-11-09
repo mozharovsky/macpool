@@ -21,9 +21,33 @@ public struct PoolDirectory: Sendable, Hashable {
 
     /// Refers to a data directory without checking its contents.
     ///
+    /// The root takes one form for every spelling of the same directory. It is absolute, ends
+    /// without a slash, and has its symbolic links resolved as far as the path exists. Two
+    /// spellings of one directory therefore produce equal values.
+    ///
     /// - Parameter root: The data directory. A relative URL resolves against the current directory.
     public init(root: URL) {
-        self.root = root.absoluteURL.standardizedFileURL
+        self.root = Self.resolve(root.absoluteURL.standardizedFileURL)
+    }
+
+    /// Resolves the symbolic links of a path's longest existing prefix.
+    ///
+    /// The directory may not exist yet, because ``prepare()`` creates it. The components after the
+    /// existing prefix stay as written.
+    ///
+    /// - Parameter url: An absolute file URL without `.` and `..` components.
+    /// - Returns: The resolved URL without a trailing slash.
+    private static func resolve(_ url: URL) -> URL {
+        let path = url.path(percentEncoded: false)
+        if let resolved = realpath(path, nil) {
+            defer { free(resolved) }
+            return URL(filePath: String(cString: resolved), directoryHint: .notDirectory)
+        }
+        let parent = url.deletingLastPathComponent()
+        guard parent.path(percentEncoded: false).count < path.count else {
+            return url
+        }
+        return resolve(parent).appending(path: url.lastPathComponent, directoryHint: .notDirectory)
     }
 
     /// The default data directory, `~/Library/Application Support/macpool`.
