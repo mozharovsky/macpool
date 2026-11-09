@@ -149,6 +149,8 @@ lease boots again or ends as after a crash.
 A malformed state file moves aside as `state.json.invalid-TIME`. The daemon then starts without
 leases and stops the VMs that it finds. A state file in a format version that this build does not
 read, or one that cannot be opened, keeps the daemon from starting, and the VMs keep running.
+While the state file cannot be written, an ended lease keeps its clone and slot. The daemon retries
+the write every second and deletes the clone after a write succeeds.
 
 ## Known limitations
 

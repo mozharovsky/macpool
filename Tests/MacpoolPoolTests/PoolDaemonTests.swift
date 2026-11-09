@@ -28,6 +28,32 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
+    /// Keeps a released lease's clone until the state file records the release.
+    @Test func keepsCloneUntilStateRecordsRelease() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let granted = try await pool.readyLease(pool.terms())
+        let lease = granted.lease
+        // A read-only data directory makes every write of the state fail.
+        let root = pool.directory.root.path(percentEncoded: false)
+        #expect(chmod(root, 0o500) == 0)
+        defer { chmod(root, 0o700) }
+        #expect(try await PoolClient.send(.release(lease.id), to: pool.directory) == .released(lease.id))
+        #expect(try await next(granted.client) == .ended(lease.id, reason: "released by a client"))
+        #expect(await eventually { !pool.launcher.isRunning(lease.id) })
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await daemon.summary().leases.map(\.phase) == [.stopping])
+        #expect(FileManager.default.fileExists(atPath: lease.bundle))
+        #expect(try PoolStore(file: pool.directory.stateFile).load().leases.map(\.phase) == [.ready])
+
+        #expect(chmod(root, 0o700) == 0)
+        await daemon.tick()
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        #expect(!FileManager.default.fileExists(atPath: lease.bundle))
+        #expect(try PoolStore(file: pool.directory.stateFile).load().leases.isEmpty)
+        await daemon.shutdown()
+    }
+
     /// Queues requests by priority and grants the slot when the attached client leaves.
     @Test func queuesRequestsUntilSlotFrees() async throws {
         let pool = try PoolFixture()

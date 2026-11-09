@@ -174,6 +174,9 @@ public actor PoolDaemon {
     /// Whether ``shutdown()`` ran, after which the daemon ignores events.
     private var isShutDown = false
 
+    /// Whether the last write of the state file succeeded.
+    private var isStateSaved = true
+
     /// The phase of each lease when the daemon last logged it.
     ///
     /// Clients receive only the changes of their own leases, so the log follows the ledger
@@ -277,8 +280,8 @@ public actor PoolDaemon {
         configuration.logger.info("Stopped listening. Supervisors keep running.")
     }
 
-    /// Applies expiries, restart times, and the reattach grace, signals supervisors that ignore a
-    /// stop, and retries unfinished clean-ups.
+    /// Writes the state, applies expiries, restart times, and the reattach grace, signals
+    /// supervisors that ignore a stop, and retries unfinished clean-ups.
     public func tick() {
         guard !isShutDown else {
             return
@@ -457,7 +460,9 @@ public actor PoolDaemon {
         }
         do {
             try store.save(ledger.state)
+            isStateSaved = true
         } catch {
+            isStateSaved = false
             configuration.logger.error("The pool state could not be saved", metadata: ["error": "\(error)"])
         }
         logChanges()
@@ -913,11 +918,15 @@ public actor PoolDaemon {
 
     // MARK: Clean-up
 
-    /// Starts deleting a lease's clone unless that is under way.
+    /// Starts deleting a lease's clone unless that is under way or the state file is out of date.
+    ///
+    /// A clone goes only after the state file records its lease as stopping. Otherwise a daemon
+    /// that restarts after a failed write would find the lease running without a clone and boot it
+    /// again. Every tick writes the state, and a tick after a successful write starts the deletion.
     ///
     /// - Parameter id: The lease.
     private func startDiscard(_ id: LeaseID) {
-        guard !discarding.contains(id) else {
+        guard isStateSaved, !discarding.contains(id) else {
             return
         }
         discarding.insert(id)
