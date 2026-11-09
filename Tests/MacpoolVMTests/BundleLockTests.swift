@@ -31,6 +31,7 @@ struct BundleLockTests {
         let directory = try TemporaryDirectory()
         let source = VMBundle(root: directory.url.appending(path: "source"))
         try FileManager.default.createDirectory(at: source.root, withIntermediateDirectories: false)
+        try VMBundleTests.settingsJSON.write(to: source.settingsFile, atomically: true, encoding: .utf8)
         let lock = try BundleLock(bundle: source)
         let clone = try source.clone(to: directory.url.appending(path: "clone"))
         #expect(FileManager.default.fileExists(atPath: clone.lockFile.path(percentEncoded: false)))

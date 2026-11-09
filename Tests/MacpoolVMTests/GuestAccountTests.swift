@@ -44,6 +44,35 @@ struct GuestAccountTests {
         #expect(try GuestAccount.loadOrCreate(in: bundle) == account)
     }
 
+    /// Replaces an account file atomically with owner-only permissions, even over a readable file.
+    @Test func replacesAccountPrivately() throws {
+        let directory = try TemporaryDirectory()
+        let file = directory.url.appending(path: "account.json")
+        try Data("{}".utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: file.path(percentEncoded: false),
+        )
+        let account = GuestAccount(fullName: "macpool", username: "macpool", password: "first")
+        try account.write(to: file)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path(percentEncoded: false))
+        #expect((attributes[.posixPermissions] as? Int) == 0o600)
+        #expect(try GuestAccount.load(from: file) == account)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.url.path(percentEncoded: false))
+        #expect(names == ["account.json"])
+    }
+
+    /// Keeps the names and replaces the password with a new random one.
+    @Test func generatesNewPassword() {
+        let account = GuestAccount(fullName: "Full", username: "short", password: "old")
+        let rotated = account.withNewPassword()
+        #expect(rotated.fullName == "Full")
+        #expect(rotated.username == "short")
+        #expect(rotated.password != account.password)
+        #expect(rotated.password.count == GuestAccount.passwordLength)
+        #expect(rotated.withNewPassword().password != rotated.password)
+    }
+
     /// Reads an account file in the layout that existing bundles use.
     @Test func readsExistingAccount() throws {
         let directory = try TemporaryDirectory()

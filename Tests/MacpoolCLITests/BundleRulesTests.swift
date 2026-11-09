@@ -28,6 +28,16 @@ struct BundleRulesTests {
         #expect(!FileManager.default.fileExists(atPath: directory.bundle.guestAccountFile.path(percentEncoded: false)))
     }
 
+    /// Refuses to boot a clone whose credential rotation did not finish.
+    @Test func refusesIncompleteRotation() async throws {
+        let directory = try BundleDirectory(hasBooted: true, credentialRotation: .started)
+        let command = try #require(try Macpool.parseAsRoot(["run", "--bundle", directory.path]) as? RunCommand)
+        await #expect(throws: CommandError.library(.credentialRotationIncomplete(path: directory.path))) {
+            try await command.run()
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.bundle.lockFile.path(percentEncoded: false)))
+    }
+
     /// Refuses to clone a bundle that another command holds.
     @Test func refusesCloneOfLockedSource() async throws {
         let directory = try BundleDirectory(hasBooted: true)
@@ -67,9 +77,11 @@ private final class BundleDirectory {
 
     /// Creates the bundle with a boot record.
     ///
-    /// - Parameter hasBooted: The boot record to store.
+    /// - Parameters:
+    ///   - hasBooted: The boot record to store.
+    ///   - credentialRotation: The rotation record to store.
     /// - Throws: An error when the directory or the settings cannot be written.
-    init(hasBooted: Bool?) throws {
+    init(hasBooted: Bool?, credentialRotation: CredentialRotationState? = nil) throws {
         let parent = FileManager.default.temporaryDirectory.appending(path: "macpool-cli-tests-\(UUID().uuidString)")
         bundle = VMBundle(root: parent.appending(path: "bundle"))
         try FileManager.default.createDirectory(at: bundle.root, withIntermediateDirectories: true)
@@ -79,6 +91,7 @@ private final class BundleDirectory {
             macAddress: VMBundle.randomMACAddress(),
             build: "26B123",
             hasBooted: hasBooted,
+            credentialRotation: credentialRotation,
         ))
     }
 

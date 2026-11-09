@@ -12,6 +12,12 @@ import MacpoolVM
 /// The command holds the bundle's lock while it runs. It records the first boot in the bundle's
 /// settings, refuses a first boot without `--provision`, and refuses `--provision` after it,
 /// because the guest applies provisioning only on its first boot after the install.
+///
+/// On a clone's first run the command replaces the guest password and SSH host keys that the
+/// clone inherited, through `CredentialRotation` from MacpoolVM, before it prints `ready`. It
+/// waits for SSH for that step even without `--wait-ssh`. When the rotation fails, the command
+/// stops the VM. A failure after the guest started to change leaves a record that later runs
+/// refuse.
 struct RunCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -47,7 +53,13 @@ struct RunCommand: AsyncParsableCommand {
     var provision = false
 
     /// Whether to wait for the guest's SSH server after its address appears.
-    @Flag(name: .customLong("wait-ssh"), help: "Waits for the guest's SSH server after its address appears.")
+    @Flag(
+        name: .customLong("wait-ssh"),
+        help: """
+        Waits for the guest's SSH server after its address appears. \
+        A clone's first run always waits, because it replaces the inherited credentials over SSH.
+        """,
+    )
     var waitSSH = false
 
     /// The longest wait for the guest's address and SSH server, in seconds.
@@ -94,6 +106,9 @@ struct RunCommand: AsyncParsableCommand {
             throw .invalidValue("the bundle's MAC address \(settings.macAddress) is malformed")
         }
         let logger = logging.makeLogger(label: "macpool.run")
+        if settings.credentialRotation == .started {
+            throw .library(.credentialRotationIncomplete(path: target.root.path(percentEncoded: false)))
+        }
         switch (settings.hasBooted, provision) {
         case (false, false):
             throw .firstBootNeedsProvisioning
@@ -143,6 +158,7 @@ struct RunCommand: AsyncParsableCommand {
                 macAddress: macAddress,
                 previousLease: previousLease,
                 started: started,
+                rotatesCredentials: settings.credentialRotation == .pending,
             )
         } catch {
             // The VM would otherwise keep running until this process exits.
@@ -160,7 +176,10 @@ struct RunCommand: AsyncParsableCommand {
     ///   - macAddress: The guest's MAC address.
     ///   - previousLease: The guest's lease before this boot, which a new boot replaces.
     ///   - started: The time the start began.
-    /// - Throws: ``CommandError`` when a step times out or the VM stops early.
+    ///   - rotatesCredentials: Whether the bundle is a clone whose inherited credentials this run
+    ///     replaces before the VM counts as ready.
+    /// - Throws: ``CommandError`` when a step times out, the credential rotation fails, or the VM
+    ///   stops early.
     private func attend(
         _ machine: VirtualMachine,
         processID: Int32?,
@@ -168,6 +187,7 @@ struct RunCommand: AsyncParsableCommand {
         macAddress: MACAddress,
         previousLease: DHCPLease?,
         started: ContinuousClock.Instant,
+        rotatesCredentials: Bool,
     ) async throws(CommandError) {
         let clock = ContinuousClock()
         if let processID {
@@ -189,7 +209,7 @@ struct RunCommand: AsyncParsableCommand {
         Report.measure("ip_seconds", Report.seconds(clock.now - started, decimals: 1))
         Report.measure("ip_address", address)
 
-        if waitSSH {
+        if waitSSH || rotatesCredentials {
             while await !SSHProbe.answers(host: address) {
                 try await checkEvents(machine)
                 guard clock.now < deadline else {
@@ -198,6 +218,15 @@ struct RunCommand: AsyncParsableCommand {
                 try? await Task.sleep(for: Self.sshInterval)
             }
             Report.measure("ssh_seconds", Report.seconds(clock.now - started, decimals: 1))
+        }
+        if rotatesCredentials {
+            let rotating = clock.now
+            let logger = logging.makeLogger(label: "macpool.credentials")
+            let key = try await library { () async throws(MacpoolError) in
+                try await CredentialRotation.rotate(bundle: target, address: address, logger: logger)
+            }
+            Report.measure("rotate_seconds", Report.seconds(clock.now - rotating, decimals: 1))
+            Report.measure("host_key", key.fingerprint)
         }
         Report.line("ready")
 

@@ -31,6 +31,48 @@ enum FileSystem {
         }
     }
 
+    /// Replaces a file atomically with contents that only the owner can read.
+    ///
+    /// `Data.write(to:options:)` creates its temporary file with the default permissions, which
+    /// would expose a password between the write and a later `chmod`. This call creates the
+    /// temporary file with owner-only permissions and renames it over the target, so readers see
+    /// either the old or the new contents.
+    ///
+    /// - Parameters:
+    ///   - url: The file to replace or create.
+    ///   - contents: The bytes to write.
+    ///   - operation: The description used in an error, such as `writing the guest account`.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the temporary file cannot
+    ///   be written or renamed.
+    static func replacePrivateFile(at url: URL, contents: Data, for operation: String) throws(MacpoolError) {
+        let temporary = url.deletingLastPathComponent()
+            .appending(path: ".\(url.lastPathComponent).\(UUID().uuidString)")
+        do {
+            try createNewFile(at: temporary, contents: contents, permissions: 0o600)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
+        guard rename(temporary.filePath, url.filePath) == 0 else {
+            let failure = MacpoolError.systemCall(operation, url)
+            try? FileManager.default.removeItem(at: temporary)
+            throw failure
+        }
+    }
+
+    /// Removes a file when it exists.
+    ///
+    /// - Parameters:
+    ///   - url: The file to remove.
+    ///   - operation: The description used in an error.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file exists and
+    ///   cannot be removed.
+    static func removeIfPresent(_ url: URL, for operation: String) throws(MacpoolError) {
+        guard unlink(url.filePath) == 0 || errno == ENOENT else {
+            throw .systemCall(operation, url)
+        }
+    }
+
     /// Reads a whole file.
     ///
     /// - Parameters:

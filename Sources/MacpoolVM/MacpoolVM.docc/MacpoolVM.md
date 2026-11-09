@@ -11,8 +11,9 @@ them headless with NAT networking and an optional shared directory.
 A ``VMBundle`` is a directory that holds everything a stopped VM needs. A clone of the directory
 becomes a second VM once ``VMBundle/assignIdentity()`` gives it a new machine identifier and MAC
 address. Cloning takes milliseconds, and the clone shares every block with its source until one
-of them writes. The clone also keeps the source's guest account and SSH host keys, so clones of
-one bundle accept the same password.
+of them writes. The clone starts with the source's guest account and SSH host keys, and
+``CredentialRotation`` replaces both on the clone's first boot. The bundle then pins the new host
+key as a ``HostKey`` and records the progress as ``CredentialRotationState``.
 
 A ``BundleLock`` marks a bundle in use. Commands hold it while a VM runs from the bundle or while
 they copy it, which keeps a clone from capturing a disk that a guest writes.
@@ -46,6 +47,7 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 - ``BundleSettings``
 - ``GuestAccount``
 - ``BundleLock``
+- ``CredentialRotationState``
 
 ### Restore images
 
@@ -67,6 +69,8 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 - ``DHCPLease``
 - ``MACAddress``
 - ``SSHProbe``
+- ``CredentialRotation``
+- ``HostKey``
 
 ### Errors
 

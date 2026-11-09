@@ -37,6 +37,7 @@ let package = Package(
             name: "MacpoolVM",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Subprocess", package: "swift-subprocess"),
             ],
             swiftSettings: strictSwiftSettings,
         ),
@@ -52,7 +53,10 @@ let package = Package(
         ),
         .testTarget(
             name: "MacpoolVMTests",
-            dependencies: ["MacpoolVM"],
+            dependencies: [
+                "MacpoolVM",
+                .product(name: "Logging", package: "swift-log"),
+            ],
             swiftSettings: strictSwiftSettings,
         ),
         .testTarget(

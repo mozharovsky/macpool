@@ -57,6 +57,22 @@ Scripts/ssh.sh .cache/vms/clone1 'ls "/Volumes/My Shared Files"'
 it, `create` removes the bundle. `clone` copies a stopped bundle with APFS in milliseconds and gives
 the copy a new machine identifier and MAC address.
 
+A clone starts with its source's guest password and SSH host keys, because its disk holds the
+same account. Its first `run` replaces both before it prints `ready`, and waits for SSH for that
+step even without `--wait-ssh`. It logs in with the inherited account and checks the host key that
+the copied `known_hosts` pins. The guest then generates new host keys and changes the account to a
+new random password, together with its login keychain and automatic login. `run` logs in again
+with the new password and only the new Ed25519 key. It then stores the password in the clone's
+`guest-account.json` with owner-only permissions and pins the key in the clone's `known_hosts`.
+The step prints `measure rotate_seconds` and `measure host_key`.
+
+The clone's `settings.json` records the step as `credential_rotation`. When the first login fails,
+the record stays `pending`, `run` stops the VM, and the next `run` tries again. A failure after
+the guest started to change, or a run interrupted during the step, leaves `started`. `run`,
+`clone`, and `Scripts/ssh.sh` refuse such a clone, so delete it and clone the source again. A
+clone of a bundle that never booted needs no rotation. `clone` drops the copied account and
+`known_hosts`, and the clone's provisioning boot creates its own account.
+
 `run` and `create` hold an `flock` lock on the bundle's `lock` file. `clone` refuses a source that
 a command holds, so it never copies a disk that a running guest writes. `ip` prints an address only
 while a `run` holds the bundle and its DHCP lease is current.
@@ -73,7 +89,10 @@ Measurements and the address go to standard output. Diagnostics go to standard e
 random password and owner-only permissions. The guest applies it only on its first boot after the
 install. `run` records that boot as `has_booted` in `settings.json`. It refuses a first boot
 without `--provision` and a later `--provision`, because either would leave the guest without the
-account. `Scripts/ssh.sh` logs in with that account and keeps a `known_hosts` file per bundle.
+account. `Scripts/ssh.sh` logs in with that account and keeps a `known_hosts` file per bundle. The
+file names the guest by the alias `macpool-guest` rather than its address, which can change
+between boots, and `ssh` accepts only an Ed25519 key that matches it. The first connection to a
+provisioned bundle pins its key.
 
 macOS answers the virtual power button with a dialog. A run that ends by request therefore forces
 the stop after 90 seconds. A clean stop comes from inside the guest. `Scripts/shutdown.sh BUNDLE`
@@ -85,11 +104,16 @@ Every command prints `measure key=value` lines with its timings and sizes.
 
 ## Known limitations
 
-- Clones share their source's guest credentials. `clone` copies `guest-account.json`, and the
-  cloned disk carries the source's SSH host keys. Every clone of a bundle therefore has the same
-  administrator password and host key as its source and its siblings. Two VMs can run at once on
-  the same NAT network, so a process in one guest that learns the password can log into the other.
-  Rotating both per clone is planned.
+- A clone accepts its source's password and presents its source's host key from its first boot
+  until the rotation in its first `run` ends. The rotation took 11 to 14 seconds after SSH
+  answered when one clone booted alone, and 16 to 69 seconds when two clones booted at once on a
+  busy host. During that window, another guest on the NAT network that knows the source's password
+  can log into the clone. The source itself and clones that have not run yet keep the shared
+  credentials.
+- When the source's `known_hosts` pins no Ed25519 key, the rotation trusts the first key that the
+  clone presents. One `Scripts/ssh.sh` call to the provisioned source pins its key.
+- The guest tools that change the password take the old and the new password as arguments.
+  Other processes in the guest can read them during the second the change takes.
 - The host finds a guest's service process by comparing process listings from before and after
   the start. When another VM starts in the same moment, `run` skips the priority change and the
   memory sample.
