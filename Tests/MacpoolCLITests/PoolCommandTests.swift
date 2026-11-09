@@ -125,4 +125,27 @@ struct PoolCommandTests {
             "queued 1: priority 5, since 1970-01-01T00:00:00Z, /vms/base",
         ])
     }
+
+    /// Leaves a running supervisor's socket and exit record alone when its lease is supervised.
+    @Test func superviseRefusesLeaseWithRunningSupervisor() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appending(path: "mp-" + UUID().uuidString.prefix(8).lowercased(), directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let directory = PoolDirectory(root: parent)
+        try directory.prepare()
+        let id = try #require(LeaseID("0a1b2c3d"))
+        let lock = try SupervisorLock(of: id, in: directory, processID: 4242)
+        try directory.writeExitRecord(.requested, for: id)
+        let command = try #require(
+            try Macpool.parseAsRoot([
+                "supervise", "--data-dir", parent.path(percentEncoded: false), "--lease", id.rawValue,
+            ]) as? SuperviseCommand,
+        )
+        await #expect(throws: CommandError.pool(.supervisorRunning(id: id.rawValue))) {
+            try await command.run()
+        }
+        #expect(directory.readExitRecord(for: id) == .requested)
+        #expect(SupervisorLock.holder(of: id, in: directory) == 4242)
+        withExtendedLifetime(lock) {}
+    }
 }

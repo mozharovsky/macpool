@@ -86,7 +86,8 @@ struct DaemonRunCommand: AsyncParsableCommand {
 /// Installs the daemon as a launchd job in the user's login session and starts it.
 ///
 /// The job runs the executable that runs this command, so a later build at the same path takes
-/// effect at the job's next start.
+/// effect at the job's next start. Installing again replaces a loaded job and restarts the daemon,
+/// while leased VMs keep running under their supervisors.
 struct DaemonInstallCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -138,6 +139,10 @@ struct DaemonInstallCommand: AsyncParsableCommand {
                 reason: error.localizedDescription,
             ))
         }
+        // launchd refuses to load a job that is already loaded.
+        if await Launchctl.bootOut() {
+            Report.line("stopped the loaded job")
+        }
         try await Launchctl.run(["bootstrap", Launchctl.domain, file.path(percentEncoded: false)])
         Report.line("installed \(file.path(percentEncoded: false))")
         Report.line("log \(agent.logFile.path(percentEncoded: false))")
@@ -155,18 +160,20 @@ struct DaemonUninstallCommand: AsyncParsableCommand {
         abstract: "Stops the daemon's launchd job and removes it.",
     )
 
-    /// Unloads the job and deletes its property list.
+    /// Unloads the job when it is loaded and deletes its property list.
     ///
-    /// - Throws: ``CommandError`` when launchd rejects the request or the file cannot be removed.
+    /// - Throws: ``CommandError`` when the file cannot be removed.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when launchd rejects the request or the file cannot be removed.
+    /// - Throws: ``CommandError`` when the file cannot be removed.
     private func perform() async throws(CommandError) {
-        try await Launchctl.run(["bootout", "\(Launchctl.domain)/\(LaunchAgent.label)"])
+        if await !(Launchctl.bootOut()) {
+            Report.line("no loaded job to stop")
+        }
         let file = LaunchAgent.propertyListFile
         do {
             try FileManager.default.removeItem(at: file)
@@ -209,5 +216,21 @@ enum Launchctl {
         guard status.isSuccess else {
             throw .tool("launchctl", reason: "\(arguments.first ?? "") ended with \(status)")
         }
+    }
+
+    /// Unloads the daemon's job and stops the daemon when launchd has the job loaded.
+    ///
+    /// The call discards `launchctl`'s output, because a job that is not loaded is an expected
+    /// state for both install and uninstall.
+    ///
+    /// - Returns: Whether `launchctl` unloaded a job.
+    static func bootOut() async -> Bool {
+        let status = try? await Subprocess.run(
+            .path("/bin/launchctl"),
+            arguments: ["bootout", "\(domain)/\(LaunchAgent.label)"],
+            output: .discarded,
+            error: .discarded,
+        ).terminationStatus
+        return status?.isSuccess == true
     }
 }

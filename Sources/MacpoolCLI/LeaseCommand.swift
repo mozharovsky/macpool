@@ -15,7 +15,8 @@ import System
 /// releases it, and so does the end of the command after `--`. The command runs with
 /// `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS` in its environment, and
 /// `macpool lease` exits with its status. When the daemon restarts, the command reconnects and
-/// keeps the lease.
+/// keeps the lease. When the lease ends early or cannot be reattached, the command after `--`
+/// gets `SIGTERM` and `macpool lease` waits for it to exit before it fails.
 ///
 /// With `--detach` the command exits once the VM is ready, and the lease lasts until
 /// `macpool release` or its expiry. Every lease expires its time to live after it was first
@@ -133,16 +134,19 @@ struct LeaseCommand: AsyncParsableCommand {
         var reader = Self.read(channel, into: sink)
         let watch = SignalWatch { sink.yield(.signal($0)) }
         var running: Task<Void, Never>?
+        var reattaching: Task<Void, Never>?
         defer {
             watch.cancel()
             reader.cancel()
+            reattaching?.cancel()
             channel.close()
         }
 
         var id: LeaseID?
         var isReady = false
         var interruption: Int32?
-        for await event in events {
+        var failure = CommandError.interrupted
+        loop: for await event in events {
             switch event {
             case let .reply(.queued(position)):
                 Report.line("queued position=\(position)")
@@ -170,22 +174,27 @@ struct LeaseCommand: AsyncParsableCommand {
                 Report.line("restarting reason=\(reason)")
             case let .reply(.ended(ended, reason)):
                 Report.line("ended reason=\(reason)")
-                if let running {
-                    running.cancel()
-                    await running.value
-                }
-                throw .leaseEnded(id: ended.rawValue, reason: reason)
+                failure = .leaseEnded(id: ended.rawValue, reason: reason)
+                break loop
             case let .reply(.failure(message)):
-                throw .pool(.daemonRefused(message: message))
+                failure = .pool(.daemonRefused(message: message))
+                break loop
             case .reply(.released), .reply(.renewed), .reply(.status):
                 break
             case .disconnected:
                 guard let id else {
-                    throw .pool(.connectionClosed)
+                    failure = .pool(.connectionClosed)
+                    break loop
                 }
                 channel.close()
-                channel = try await Self.reattach(id, in: directory)
+                reattaching = Self.reattach(id, in: directory, into: sink)
+            case let .reattached(reattached):
+                reattaching = nil
+                channel = reattached
                 reader = Self.read(channel, into: sink)
+            case let .reattachFailed(error):
+                failure = .pool(error)
+                break loop
             case let .signal(number):
                 if let running {
                     // The command ends first, and its end releases the lease.
@@ -195,7 +204,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 }
                 guard let id else {
                     // Closing the connection withdraws the queued request.
-                    throw .interrupted
+                    break loop
                 }
                 await Self.release(id, in: directory)
                 Report.line("released \(id)")
@@ -212,7 +221,12 @@ struct LeaseCommand: AsyncParsableCommand {
                 return status
             }
         }
-        throw .interrupted
+        // The command must not outlive the lease, because its VM goes away with the lease.
+        if let running {
+            running.cancel()
+            await running.value
+        }
+        throw failure
     }
 
     /// Forwards a channel's replies to the event stream until the connection ends.
@@ -237,27 +251,43 @@ struct LeaseCommand: AsyncParsableCommand {
 
     /// Reconnects to a daemon that went away and attaches to the lease again.
     ///
+    /// The attempts run in a task, so signals and the command's end reach the event stream
+    /// meanwhile.
+    ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - directory: The daemon's data directory.
-    /// - Returns: The new connection, on which the daemon reports the lease's stage.
-    /// - Throws: ``CommandError/pool(_:)`` when no daemon answers within ``reconnectTimeout``.
-    private static func reattach(_ id: LeaseID, in directory: PoolDirectory) async throws(CommandError)
-        -> MessageChannel {
+    ///   - sink: The event stream that receives the new connection, on which the daemon reports
+    ///     the lease's stage, or the last error when no daemon answers within
+    ///     ``reconnectTimeout``.
+    /// - Returns: The reconnecting task, which stops trying when cancelled.
+    private static func reattach(
+        _ id: LeaseID,
+        in directory: PoolDirectory,
+        into sink: AsyncStream<LeaseEvent>.Continuation,
+    ) -> Task<Void, Never> {
         Report.line("reconnecting")
-        let clock = ContinuousClock()
-        let deadline = clock.now + reconnectTimeout
-        while true {
-            do throws(PoolError) {
-                let channel = try await PoolClient.connect(to: directory)
-                try channel.send(PoolRequest.attach(id))
-                return channel
-            } catch {
-                guard clock.now < deadline else {
-                    throw .pool(error)
+        return Task {
+            let clock = ContinuousClock()
+            let deadline = clock.now + reconnectTimeout
+            while !Task.isCancelled {
+                do throws(PoolError) {
+                    let channel = try await PoolClient.connect(to: directory)
+                    try channel.send(PoolRequest.attach(id))
+                    guard !Task.isCancelled else {
+                        channel.close()
+                        return
+                    }
+                    sink.yield(.reattached(channel))
+                    return
+                } catch {
+                    guard clock.now < deadline else {
+                        sink.yield(.reattachFailed(error))
+                        return
+                    }
                 }
+                try? await Task.sleep(for: .seconds(1))
             }
-            try? await Task.sleep(for: .seconds(1))
         }
     }
 
@@ -331,6 +361,10 @@ private enum LeaseEvent: Sendable {
     case reply(PoolReply)
     /// The daemon connection ended.
     case disconnected
+    /// The command reconnected to the daemon and asked to attach to the lease.
+    case reattached(MessageChannel)
+    /// No daemon answered within the reconnect timeout.
+    case reattachFailed(PoolError)
     /// A termination signal arrived.
     case signal(Int32)
     /// The command after `--` exited with a status.

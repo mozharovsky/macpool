@@ -9,10 +9,15 @@ import MacpoolVM
 /// supervisor owns the VM, because the framework ties a VM to the process that created it. The
 /// VM therefore keeps running when the daemon exits, and a new daemon reconnects to the socket.
 ///
+/// The supervisor first takes the lease's `SupervisorLock` and holds it until it exits. The
+/// daemon waits for that lock before it boots the lease again or deletes the clone, so an exiting
+/// supervisor never removes a newer supervisor's socket and its exit record never describes a
+/// newer run.
+///
 /// The supervisor boots the clone through a ``MachineSession`` that waits for SSH and holds the
 /// VM until a stop arrives. A stop command on the socket, `SIGTERM`, or `SIGINT` stops the VM at
 /// once, because the daemon deletes the clone afterward. When the run ends, the supervisor writes
-/// the lease's exit record, reports the outcome on the socket, and exits.
+/// the lease's exit record, reports the outcome on the socket, closes the socket, and exits.
 struct SuperviseCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -41,21 +46,25 @@ struct SuperviseCommand: AsyncParsableCommand {
 
     /// Boots the clone, reports its status, and stops it on request.
     ///
-    /// - Throws: ``CommandError`` when the lease identifier is malformed, the socket cannot
-    ///   listen, or the boot or the VM fails.
+    /// - Throws: ``CommandError`` when the lease identifier is malformed, another supervisor of the
+    ///   lease runs, the socket cannot listen, or the boot or the VM fails.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when the lease identifier is malformed, the socket cannot
-    ///   listen, or the boot or the VM fails.
+    /// - Throws: ``CommandError`` when the lease identifier is malformed, another supervisor of the
+    ///   lease runs, the socket cannot listen, or the boot or the VM fails.
     private func perform() async throws(CommandError) {
         guard let id = LeaseID(lease) else {
             throw .invalidValue("\(lease) is not a lease identifier")
         }
         let directory = location.directory
+        // The lock comes before the socket, so a supervisor that finds another one running leaves
+        // that one's socket and record alone.
+        let lock = try pool { () throws(PoolError) in try SupervisorLock(of: id, in: directory) }
+        defer { withExtendedLifetime(lock) {} }
         let stop = StopFlag()
         let server = try await pool { () async throws(PoolError) in
             try await SupervisorServer(
