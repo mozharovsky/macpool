@@ -587,6 +587,10 @@ public actor PoolDaemon {
             attach(channel, to: id)
             return
         }
+        guard !isStopDeferred(id) else {
+            connecting.remove(id)
+            return
+        }
         let reason = "the supervisor did not listen within \(configuration.supervisorConnectTimeout)"
         await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
     }
@@ -683,7 +687,8 @@ public actor PoolDaemon {
     ///
     /// The supervisor sends its current status to every new connection, so a reconnect loses
     /// nothing. A supervisor that holds its lock but does not answer within the reconnect window
-    /// is stopped by command or signal, and its run counts as a failure.
+    /// is stopped by command or signal, and its run counts as a failure. The supervisor of an
+    /// ending lease keeps running instead while ``isStopDeferred(_:)`` holds.
     ///
     /// - Parameter id: The lease.
     private func recover(_ id: LeaseID) async {
@@ -712,6 +717,10 @@ public actor PoolDaemon {
             try? await Task.sleep(for: Self.pollInterval * 5)
         }
         guard !isShutDown else {
+            return
+        }
+        guard !isStopDeferred(id) else {
+            connecting.remove(id)
             return
         }
         configuration.logger.warning("A running supervisor does not answer", metadata: ["lease": "\(id)"])
@@ -821,6 +830,9 @@ public actor PoolDaemon {
                 "lease": "\(id)",
                 "reason": "\(incompatibility)",
             ])
+            guard !isStopDeferred(id) else {
+                return
+            }
             connecting.insert(id)
             let reason = "the supervisor is incompatible: \(incompatibility)"
             await conclude(id, ending: endSupervisor(id, waitingFirst: .zero), reason: reason)
@@ -832,17 +844,13 @@ public actor PoolDaemon {
 
     /// Asks a lease's supervisor to stop the VM once the state file records the lease as stopping.
     ///
-    /// A daemon that restarts after a failed write reads the lease as running. It would apply the
-    /// restart policy to the stopped VM and could boot a released lease again. The VM therefore
-    /// keeps running until a write succeeds, and the tick after that write sends the stop.
-    ///
     /// A lease without a connection either has a launch or a reconnect under way, which sends the
     /// stop once it connects, or gets a reconnect now. The reconnect concludes the run when the
     /// supervisor is gone.
     ///
     /// - Parameter id: The lease.
     private func stopMachine(_ id: LeaseID) {
-        guard isStateSaved else {
+        guard !isStopDeferred(id) else {
             return
         }
         if var link = links[id] {
@@ -852,6 +860,20 @@ public actor PoolDaemon {
         } else {
             startRecovery(id)
         }
+    }
+
+    /// Reports whether an ending lease's supervisor must keep running until a write of the state.
+    ///
+    /// A daemon that restarts after a failed write reads the lease as running. It would apply the
+    /// restart policy to the stopped VM and could boot a released lease again. The daemon
+    /// therefore neither stops nor signals the supervisor of a stopping lease until a write
+    /// succeeds. The tick after that write sends the stop or starts the clone's deletion, which
+    /// ends the supervisor.
+    ///
+    /// - Parameter id: The lease.
+    /// - Returns: Whether the lease is stopping and the last write of the state failed.
+    private func isStopDeferred(_ id: LeaseID) -> Bool {
+        !isStateSaved && ledger.leases[id]?.phase == .stopping
     }
 
     /// Ends a supervisor that did not stop within the stop grace period.

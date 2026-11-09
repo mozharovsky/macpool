@@ -82,6 +82,32 @@ struct SupervisorRecoveryTests {
         await daemon.shutdown()
     }
 
+    /// Leaves an unreachable supervisor of a released lease running until the state file records
+    /// the release, then ends it and deletes the clone.
+    @Test func keepsUnreachableSupervisorUntilReleaseIsStored() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let granted = try await pool.readyLease(pool.terms(detached: true))
+        let id = granted.lease.id
+        granted.client.close()
+        let root = pool.directory.root.path(percentEncoded: false)
+        #expect(chmod(root, 0o500) == 0)
+        defer { chmod(root, 0o700) }
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        await pool.launcher.dropConnections(id)
+        // The reconnect window is one second.
+        try await Task.sleep(for: .seconds(2))
+        #expect(pool.launcher.isRunning(id))
+        #expect(pool.launcher.signals().isEmpty)
+
+        #expect(chmod(root, 0o700) == 0)
+        await daemon.tick()
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        #expect(!pool.launcher.isRunning(id))
+        #expect(!FileManager.default.fileExists(atPath: granted.lease.bundle))
+        await daemon.shutdown()
+    }
+
     /// Ends a supervisor with another protocol version by signal and boots a current one.
     @Test func replacesIncompatibleSupervisor() async throws {
         let pool = try PoolFixture()
