@@ -1,6 +1,25 @@
 public import Foundation
 import Virtualization
 
+/// The progress of replacing a clone's inherited guest credentials.
+///
+/// A bundle without this record provisioned its own account. ``VMBundle/clone(to:)`` records
+/// ``pending`` in every clone of a booted bundle, and ``CredentialRotation`` moves the record on.
+public enum CredentialRotationState: String, Codable, Sendable, Hashable {
+    /// The clone still has its source's password and SSH host keys, and its next run replaces
+    /// them.
+    case pending
+
+    /// A rotation began and did not finish.
+    ///
+    /// The guest may hold the old credentials, the new ones, or a mix, so commands refuse the
+    /// bundle. The rotation's error, or an interrupted run, explains why it stopped.
+    case started
+
+    /// The clone has its own password and host keys, and the bundle pins the new host key.
+    case finished
+}
+
 /// The settings of a bundle that the framework does not store in its own data files.
 ///
 /// The JSON keys use snake case so that bundles stay readable by tools in any language.
@@ -27,6 +46,11 @@ public struct BundleSettings: Codable, Sendable, Equatable {
     /// bundle created before the record existed, whose first boot is unknown.
     public var hasBooted: Bool?
 
+    /// The progress of replacing the guest credentials that a clone inherited.
+    ///
+    /// The value is `nil` for a bundle that provisioned its own account.
+    public var credentialRotation: CredentialRotationState?
+
     /// The JSON keys of the settings file.
     private enum CodingKeys: String, CodingKey {
         /// The `cpus` key.
@@ -39,6 +63,8 @@ public struct BundleSettings: Codable, Sendable, Equatable {
         case build
         /// The `has_booted` key, which is absent in bundles that predate it.
         case hasBooted = "has_booted"
+        /// The `credential_rotation` key, which only clones have.
+        case credentialRotation = "credential_rotation"
     }
 
     /// Creates settings from their values.
@@ -49,12 +75,22 @@ public struct BundleSettings: Codable, Sendable, Equatable {
     ///   - macAddress: The guest's MAC address in colon-separated form.
     ///   - build: The build number of the installed macOS.
     ///   - hasBooted: Whether the VM has started since the install, or `nil` when unknown.
-    public init(cpuCount: Int, memoryByteCount: UInt64, macAddress: String, build: String, hasBooted: Bool?) {
+    ///   - credentialRotation: The progress of replacing inherited credentials, or `nil` for a
+    ///     bundle with its own account.
+    public init(
+        cpuCount: Int,
+        memoryByteCount: UInt64,
+        macAddress: String,
+        build: String,
+        hasBooted: Bool?,
+        credentialRotation: CredentialRotationState? = nil,
+    ) {
         self.cpuCount = cpuCount
         self.memoryByteCount = memoryByteCount
         self.macAddress = macAddress
         self.build = build
         self.hasBooted = hasBooted
+        self.credentialRotation = credentialRotation
     }
 }
 
@@ -63,11 +99,18 @@ public struct BundleSettings: Codable, Sendable, Equatable {
 /// A bundle holds a sparse raw disk image, the auxiliary storage with the guest's NVRAM, the
 /// serialized hardware model and machine identifier, and a JSON settings file. A stopped bundle
 /// is self-contained. An APFS clone of the directory is therefore a complete second VM once it
-/// receives its own machine identifier and MAC address.
+/// receives its own machine identifier and MAC address. Its first run then replaces the guest
+/// credentials it shares with the source through ``CredentialRotation``.
 ///
 /// The type only names paths. Its methods touch the file system, and none of them checks
 /// whether a VM currently runs from the bundle. Commands coordinate through ``BundleLock``.
 public struct VMBundle: Sendable, Hashable {
+    /// The name under which the bundle's `known_hosts` file pins the guest's host key.
+    ///
+    /// `ssh` looks the key up under this name through its `HostKeyAlias` option instead of the
+    /// guest's address, which can change between boots.
+    public static let hostKeyAlias = "macpool-guest"
+
     /// The bundle directory.
     public let root: URL
 
@@ -107,6 +150,19 @@ public struct VMBundle: Sendable, Hashable {
     /// The guest account file, which only the owner can read.
     public var guestAccountFile: URL {
         root.appending(path: "guest-account.json")
+    }
+
+    /// The new guest account while a ``CredentialRotation`` runs, which only the owner can read.
+    ///
+    /// The rotation writes the account here before the guest receives it, so the password is
+    /// never lost. The file replaces ``guestAccountFile`` once the guest accepts the password.
+    public var rotatingGuestAccountFile: URL {
+        root.appending(path: "guest-account.rotating.json")
+    }
+
+    /// The `known_hosts` file that pins the guest's SSH host key.
+    public var knownHostsFile: URL {
+        root.appending(path: "known_hosts")
     }
 
     /// The file that carries the bundle's ``BundleLock``.
@@ -192,8 +248,13 @@ public struct VMBundle: Sendable, Hashable {
     /// Clones this stopped bundle to a new directory with APFS `clonefile`.
     ///
     /// The clone shares every data block with the source until either side writes. The call keeps
-    /// the source's identity, so callers follow it with ``assignIdentity()``. It also copies the
-    /// guest account file, and the cloned disk keeps the guest's SSH host keys.
+    /// the source's identity, so callers follow it with ``assignIdentity()``.
+    ///
+    /// The cloned disk holds the source's guest account and SSH host keys. For a source that has
+    /// booted, the call keeps the account file and `known_hosts`, which the clone's first run needs
+    /// to reach the guest, and records ``CredentialRotationState/pending``. For a source that has
+    /// never booted, it removes both files, so the clone's provisioning boot creates its own
+    /// account.
     ///
     /// The call does not check whether a VM runs from the source. Callers hold the source's
     /// ``BundleLock`` during the copy so that no guest writes to the disk meanwhile.
@@ -201,12 +262,33 @@ public struct VMBundle: Sendable, Hashable {
     /// - Parameter destination: The clone's directory. It must not exist and must be on the same
     ///   APFS volume as the source.
     /// - Returns: The cloned bundle.
-    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the clone fails, for
-    ///   example across volumes or when the destination exists.
+    /// - Throws: ``MacpoolError/credentialRotationIncomplete(path:)`` when the source's own
+    ///   rotation did not finish, ``MacpoolError/fileSystem(operation:path:reason:)`` when the clone
+    ///   fails, for example across volumes or when the destination exists, or another
+    ///   ``MacpoolError`` when the source's settings cannot be read. When the clone's settings
+    ///   cannot be updated, the call removes the clone again.
     public func clone(to destination: URL) throws(MacpoolError) -> VMBundle {
+        var settings = try settings()
+        guard settings.credentialRotation != .started else {
+            throw .credentialRotationIncomplete(path: root.filePath)
+        }
         let clone = VMBundle(root: destination)
         guard clonefile(root.filePath, clone.root.filePath, 0) == 0 else {
             throw .systemCall("cloning \(root.filePath) to", clone.root)
+        }
+        do {
+            try FileSystem.removeIfPresent(clone.rotatingGuestAccountFile, for: "removing a stale rotation account")
+            if settings.hasBooted == false {
+                try FileSystem.removeIfPresent(clone.guestAccountFile, for: "removing the inherited account")
+                try FileSystem.removeIfPresent(clone.knownHostsFile, for: "removing the inherited host keys")
+                settings.credentialRotation = nil
+            } else {
+                settings.credentialRotation = .pending
+            }
+            try clone.writeSettings(settings)
+        } catch {
+            try? FileManager.default.removeItem(at: clone.root)
+            throw error
         }
         return clone
     }

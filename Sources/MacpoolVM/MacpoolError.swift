@@ -47,6 +47,27 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The framework enforces the limit of two macOS VMs per host and reports it when a VM starts.
     case virtualMachineLimitReached
 
+    /// A clone's credential rotation began and did not finish, so the guest's credentials are
+    /// unknown.
+    ///
+    /// - Parameter path: The bundle directory, which can only be deleted.
+    case credentialRotationIncomplete(path: String)
+
+    /// Replacing a clone's inherited guest credentials failed.
+    ///
+    /// - Parameters:
+    ///   - step: The step that failed, such as `logging in with the inherited account`.
+    ///   - reason: The failure, which includes the end of the guest command's error output.
+    case credentialRotation(step: String, reason: String)
+
+    /// Another macpool command holds a bundle whose credential rotation has not finished.
+    ///
+    /// The other command is usually the clone's first `run`, which records its progress before it
+    /// ends.
+    ///
+    /// - Parameter path: The bundle directory.
+    case credentialRotationInProgress(path: String)
+
     /// A one-line description for logs and command output.
     public var description: String {
         switch self {
@@ -64,6 +85,12 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "\(path) is in use by another macpool command"
         case .virtualMachineLimitReached:
             "this host already runs the two macOS VMs that macOS allows"
+        case let .credentialRotationIncomplete(path):
+            "the credential rotation of \(path) did not finish, so delete the clone and clone its source again"
+        case let .credentialRotation(step, reason):
+            "rotating the guest credentials failed while \(step): \(reason)"
+        case let .credentialRotationInProgress(path):
+            "another macpool run is replacing the guest credentials of \(path), so wait until it prints ready"
         }
     }
 

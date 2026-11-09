@@ -25,6 +25,8 @@ struct VMBundleTests {
         #expect(bundle.guestAccountFile.lastPathComponent == "guest-account.json")
         #expect(bundle.stopRequest.lastPathComponent == "stop-request")
         #expect(bundle.lockFile.lastPathComponent == "lock")
+        #expect(bundle.knownHostsFile.lastPathComponent == "known_hosts")
+        #expect(bundle.rotatingGuestAccountFile.lastPathComponent == "guest-account.rotating.json")
     }
 
     /// Reads settings without a boot record and writes them back unchanged in meaning.
@@ -137,11 +139,91 @@ struct VMBundleTests {
         try Self.settingsJSON.write(to: source.settingsFile, atomically: true, encoding: .utf8)
         try source.createDisk(byteCount: 1 << 20)
         let clone = try source.clone(to: directory.url.appending(path: "clone"))
-        #expect(try clone.settings() == source.settings())
+        var expected = try source.settings()
+        expected.credentialRotation = .pending
+        #expect(try clone.settings() == expected)
         #expect(FileManager.default.fileExists(atPath: clone.disk.path(percentEncoded: false)))
         #expect(throws: MacpoolError.self) {
             try source.clone(to: clone.root)
         }
+    }
+
+    /// Keeps a booted source's account and pins for the clone's rotation and records it as pending.
+    @Test func marksCloneOfBootedSourceForRotation() throws {
+        let directory = try TemporaryDirectory()
+        let source = try Self.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        try Data("stale".utf8).write(to: source.rotatingGuestAccountFile)
+        let clone = try source.clone(to: directory.url.appending(path: "clone"))
+        #expect(try clone.settings().credentialRotation == .pending)
+        #expect(try clone.settings().hasBooted == true)
+        #expect(FileManager.default.fileExists(atPath: clone.guestAccountFile.path(percentEncoded: false)))
+        #expect(FileManager.default.fileExists(atPath: clone.knownHostsFile.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: clone.rotatingGuestAccountFile.path(percentEncoded: false)))
+        #expect(try source.settings().credentialRotation == .finished)
+    }
+
+    /// Drops the account and pins of a source that never booted, so the clone provisions its own.
+    @Test func dropsCredentialsOfUnbootedSource() throws {
+        let directory = try TemporaryDirectory()
+        let source = try Self.makeSource(in: directory, hasBooted: false, rotation: nil)
+        let clone = try source.clone(to: directory.url.appending(path: "clone"))
+        #expect(try clone.settings().credentialRotation == nil)
+        #expect(!FileManager.default.fileExists(atPath: clone.guestAccountFile.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: clone.knownHostsFile.path(percentEncoded: false)))
+        #expect(FileManager.default.fileExists(atPath: source.guestAccountFile.path(percentEncoded: false)))
+    }
+
+    /// Refuses to clone a bundle whose own rotation did not finish.
+    @Test func refusesCloneOfIncompleteRotation() throws {
+        let directory = try TemporaryDirectory()
+        let source = try Self.makeSource(in: directory, hasBooted: true, rotation: .started)
+        let destination = directory.url.appending(path: "clone")
+        #expect(throws: MacpoolError.credentialRotationIncomplete(path: source.root.path(percentEncoded: false))) {
+            try source.clone(to: destination)
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)))
+    }
+
+    /// Stores the rotation record under its snake case key.
+    @Test func recordsCredentialRotation() throws {
+        let directory = try TemporaryDirectory()
+        let bundle = VMBundle(root: directory.url)
+        try Self.settingsJSON.write(to: bundle.settingsFile, atomically: true, encoding: .utf8)
+        var settings = try bundle.settings()
+        #expect(settings.credentialRotation == nil)
+        settings.credentialRotation = .started
+        try bundle.writeSettings(settings)
+        let text = try String(contentsOf: bundle.settingsFile, encoding: .utf8)
+        #expect(text.contains("\"credential_rotation\" : \"started\""))
+        #expect(try bundle.settings().credentialRotation == .started)
+    }
+
+    /// Creates a source bundle with settings, an account, and a `known_hosts` file.
+    ///
+    /// - Parameters:
+    ///   - directory: The temporary directory that receives the `source` bundle.
+    ///   - hasBooted: The boot record to store.
+    ///   - rotation: The rotation record to store.
+    /// - Returns: The source bundle.
+    /// - Throws: An error when a file cannot be written.
+    static func makeSource(
+        in directory: TemporaryDirectory,
+        hasBooted: Bool?,
+        rotation: CredentialRotationState?,
+    ) throws -> VMBundle {
+        let source = VMBundle(root: directory.url.appending(path: "source"))
+        try FileManager.default.createDirectory(at: source.root, withIntermediateDirectories: false)
+        try source.writeSettings(BundleSettings(
+            cpuCount: 4,
+            memoryByteCount: 8 << 30,
+            macAddress: VMBundle.randomMACAddress(),
+            build: "26B123",
+            hasBooted: hasBooted,
+            credentialRotation: rotation,
+        ))
+        _ = try GuestAccount.loadOrCreate(in: source)
+        try Data("macpool-guest ssh-ed25519 \(HostKeyTests.first)\n".utf8).write(to: source.knownHostsFile)
+        return source
     }
 
     /// Removes the bundle directory that a failed create made.

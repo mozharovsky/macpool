@@ -6,9 +6,10 @@ repository. `CLAUDE.md` contains only `@AGENTS.md`, which Claude Code resolves a
 ## Project map
 
 The root Swift package has two products. The `MacpoolVM` library owns VM operations, which are
-bundles, restore images, installation, provisioning, cloning, the VM actor, DHCP lease lookup, and
-the SSH probe. The `macpool` executable in `Sources/MacpoolCLI` parses arguments, runs host tools,
-and prints measurements. It holds no VM logic that a library user would need.
+bundles, restore images, installation, provisioning, cloning, the rotation of a clone's guest
+credentials, the VM actor, DHCP lease lookup, and the SSH probe. The `macpool` executable in
+`Sources/MacpoolCLI` parses arguments, runs host tools, and prints measurements. It holds no VM
+logic that a library user would need.
 
 `Tests/MacpoolVMTests` and `Tests/MacpoolCLITests` hold focused swift-testing suites. `Scripts`
 holds the build, signing, SSH, license, and hook scripts. `macpool.entitlements` carries the
@@ -94,13 +95,17 @@ parameter.
 
 Each module has a DocC catalog. DocC builds with warnings as errors.
 
+The README covers only what macpool is, its requirements, setup, commands, and a short list of
+current limitations. Each limitation takes one or two plain sentences. History and rationale
+belong in the code's documentation and in pull requests.
+
 ## Dependencies
 
 Use an existing Swift implementation from the approved set when it provides the behavior. Each
 dependency has one role.
 
 - swift-argument-parser parses the command line.
-- swift-subprocess runs host tools such as `curl`, `pgrep`, and `renice`.
+- swift-subprocess runs host tools such as `curl`, `pgrep`, `renice`, and `ssh`.
 - swift-log carries the library's VM lifecycle and event diagnostics. The command line chooses
   their level and writes them to standard error.
 - swift-docc-plugin builds the documentation.

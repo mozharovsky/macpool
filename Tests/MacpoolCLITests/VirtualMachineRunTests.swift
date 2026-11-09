@@ -1,4 +1,5 @@
 import Foundation
+import MacpoolVM
 import Subprocess
 import System
 import Testing
@@ -22,7 +23,10 @@ struct VirtualMachineRunTests {
         let succeeded: Bool
     }
 
-    /// Clones the bundle, boots the clone to SSH, and stops it.
+    /// Clones the bundle, boots the clone to SSH, replaces its inherited credentials, and stops it.
+    ///
+    /// The clone must end with its own password and a pinned host key that differs from any key
+    /// the source pins.
     @Test(.timeLimit(.minutes(10)))
     func bootsCloneToSSH() async throws {
         let source = try URL(filePath: #require(VirtualMachineTestEnvironment.bundlePath)).absoluteURL
@@ -47,6 +51,28 @@ struct VirtualMachineRunTests {
         #expect(run.output.contains("measure ssh_seconds="))
         #expect(run.output.contains("\nready\n"))
         #expect(run.output.contains("measure stop="))
+        #expect(run.output.contains("measure rotate_seconds="))
+        #expect(run.output.contains("measure host_key=SHA256:"))
+
+        let sourceBundle = VMBundle(root: source)
+        let cloneBundle = VMBundle(root: clone)
+        #expect(try cloneBundle.settings().credentialRotation == .finished)
+        let sourceAccount = try GuestAccount.load(from: sourceBundle.guestAccountFile)
+        let cloneAccount = try GuestAccount.load(from: cloneBundle.guestAccountFile)
+        #expect(cloneAccount.username == sourceAccount.username)
+        #expect(cloneAccount.password != sourceAccount.password)
+        let sourceKeys = try HostKey.pinnedKeys(inKnownHosts: String(
+            contentsOf: sourceBundle.knownHostsFile,
+            encoding: .utf8,
+        ))
+        let cloneKeys = try HostKey.pinnedKeys(inKnownHosts: String(
+            contentsOf: cloneBundle.knownHostsFile,
+            encoding: .utf8,
+        ))
+        #expect(cloneKeys.count == 1)
+        #expect(cloneKeys.allSatisfy { !sourceKeys.contains($0) })
+        #expect(!FileManager.default
+            .fileExists(atPath: cloneBundle.rotatingGuestAccountFile.path(percentEncoded: false)))
     }
 
     /// Runs the binary and collects its output.

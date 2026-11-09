@@ -3,6 +3,9 @@ import Foundation
 import MacpoolVM
 
 /// Clones a stopped bundle with APFS and gives the clone a fresh identity.
+///
+/// The clone of a booted bundle keeps the source's guest account and `known_hosts` and records a
+/// pending credential rotation, which the clone's first `run` performs.
 struct CloneCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -20,8 +23,8 @@ struct CloneCommand: AsyncParsableCommand {
 
     /// Clones the bundle and assigns the clone a new machine identifier and MAC address.
     ///
-    /// - Throws: ``CommandError`` when the source is not a bundle, a command uses it, or the clone
-    ///   fails.
+    /// - Throws: ``CommandError`` when the source is not a bundle, a command uses it, its own
+    ///   credential rotation did not finish, or the clone fails.
     func run() async throws {
         try perform()
     }
@@ -31,12 +34,12 @@ struct CloneCommand: AsyncParsableCommand {
     /// The source's lock is held during the copy, so no VM can start from it or write to it while
     /// the clone captures its files.
     ///
-    /// - Throws: ``CommandError`` when the source is not a bundle, a command uses it, or the clone
-    ///   fails.
+    /// - Throws: ``CommandError`` when the source is not a bundle, a command uses it, its own
+    ///   credential rotation did not finish, or the clone fails.
     private func perform() throws(CommandError) {
         let source = VMBundle(root: URL(filePath: from))
         _ = try library { () throws(MacpoolError) in try source.settings() }
-        let lock = try library { () throws(MacpoolError) in try BundleLock(bundle: source) }
+        let lock = try lockBundle(source)
         defer { withExtendedLifetime(lock) {} }
         let clock = ContinuousClock()
         let started = clock.now

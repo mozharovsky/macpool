@@ -21,8 +21,18 @@ it. `macpool create` makes a bundle and installs macOS from the IPSW. The first
 until SSH answers.
 
 `macpool clone` copies a stopped bundle with APFS and gives the copy its own identity. The copy
-keeps the source's guest password and SSH host keys. `macpool run` boots any bundle, and
+starts with the source's guest password and SSH host keys. `macpool run` boots any bundle, and
 `macpool ip` prints a running guest's address.
+
+### Clone credentials
+
+A clone's first `run` replaces the inherited password and host keys through `CredentialRotation`
+from MacpoolVM before it prints `ready`. It reports the time as `measure rotate_seconds` and the
+new key's fingerprint as `measure host_key`. The `--timeout` deadline bounds the step, and the
+bundle's `stop-request` file ends it early. When the rotation fails, `run` stops the VM.
+
+A clone whose rotation began and did not finish is refused by `run`, `clone`, and
+`Scripts/ssh.sh`. While another `run` holds the clone, they report the rotation as in progress.
 
 ### Stopping a guest
 

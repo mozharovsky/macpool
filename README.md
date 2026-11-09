@@ -57,6 +57,15 @@ Scripts/ssh.sh .cache/vms/clone1 'ls "/Volumes/My Shared Files"'
 it, `create` removes the bundle. `clone` copies a stopped bundle with APFS in milliseconds and gives
 the copy a new machine identifier and MAC address.
 
+A clone starts with its source's guest password and SSH host keys. Its first `run` replaces both
+and then prints `ready`, so use a clone only after `ready`. The new password goes to the clone's
+`guest-account.json` with owner-only permissions, and the new Ed25519 host key goes to its
+`known_hosts`.
+
+`settings.json` records this step as `credential_rotation`. A failed first login leaves `pending`,
+and the next `run` tries again. A failure after the guest started to change leaves `started`, so
+delete that clone and clone the source again.
+
 `run` and `create` hold an `flock` lock on the bundle's `lock` file. `clone` refuses a source that
 a command holds, so it never copies a disk that a running guest writes. `ip` prints an address only
 while a `run` holds the bundle and its DHCP lease is current.
@@ -73,7 +82,8 @@ Measurements and the address go to standard output. Diagnostics go to standard e
 random password and owner-only permissions. The guest applies it only on its first boot after the
 install. `run` records that boot as `has_booted` in `settings.json`. It refuses a first boot
 without `--provision` and a later `--provision`, because either would leave the guest without the
-account. `Scripts/ssh.sh` logs in with that account and keeps a `known_hosts` file per bundle.
+account. `Scripts/ssh.sh` logs in with that account. Its first connection pins the guest's Ed25519
+host key in the bundle's `known_hosts`, and later connections refuse any other key.
 
 macOS answers the virtual power button with a dialog. A run that ends by request therefore forces
 the stop after 90 seconds. A clean stop comes from inside the guest. `Scripts/shutdown.sh BUNDLE`
@@ -85,11 +95,11 @@ Every command prints `measure key=value` lines with its timings and sizes.
 
 ## Known limitations
 
-- Clones share their source's guest credentials. `clone` copies `guest-account.json`, and the
-  cloned disk carries the source's SSH host keys. Every clone of a bundle therefore has the same
-  administrator password and host key as its source and its siblings. Two VMs can run at once on
-  the same NAT network, so a process in one guest that learns the password can log into the other.
-  Rotating both per clone is planned.
+- A clone accepts its source's password and host key until its first `run` prints `ready`, which
+  took 11 to 69 seconds after SSH answered. Anyone with the source's password, in another guest or
+  on the host, can log in during that time and leave access behind that `ready` does not reveal.
+- When the source has no `known_hosts` file, a clone's first `run` trusts the first key the clone
+  presents. A file without an unrevoked Ed25519 pin makes that `run` fail instead.
 - The host finds a guest's service process by comparing process listings from before and after
   the start. When another VM starts in the same moment, `run` skips the priority change and the
   memory sample.
