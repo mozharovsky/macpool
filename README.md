@@ -6,7 +6,8 @@ job, and is deleted.
 
 The repository holds the first stage. It creates a VM from a macOS restore image, provisions the
 guest on its first boot without a person, clones stopped VMs, and boots them headless until SSH
-answers. Pools, leases, image layers, and remote interfaces come later.
+answers. A daemon leases clones to clients, queues requests while every VM slot is busy, and boots
+crashed VMs again. Image layers and remote interfaces come later.
 
 ## Requirements
 
@@ -93,6 +94,64 @@ starts the shutdown. `run` then reports `measure stop=guest`, and a forced stop 
 
 Every command prints `measure key=value` lines with its timings and sizes.
 
+## Leases
+
+The pool daemon owns the host's VM slots and hands out clones of stopped bundles as leases.
+
+```sh
+$macpool daemon install
+$macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE" sw_vers'
+$macpool lease --from .cache/vms/base --ttl 7200 --detach
+$macpool list
+$macpool renew LEASE
+$macpool release LEASE
+$macpool daemon uninstall
+```
+
+`daemon install` registers `macpool daemon run` as a launchd job in your login session. launchd
+starts it at login and again whenever it exits. Running `daemon install` again replaces the job.
+`macpool daemon` runs the same daemon in the foreground, and `--slots 1` limits it to one VM. The
+daemon keeps its state, clones, sockets, and logs in `~/Library/Application Support/macpool`.
+Every pool command except `daemon uninstall` accepts `--data-dir` for another directory, which
+must be on the same APFS volume as the source bundles. The daemon refuses a data directory that belongs to another user or
+that other users can write to.
+
+`lease` waits in a queue while every slot is busy and prints `queued position=N`. A higher
+`--priority` goes first, and equal priorities go in arrival order. Once a slot is free, the daemon
+clones the source and boots the clone. `lease` then prints `lease_id=`, `bundle=`, `address=`,
+`expires_at=`, and `ready`. The daemon refuses a source that is running, has never booted, or lies
+on another volume, and a `--share` directory that does not exist.
+
+Without `--detach`, the lease lasts as long as `lease` runs. Control-C releases it. A command after
+`--` runs with `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS` in its environment, and
+its end releases the lease. With `--detach`, `lease` exits at `ready` and the lease lasts until
+`release` or its expiry.
+
+The time to live from `--ttl` starts at the first `ready` and defaults to one hour. `renew` sets
+the expiry to the time to live from now. `list` prints the slots, leases, and queue, and `--json`
+prints them as JSON. The daemon deletes a clone when its lease ends.
+
+When a leased VM stops unexpectedly, the daemon boots the same clone again after 5, 10, and 20
+seconds and then ends the lease. `--restart never` ends the lease at the first stop, and
+`--restart always` also boots the clone again after the guest shuts down.
+
+Each leased VM runs in its own `macpool supervise` process with a log in `logs/LEASE.log` in the
+data directory. When the daemon starts or deletes a clone, it also deletes the logs of ended leases
+that have not changed for 7 days. The VMs keep running when the daemon stops. A new daemon
+reconnects to them, and a `lease` without `--detach` reconnects within 60 seconds. When `lease`
+cannot reconnect or its lease ends, it stops the command after `--` first.
+
+The daemon ends a supervisor when it cannot reconnect within 30 seconds after the connection
+broke, or when the supervisor ignores a stop for 30 seconds. It tries another stop, then `SIGTERM`,
+then `SIGKILL`, 10 seconds apart. A lease that was ending then loses its clone, and any other
+lease boots again or ends as after a crash.
+
+A malformed state file moves aside as `state.json.invalid-TIME`. The daemon then starts without
+leases and stops the VMs that it finds. A state file in a format version that this build does not
+read, or one that cannot be opened, keeps the daemon from starting, and the VMs keep running.
+While the state file cannot be written, an ended lease keeps its clone and slot. The daemon retries
+the write every second and deletes the clone after a write succeeds.
+
 ## Known limitations
 
 - A clone accepts its source's password and host key until its first `run` prints `ready`, which
@@ -105,6 +164,16 @@ Every command prints `measure key=value` lines with its timings and sizes.
   memory sample.
 - Locks are advisory. They coordinate macpool commands and do not stop other tools from changing
   a bundle.
+- The daemon runs in the login session of the user who installed it. Its VMs do not start before
+  that user logs in.
+- A lease's VM stops by force when the lease ends, so the guest gets no clean shutdown.
+- Requests that wait in the queue are not stored. When the daemon stops, their `lease` commands
+  exit with an error.
+- The daemon counts only its own VMs. A `run` or `create` beside it can take a slot that macOS
+  allows, and a lease's boot then fails and counts as a crash.
+- Two daemons with different data directories each count two slots of their own, so together they
+  can try to run more VMs than macOS allows.
+- Under launchd the daemon's own log, `logs/daemon.log`, grows without rotation.
 
 ## Development
 

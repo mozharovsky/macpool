@@ -9,7 +9,7 @@ case $subject in
     Merge\ * | fixup!\ * | squash!\ * | amend!\ *) exit 0 ;;
 esac
 types='feat|fix|docs|refactor|test|perf|ci|build|chore'
-scopes='vm|cli|tools|docs|ci'
+scopes='vm|pool|cli|tools|docs|ci'
 if ! printf '%s\n' "$subject" | grep -qE "^($types)(\(($scopes)\))?!?: [^ ].*$"; then
     echo "Commit subjects read 'type(scope): summary'. Types are $types and scopes are $scopes." >&2
     exit 1

@@ -1,3 +1,4 @@
+import MacpoolPool
 import MacpoolVM
 
 /// A failure of a subcommand, which the command line prints before it exits.
@@ -65,6 +66,23 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     /// - Parameter reason: The rejected value and its range.
     case invalidValue(String)
 
+    /// A pool operation failed.
+    ///
+    /// - Parameter error: The pool's error.
+    case pool(PoolError)
+
+    /// The daemon ended the lease before the command released it.
+    ///
+    /// - Parameters:
+    ///   - id: The lease's identifier.
+    ///   - reason: Why the lease ended.
+    case leaseEnded(id: String, reason: String)
+
+    /// A supervised VM's boot or run failed.
+    ///
+    /// - Parameter reason: The failure.
+    case supervisedRunFailed(String)
+
     /// A one-line description for the command's error output.
     var description: String {
         switch self {
@@ -93,6 +111,12 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
         case let .noLease(macAddress):
             "no lease for \(macAddress)"
         case let .invalidValue(reason):
+            reason
+        case let .pool(error):
+            error.description
+        case let .leaseEnded(id, reason):
+            "lease \(id) ended: \(reason)"
+        case let .supervisedRunFailed(reason):
             reason
         }
     }
@@ -142,5 +166,31 @@ func library<T>(_ operation: () async throws(MacpoolError) -> T) async throws(Co
         return try await operation()
     } catch {
         throw .library(error)
+    }
+}
+
+/// Runs a pool operation and wraps its error for the command line.
+///
+/// - Parameter operation: The operation to run.
+/// - Returns: The operation's result.
+/// - Throws: ``CommandError/pool(_:)`` with the operation's error.
+func pool<T>(_ operation: () throws(PoolError) -> T) throws(CommandError) -> T {
+    do {
+        return try operation()
+    } catch {
+        throw .pool(error)
+    }
+}
+
+/// Runs an asynchronous pool operation and wraps its error for the command line.
+///
+/// - Parameter operation: The operation to run.
+/// - Returns: The operation's result.
+/// - Throws: ``CommandError/pool(_:)`` with the operation's error.
+func pool<T>(_ operation: () async throws(PoolError) -> T) async throws(CommandError) -> T {
+    do {
+        return try await operation()
+    } catch {
+        throw .pool(error)
     }
 }

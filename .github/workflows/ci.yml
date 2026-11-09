@@ -72,7 +72,7 @@ jobs:
       - name: Build documentation
         run: |
           mkdir -p .build/docs
-          for target in MacpoolVM MacpoolCLI; do
+          for target in MacpoolVM MacpoolPool MacpoolCLI; do
             xcrun swift package --allow-writing-to-directory .build/docs \
               generate-documentation --target "$target" --warnings-as-errors \
               --output-path ".build/docs/$target"

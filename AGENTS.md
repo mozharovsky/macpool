@@ -5,13 +5,20 @@ repository. `CLAUDE.md` contains only `@AGENTS.md`, which Claude Code resolves a
 
 ## Project map
 
-The root Swift package has two products. The `MacpoolVM` library owns VM operations, which are
+The root Swift package has three products. The `MacpoolVM` library owns VM operations, which are
 bundles, restore images, installation, provisioning, cloning, the rotation of a clone's guest
-credentials, the VM actor, DHCP lease lookup, and the SSH probe. The `macpool` executable in
-`Sources/MacpoolCLI` parses arguments, runs host tools, and prints measurements. It holds no VM
-logic that a library user would need.
+credentials, the VM actor, DHCP lease lookup, and the SSH probe. The `MacpoolPool` library owns
+the pool daemon, its lease ledger and queue, the stored state, the socket protocol, and the
+supervisor processes that keep leased VMs running. The `macpool` executable in
+`Sources/MacpoolCLI` parses arguments, runs host tools, and prints measurements. It holds no VM or
+pool logic that a library user would need.
 
-`Tests/MacpoolVMTests` and `Tests/MacpoolCLITests` hold focused swift-testing suites. `Scripts`
+The lease ledger in `MacpoolPool` is a value type without I/O. It returns the actions that the
+daemon actor performs, so its tests cover the queue, expiries, and restarts without sockets or
+processes.
+
+`Tests/MacpoolVMTests`, `Tests/MacpoolPoolTests`, and `Tests/MacpoolCLITests` hold focused
+swift-testing suites. `Scripts`
 holds the build, signing, SSH, license, and hook scripts. `macpool.entitlements` carries the
 virtualization entitlement that `Scripts/build.sh` signs into the binary.
 
@@ -37,6 +44,8 @@ mkdir -p .build/docs
 xcrun swift package --allow-writing-to-directory .build/docs generate-documentation \
     --target MacpoolVM --warnings-as-errors --output-path .build/docs/MacpoolVM
 xcrun swift package --allow-writing-to-directory .build/docs generate-documentation \
+    --target MacpoolPool --warnings-as-errors --output-path .build/docs/MacpoolPool
+xcrun swift package --allow-writing-to-directory .build/docs generate-documentation \
     --target MacpoolCLI --warnings-as-errors --output-path .build/docs/MacpoolCLI
 ```
 
@@ -55,6 +64,14 @@ VM suite clones that bundle, boots the clone to SSH, stops it, and deletes it. A
 
 macOS allows two VMs per host. Never run more than two at once, and stop every VM you start. The
 framework enforces the limit, and `run` and `create` report it when a VM cannot start.
+
+Changes to the daemon or the supervisors also need a run with real VMs. Start
+`macpool daemon --data-dir DIR` in the foreground with a directory under `.cache`, lease from a
+stopped bundle, and check the queue, release, expiry, and a restart of the daemon and of a
+supervisor. Do not install the launchd job for such a check. An installed daemon does not count
+the test daemon's VMs, and its VMs keep running when it stops. Release its leases first, or give
+the test daemon `--slots` that fit beside its VMs. Release every lease and stop the daemon
+afterward.
 
 ## Swift standards
 
@@ -105,7 +122,8 @@ Use an existing Swift implementation from the approved set when it provides the 
 dependency has one role.
 
 - swift-argument-parser parses the command line.
-- swift-subprocess runs host tools such as `curl`, `pgrep`, `renice`, and `ssh`.
+- swift-subprocess runs host tools such as `curl`, `pgrep`, `renice`, `ssh`, and `launchctl`,
+  and starts the daemon's supervisor processes.
 - swift-log carries the library's VM lifecycle and event diagnostics. The command line chooses
   their level and writes them to standard error.
 - swift-docc-plugin builds the documentation.
@@ -135,8 +153,8 @@ Inline comments explain why a choice exists.
 ## Commits and pull requests
 
 Commit subjects follow `type(scope): summary` with an optional scope. Types are `feat`, `fix`,
-`docs`, `refactor`, `test`, `perf`, `ci`, `build`, and `chore`. Scopes are `vm`, `cli`, `tools`,
-`docs`, and `ci`. Subjects stay under 72 characters. Bodies explain why.
+`docs`, `refactor`, `test`, `perf`, `ci`, `build`, and `chore`. Scopes are `vm`, `pool`, `cli`,
+`tools`, `docs`, and `ci`. Subjects stay under 72 characters. Bodies explain why.
 
 Pull request descriptions follow `.github/PULL_REQUEST_TEMPLATE.md`. They state the change, the
 checks that ran with their results, the checks that did not run, and the known limitations.
