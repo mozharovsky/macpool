@@ -7,7 +7,8 @@ import MacpoolVM
 ///
 /// The command prints `ready` once the guest has an address and, when asked, answers on SSH. It
 /// then holds the VM until the hold time ends, the bundle's `stop-request` file appears, or the
-/// guest shuts itself down.
+/// guest shuts itself down. A `stop-request` file that appears before `ready` stops the VM and
+/// fails the run.
 ///
 /// The command holds the bundle's lock while it runs. It records the first boot in the bundle's
 /// settings, refuses a first boot without `--provision`, and refuses `--provision` after it,
@@ -193,8 +194,8 @@ struct RunCommand: AsyncParsableCommand {
     ///   - started: The time the start began.
     ///   - rotatesCredentials: Whether the bundle is a clone whose inherited credentials this run
     ///     replaces before the VM counts as ready.
-    /// - Throws: ``CommandError`` when a step times out, the credential rotation fails or ends on
-    ///   request, or the VM stops early.
+    /// - Throws: ``CommandError`` when a step times out, a stop is requested before `ready`, the
+    ///   credential rotation fails, or the VM stops early.
     private func attend(
         _ machine: VirtualMachine,
         processID: Int32?,
@@ -214,6 +215,7 @@ struct RunCommand: AsyncParsableCommand {
         var lease = DHCPLeases.lease(for: macAddress)
         while lease == nil || lease == previousLease {
             try await checkEvents(machine)
+            try checkStopRequest(target)
             guard clock.now < deadline else {
                 throw .timedOut(step: "DHCP lease", seconds: timeout)
             }
@@ -227,6 +229,7 @@ struct RunCommand: AsyncParsableCommand {
         if waitSSH || rotatesCredentials {
             while await !SSHProbe.answers(host: address) {
                 try await checkEvents(machine)
+                try checkStopRequest(target)
                 guard clock.now < deadline else {
                     throw .timedOut(step: "SSH banner", seconds: timeout)
                 }
@@ -339,7 +342,7 @@ struct RunCommand: AsyncParsableCommand {
         case let .finished(.failure(error)):
             throw .library(error)
         case .stopRequested:
-            try? FileManager.default.removeItem(atPath: stopRequest)
+            try checkStopRequest(target)
             throw .stopRequested
         case let .machineStopped(event):
             throw .stopped(event)
@@ -371,6 +374,18 @@ struct RunCommand: AsyncParsableCommand {
             Report.measure("stop", "forced")
         }
         Report.measure("stop_seconds", Report.seconds(clock.now - stopping, decimals: 1))
+    }
+
+    /// Fails when the bundle's stop-request file exists, and removes the file.
+    ///
+    /// - Parameter target: The VM's bundle.
+    /// - Throws: ``CommandError/stopRequested`` when the file exists.
+    private func checkStopRequest(_ target: VMBundle) throws(CommandError) {
+        let stopRequest = target.stopRequest.path(percentEncoded: false)
+        if FileManager.default.fileExists(atPath: stopRequest) {
+            try? FileManager.default.removeItem(atPath: stopRequest)
+            throw .stopRequested
+        }
     }
 
     /// Fails when the VM reported that it stopped.
