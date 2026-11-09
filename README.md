@@ -109,15 +109,18 @@ $macpool daemon uninstall
 ```
 
 `daemon install` registers `macpool daemon run` as a launchd job in your login session. launchd
-starts it at login and again whenever it exits. `macpool daemon` runs the same daemon in the
-foreground, and `--slots 1` limits it to one VM. The daemon keeps its state, clones, sockets, and
-logs in `~/Library/Application Support/macpool`. Every pool command accepts `--data-dir` for
-another directory, which must be on the same APFS volume as the source bundles.
+starts it at login and again whenever it exits. Running `daemon install` again replaces the job.
+`macpool daemon` runs the same daemon in the foreground, and `--slots 1` limits it to one VM. The
+daemon keeps its state, clones, sockets, and logs in `~/Library/Application Support/macpool`.
+Every pool command accepts `--data-dir` for another directory, which must be on the same APFS
+volume as the source bundles. The daemon refuses a data directory that belongs to another user or
+that other users can write to.
 
 `lease` waits in a queue while every slot is busy and prints `queued position=N`. A higher
 `--priority` goes first, and equal priorities go in arrival order. Once a slot is free, the daemon
 clones the source and boots the clone. `lease` then prints `lease_id=`, `bundle=`, `address=`,
-`expires_at=`, and `ready`. The source must stay stopped while the daemon clones it.
+`expires_at=`, and `ready`. The daemon refuses a source that is running, has never booted, or lies
+on another volume, and a `--share` directory that does not exist.
 
 Without `--detach`, the lease lasts as long as `lease` runs. Control-C releases it. A command after
 `--` runs with `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS` in its environment, and
@@ -133,8 +136,14 @@ seconds and then ends the lease. `--restart never` ends the lease at the first s
 `--restart always` also boots the clone again after the guest shuts down.
 
 Each leased VM runs in its own `macpool supervise` process with a log in `logs/LEASE.log` in the
-data directory. The VMs keep running when the daemon stops. A new daemon reconnects to them, and a
-`lease` without `--detach` reconnects within 60 seconds.
+data directory. The log stays for 7 days after the lease ends. The VMs keep running when the daemon
+stops. A new daemon reconnects to them, and a `lease` without `--detach` reconnects within 60
+seconds. When `lease` cannot reconnect or its lease ends, it stops the command after `--` first.
+
+A supervisor that stops answering for 30 seconds, or ignores a stop for 30 seconds, gets `SIGTERM`
+and 10 seconds later `SIGKILL`. Its lease then boots again or ends as after a crash. A state file
+that the daemon cannot read moves aside as `state.json.invalid-TIME`, and the daemon starts without
+leases and stops the VMs that it finds.
 
 ## Known limitations
 
@@ -155,6 +164,9 @@ data directory. The VMs keep running when the daemon stops. A new daemon reconne
   exit with an error.
 - The daemon counts only its own VMs. A `run` or `create` beside it can take a slot that macOS
   allows, and a lease's boot then fails and counts as a crash.
+- Two daemons with different data directories each count two slots of their own, so together they
+  can try to run more VMs than macOS allows.
+- Under launchd the daemon's own log, `logs/daemon.log`, grows without rotation.
 
 ## Development
 
