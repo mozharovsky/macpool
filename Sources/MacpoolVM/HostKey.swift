@@ -16,11 +16,11 @@ public struct HostKey: Sendable, Hashable {
 
     /// Creates a key from its base64 blob.
     ///
-    /// - Parameter base64: The public key blob in base64. It must decode to a blob that starts
-    ///   with the Ed25519 type name.
+    /// - Parameter base64: The public key blob in base64. It must decode to a complete Ed25519
+    ///   key blob.
     /// - Returns: `nil` when the text is not an Ed25519 key blob.
     public init?(base64: some StringProtocol) {
-        guard let blob = Data(base64Encoded: String(base64)), Self.blobHasEd25519Type(blob) else {
+        guard let blob = Data(base64Encoded: String(base64)), Self.isEd25519Blob(blob) else {
             return nil
         }
         self.base64 = String(base64)
@@ -76,16 +76,16 @@ public struct HostKey: Sendable, Hashable {
         return keys
     }
 
-    /// Reports whether a key blob carries the Ed25519 type name.
+    /// Reports whether a decoded blob is a complete Ed25519 public key.
     ///
-    /// An OpenSSH key blob starts with the type name as a string with a four-byte big-endian
-    /// length.
+    /// An OpenSSH Ed25519 key blob holds the type name and the 32-byte key, each as a string with
+    /// a four-byte big-endian length, which makes 51 bytes.
     ///
     /// - Parameter blob: The decoded key blob.
-    /// - Returns: `true` when the blob names `ssh-ed25519`.
-    private static func blobHasEd25519Type(_ blob: Data) -> Bool {
+    /// - Returns: `true` when the blob names `ssh-ed25519` and holds exactly one 32-byte key.
+    private static func isEd25519Blob(_ blob: Data) -> Bool {
         let name = Data(algorithm.utf8)
-        let prefix = Data([0, 0, 0, UInt8(name.count)]) + name
-        return blob.count > prefix.count && blob.prefix(prefix.count) == prefix
+        let prefix = Data([0, 0, 0, UInt8(name.count)]) + name + Data([0, 0, 0, 32])
+        return blob.count == prefix.count + 32 && blob.prefix(prefix.count) == prefix
     }
 }

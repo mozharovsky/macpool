@@ -88,6 +88,27 @@ enum FileSystem {
         }
     }
 
+    /// Reads a whole file that may be missing.
+    ///
+    /// Only a missing file counts as absent. A file that exists and cannot be read is an error,
+    /// so a caller never mistakes an unreadable file for a missing one.
+    ///
+    /// - Parameters:
+    ///   - url: The file to read.
+    ///   - operation: The description used in an error.
+    /// - Returns: The file's bytes, or `nil` when the file does not exist.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file exists and
+    ///   cannot be read.
+    static func readIfPresent(_ url: URL, for operation: String) throws(MacpoolError) -> Data? {
+        do {
+            return try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        } catch {
+            throw .fileSystem(operation, url, error)
+        }
+    }
+
     /// Replaces a file's contents atomically.
     ///
     /// - Parameters:

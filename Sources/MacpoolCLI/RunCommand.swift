@@ -15,9 +15,11 @@ import MacpoolVM
 ///
 /// On a clone's first run the command replaces the guest password and SSH host keys that the
 /// clone inherited, through `CredentialRotation` from MacpoolVM, before it prints `ready`. It
-/// waits for SSH for that step even without `--wait-ssh`. When the rotation fails, the command
-/// stops the VM. A failure after the guest started to change leaves a record that later runs
-/// refuse.
+/// waits for SSH for that step even without `--wait-ssh`, and the step must end before the
+/// timeout. The stop-request file and a stop of the VM end the step early.
+///
+/// When the rotation fails, times out, or ends early, the command stops the VM. A failure after
+/// the guest started to change leaves a record that later runs refuse.
 struct RunCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -30,6 +32,10 @@ struct RunCommand: AsyncParsableCommand {
 
     /// The interval between SSH banner checks.
     static let sshInterval = Duration.milliseconds(500)
+
+    /// The longest wait for a VM event between checks of the stop-request file during the
+    /// credential rotation.
+    static let rotationWatchInterval = Duration.milliseconds(500)
 
     /// The hold time after which the command samples the VM's memory.
     static let memorySampleDelay = Duration.seconds(60)
@@ -62,8 +68,13 @@ struct RunCommand: AsyncParsableCommand {
     )
     var waitSSH = false
 
-    /// The longest wait for the guest's address and SSH server, in seconds.
-    @Option(help: "The longest wait for the guest's address and SSH server, in seconds.")
+    /// The longest wait for the guest's address, SSH server, and credential rotation, in seconds.
+    @Option(
+        help: """
+        The longest wait for the guest's address and SSH server, in seconds. \
+        On a clone's first run it also bounds the credential rotation.
+        """,
+    )
     var timeout = 900
 
     /// The time the VM keeps running once it is ready, in seconds.
@@ -90,7 +101,8 @@ struct RunCommand: AsyncParsableCommand {
     /// Boots the VM, measures the time to its network and SSH, holds it, and stops it.
     ///
     /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, or the VM stops early.
+    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
+    ///   fails, or the VM stops early.
     func run() async throws {
         try await perform()
     }
@@ -98,9 +110,14 @@ struct RunCommand: AsyncParsableCommand {
     /// Performs the subcommand with typed errors.
     ///
     /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, or the VM stops early.
+    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
+    ///   fails, or the VM stops early.
     private func perform() async throws(CommandError) {
         let target = VMBundle(root: URL(filePath: bundle))
+        // The lock comes before the settings, so a rotation that another run is still performing
+        // reads as in progress rather than as an abandoned one.
+        let lock = try lockBundle(target)
+        defer { withExtendedLifetime(lock) {} }
         var settings = try library { () throws(MacpoolError) in try target.settings() }
         guard let macAddress = MACAddress(settings.macAddress) else {
             throw .invalidValue("the bundle's MAC address \(settings.macAddress) is malformed")
@@ -119,8 +136,6 @@ struct RunCommand: AsyncParsableCommand {
         default:
             break
         }
-        let lock = try library { () throws(MacpoolError) in try BundleLock(bundle: target) }
-        defer { withExtendedLifetime(lock) {} }
 
         let earlierProcesses = await HostTools.virtualMachineProcesses()
         let devices = MachineDevices(sharedDirectory: share.map { URL(filePath: $0).absoluteURL })
@@ -178,8 +193,8 @@ struct RunCommand: AsyncParsableCommand {
     ///   - started: The time the start began.
     ///   - rotatesCredentials: Whether the bundle is a clone whose inherited credentials this run
     ///     replaces before the VM counts as ready.
-    /// - Throws: ``CommandError`` when a step times out, the credential rotation fails, or the VM
-    ///   stops early.
+    /// - Throws: ``CommandError`` when a step times out, the credential rotation fails or ends on
+    ///   request, or the VM stops early.
     private func attend(
         _ machine: VirtualMachine,
         processID: Int32?,
@@ -221,10 +236,7 @@ struct RunCommand: AsyncParsableCommand {
         }
         if rotatesCredentials {
             let rotating = clock.now
-            let logger = logging.makeLogger(label: "macpool.credentials")
-            let key = try await library { () async throws(MacpoolError) in
-                try await CredentialRotation.rotate(bundle: target, address: address, logger: logger)
-            }
+            let key = try await rotateCredentials(machine, target: target, address: address, deadline: deadline)
             Report.measure("rotate_seconds", Report.seconds(clock.now - rotating, decimals: 1))
             Report.measure("host_key", key.fingerprint)
         }
@@ -257,6 +269,83 @@ struct RunCommand: AsyncParsableCommand {
         }
         try? FileManager.default.removeItem(atPath: stopRequest)
         try await stop(machine)
+    }
+
+    /// Replaces a clone's inherited credentials while watching for a stop request and a VM stop.
+    ///
+    /// The rotation and the watch run as sibling tasks. The first one to end cancels the other,
+    /// and cancelling the rotation ends its running `ssh`, so the bundle keeps the state that the
+    /// rotation had reached.
+    ///
+    /// - Parameters:
+    ///   - machine: The running VM.
+    ///   - target: The VM's bundle.
+    ///   - address: The guest's IPv4 address.
+    ///   - deadline: The time by which the rotation must end.
+    /// - Returns: The guest's new host key.
+    /// - Throws: ``CommandError/library(_:)`` when the rotation fails or times out,
+    ///   ``CommandError/stopRequested`` when the stop-request file appears,
+    ///   ``CommandError/stopped(_:)`` when the VM stops, and ``CommandError/interrupted`` when the
+    ///   calling task is cancelled.
+    private func rotateCredentials(
+        _ machine: VirtualMachine,
+        target: VMBundle,
+        address: String,
+        deadline: ContinuousClock.Instant,
+    ) async throws(CommandError) -> HostKey {
+        let logger = logging.makeLogger(label: "macpool.credentials")
+        let timeout = deadline - ContinuousClock.now
+        let stopRequest = target.stopRequest.path(percentEncoded: false)
+        let event = await withTaskGroup(of: RotationEvent.self) { group in
+            group.addTask {
+                do throws(MacpoolError) {
+                    return try await .finished(.success(CredentialRotation.rotate(
+                        bundle: target,
+                        address: address,
+                        timeout: timeout,
+                        logger: logger,
+                    )))
+                } catch {
+                    return .finished(.failure(error))
+                }
+            }
+            group.addTask {
+                while !Task.isCancelled {
+                    if FileManager.default.fileExists(atPath: stopRequest) {
+                        return .stopRequested
+                    }
+                    do throws(MacpoolError) {
+                        switch try await machine.nextEvent(within: Self.rotationWatchInterval) {
+                        case nil:
+                            break
+                        case let .networkDisconnected(description):
+                            Report.line("network attachment disconnected: \(description)")
+                        case let event?:
+                            return .machineStopped(event)
+                        }
+                    } catch {
+                        return .finished(.failure(error))
+                    }
+                }
+                return .watchCancelled
+            }
+            let first = await group.next() ?? .watchCancelled
+            group.cancelAll()
+            return first
+        }
+        switch event {
+        case let .finished(.success(key)):
+            return key
+        case let .finished(.failure(error)):
+            throw .library(error)
+        case .stopRequested:
+            try? FileManager.default.removeItem(atPath: stopRequest)
+            throw .stopRequested
+        case let .machineStopped(event):
+            throw .stopped(event)
+        case .watchCancelled:
+            throw .interrupted
+        }
     }
 
     /// Asks the guest to stop and forces the stop when it does not.
@@ -322,4 +411,16 @@ struct RunCommand: AsyncParsableCommand {
             Report.measure("vm_footprint", footprint)
         }
     }
+}
+
+/// The first of the events that end a credential rotation.
+private enum RotationEvent: Sendable {
+    /// The rotation ended, or the VM's event stream failed.
+    case finished(Result<HostKey, MacpoolError>)
+    /// The bundle's stop-request file appeared.
+    case stopRequested
+    /// The VM stopped.
+    case machineStopped(MachineEvent)
+    /// The watch ended because its task was cancelled.
+    case watchCancelled
 }

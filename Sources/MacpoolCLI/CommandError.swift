@@ -52,6 +52,9 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     /// - Parameter event: The event that reported the stop.
     case stopped(MachineEvent)
 
+    /// The bundle's stop-request file appeared before the VM was ready.
+    case stopRequested
+
     /// The host's DHCP server has no lease for the guest.
     ///
     /// - Parameter macAddress: The guest's MAC address.
@@ -85,11 +88,34 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             "no \(step) after \(seconds) s"
         case let .stopped(event):
             "VM stopped: \(event)"
+        case .stopRequested:
+            "a stop was requested before the VM was ready"
         case let .noLease(macAddress):
             "no lease for \(macAddress)"
         case let .invalidValue(reason):
             reason
         }
+    }
+}
+
+/// Takes a bundle's lock and explains a lock held by an unfinished credential rotation.
+///
+/// - Parameter bundle: The bundle to lock.
+/// - Returns: The lock, which the caller keeps alive while it uses the bundle.
+/// - Throws: ``CommandError/library(_:)`` with `MacpoolError.credentialRotationInProgress` when
+///   another command holds the lock of a bundle whose rotation is pending or started, or with the
+///   lock's own error otherwise.
+func lockBundle(_ bundle: VMBundle) throws(CommandError) -> BundleLock {
+    do {
+        return try BundleLock(bundle: bundle)
+    } catch let .bundleInUse(path) {
+        let state = try? bundle.settings().credentialRotation
+        if state == .pending || state == .started {
+            throw .library(.credentialRotationInProgress(path: path))
+        }
+        throw .library(.bundleInUse(path: path))
+    } catch {
+        throw .library(error)
     }
 }
 

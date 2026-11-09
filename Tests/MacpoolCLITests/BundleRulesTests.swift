@@ -35,7 +35,19 @@ struct BundleRulesTests {
         await #expect(throws: CommandError.library(.credentialRotationIncomplete(path: directory.path))) {
             try await command.run()
         }
-        #expect(!FileManager.default.fileExists(atPath: directory.bundle.lockFile.path(percentEncoded: false)))
+        #expect(!BundleLock.isHeld(on: directory.bundle))
+    }
+
+    /// Reports a rotation as in progress while another command holds the clone.
+    @Test(arguments: [CredentialRotationState.pending, .started])
+    func reportsRotationInProgress(state: CredentialRotationState) async throws {
+        let directory = try BundleDirectory(hasBooted: true, credentialRotation: state)
+        let lock = try BundleLock(bundle: directory.bundle)
+        let command = try #require(try Macpool.parseAsRoot(["run", "--bundle", directory.path]) as? RunCommand)
+        await #expect(throws: CommandError.library(.credentialRotationInProgress(path: directory.path))) {
+            try await command.run()
+        }
+        withExtendedLifetime(lock) {}
     }
 
     /// Refuses to clone a bundle that another command holds.

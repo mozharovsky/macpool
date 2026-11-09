@@ -2,6 +2,65 @@ import Foundation
 import Subprocess
 import System
 
+/// The result of one command in a guest.
+struct GuestCommandResult: Sendable, Equatable {
+    /// Whether `ssh` and the remote command exited with status zero.
+    let succeeded: Bool
+
+    /// The exit status of `ssh`, such as `exited(255)`.
+    let status: String
+
+    /// The remote command's standard output.
+    let output: String
+
+    /// The standard error of `ssh` and the remote command.
+    let errorOutput: String
+
+    /// The exit status and the end of the error output.
+    var failureSummary: String {
+        let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "ssh \(status) without output" : "ssh \(status): \(trimmed.suffix(400))"
+    }
+}
+
+/// A way to run commands in a guest that logs in with a stored account's password.
+///
+/// ``GuestShell`` runs `ssh`, and tests replace it with a scripted runner.
+protocol GuestCommandRunner: Sendable {
+    /// Writes a `known_hosts` file that pins keys under ``VMBundle/hostKeyAlias``.
+    ///
+    /// - Parameters:
+    ///   - keys: The keys to accept. An empty list makes the file empty.
+    ///   - name: The file's name inside the runner's private directory.
+    /// - Returns: The file.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file cannot be
+    ///   written.
+    func writeKnownHosts(_ keys: [HostKey], named name: String) throws(MacpoolError) -> URL
+
+    /// Runs a command in the guest.
+    ///
+    /// Cancelling the calling task ends the command.
+    ///
+    /// - Parameters:
+    ///   - command: The command line that the account's login shell runs.
+    ///   - input: The command's standard input, which keeps secrets out of process listings.
+    ///   - username: The account's short user name, which must need no shell quoting.
+    ///   - accountFile: The account file whose password the login sends.
+    ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
+    ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
+    ///     A key that differs from a pinned one fails the connection either way.
+    /// - Returns: The command's outputs and whether it succeeded.
+    /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when the command cannot start.
+    func run(
+        _ command: String,
+        input: String,
+        username: String,
+        accountFile: URL,
+        knownHosts: URL,
+        trustsFirstKey: Bool,
+    ) async throws(MacpoolError) -> GuestCommandResult
+}
+
 /// An SSH client for one guest that logs in with the password of a stored account file.
 ///
 /// The client ignores the user's SSH configuration and agent, so no identity leaves the host. It
@@ -11,49 +70,25 @@ import System
 /// Every connection looks the host key up under ``VMBundle/hostKeyAlias`` in a `known_hosts` file
 /// that the caller writes with ``writeKnownHosts(_:named:)``, and accepts only Ed25519 keys. Call
 /// ``removeDirectory()`` when the client is no longer needed.
-struct GuestShell {
-    /// The result of one remote command.
-    struct CommandResult {
-        /// Whether `ssh` and the remote command exited with status zero.
-        let succeeded: Bool
-
-        /// The exit status of `ssh`, such as `exited(255)`.
-        let status: String
-
-        /// The remote command's standard output.
-        let output: String
-
-        /// The standard error of `ssh` and the remote command.
-        let errorOutput: String
-
-        /// The exit status and the end of the error output.
-        var failureSummary: String {
-            let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "ssh \(status) without output" : "ssh \(status): \(trimmed.suffix(400))"
-        }
-    }
-
+///
+/// A process that ends by a signal leaves the directory in the temporary directory. It holds only
+/// the askpass script and public keys.
+struct GuestShell: GuestCommandRunner {
     /// The most bytes collected from each output stream of a command.
     static let outputLimit = 1 << 16
 
     /// The guest's IPv4 address.
     let address: String
 
-    /// The account's short user name, which ``CredentialRotation`` checks before it builds a
-    /// command line with it.
-    let username: String
-
     /// The private temporary directory with the askpass script and the `known_hosts` files.
     let directory: URL
 
     /// Creates a client and its private temporary directory.
     ///
-    /// - Parameters:
-    ///   - address: The guest's IPv4 address.
-    ///   - username: The account's short user name.
+    /// - Parameter address: The guest's IPv4 address.
     /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the directory or the
     ///   askpass script cannot be created.
-    init(address: String, username: String) throws(MacpoolError) {
+    init(address: String) throws(MacpoolError) {
         let template = FileManager.default.temporaryDirectory.appending(path: "macpool-ssh-XXXXXX").filePath
         var buffer = Array(template.utf8CString)
         guard mkdtemp(&buffer) != nil else {
@@ -62,7 +97,6 @@ struct GuestShell {
         // mkdtemp creates the directory with owner-only permissions and writes its name in place.
         let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         self.address = address
-        self.username = username
         directory = URL(filePath: path, directoryHint: .isDirectory)
         let script = "#!/bin/sh\nexec /usr/bin/plutil -extract password raw -o - \"$MACPOOL_ACCOUNT_FILE\"\n"
         do {
@@ -78,7 +112,7 @@ struct GuestShell {
         directory.appending(path: "askpass")
     }
 
-    /// Writes a `known_hosts` file that pins keys under ``VMBundle/hostKeyAlias``.
+    /// Writes a `known_hosts` file in the client's directory.
     ///
     /// - Parameters:
     ///   - keys: The keys to accept. An empty list makes the file empty.
@@ -93,11 +127,14 @@ struct GuestShell {
         return file
     }
 
-    /// Runs a command in the guest.
+    /// Runs a command in the guest through `ssh`.
+    ///
+    /// Cancelling the calling task terminates `ssh`.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
     ///   - input: The command's standard input, which keeps secrets out of process listings.
+    ///   - username: The account's short user name, which must need no shell quoting.
     ///   - accountFile: The account file whose password `ssh` sends.
     ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
@@ -108,10 +145,11 @@ struct GuestShell {
     func run(
         _ command: String,
         input: String,
+        username: String,
         accountFile: URL,
         knownHosts: URL,
         trustsFirstKey: Bool,
-    ) async throws(MacpoolError) -> CommandResult {
+    ) async throws(MacpoolError) -> GuestCommandResult {
         let arguments = [
             "-F", "/dev/null",
             "-o", "ForwardAgent=no",
@@ -145,7 +183,7 @@ struct GuestShell {
                 output: .string(limit: Self.outputLimit),
                 error: .string(limit: Self.outputLimit),
             )
-            return CommandResult(
+            return GuestCommandResult(
                 succeeded: result.terminationStatus.isSuccess,
                 status: "\(result.terminationStatus)",
                 output: result.standardOutput,

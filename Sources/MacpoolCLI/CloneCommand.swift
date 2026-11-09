@@ -39,7 +39,7 @@ struct CloneCommand: AsyncParsableCommand {
     private func perform() throws(CommandError) {
         let source = VMBundle(root: URL(filePath: from))
         _ = try library { () throws(MacpoolError) in try source.settings() }
-        let lock = try library { () throws(MacpoolError) in try BundleLock(bundle: source) }
+        let lock = try lockBundle(source)
         defer { withExtendedLifetime(lock) {} }
         let clock = ContinuousClock()
         let started = clock.now
