@@ -145,6 +145,23 @@ struct CredentialRotationTests {
         #expect(try bundle.settings().credentialRotation == .pending)
     }
 
+    /// Refuses a `known_hosts` file without an Ed25519 pin instead of trusting the first key.
+    @Test func refusesKnownHostsWithoutEd25519Pin() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .pending)
+        try Data("macpool-guest ecdsa-sha2-nistp256 \(HostKeyTests.ecdsa)\n".utf8).write(to: bundle.knownHostsFile)
+        let guest = try ScriptedGuest(directory: directory, replies: [])
+
+        await #expect(throws: MacpoolError.credentialRotation(
+            step: "starting",
+            reason: "known_hosts pins no Ed25519 key, so remove it to trust the clone's first key",
+        )) {
+            try await Self.rotate(bundle, through: guest)
+        }
+        #expect(guest.calls.isEmpty)
+        #expect(try bundle.settings().credentialRotation == .pending)
+    }
+
     /// Keeps the rotation pending when the inherited account never logs in.
     @Test func keepsPendingAfterFailedFirstLogin() async throws {
         let directory = try TemporaryDirectory()

@@ -119,9 +119,11 @@ public enum CredentialRotation {
     /// The guest must have booted from the clone's disk and answer on SSH. The bundle must record
     /// ``CredentialRotationState/pending`` and hold the inherited account. Its user name may hold
     /// ASCII letters, digits, `.`, `_`, and `-`, and its password only ASCII letters and digits,
-    /// as generated passwords do. When its `known_hosts` holds Ed25519 keys,
-    /// the first connection must present one of them. Without the file, the first connection
-    /// trusts the key the guest presents, and the call logs a warning.
+    /// as generated passwords do.
+    ///
+    /// When the bundle's `known_hosts` exists, it must pin at least one Ed25519 key, and the first
+    /// connection must present one of them. Without the file, the first connection trusts the key
+    /// the guest presents, and the call logs a warning.
     ///
     /// On success the bundle's account file holds the new password with owner-only permissions,
     /// its `known_hosts` pins only the new key, and its settings record
@@ -135,9 +137,10 @@ public enum CredentialRotation {
     ///   - logger: The logger for progress and the trust warning.
     /// - Returns: The guest's new Ed25519 host key.
     /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when no rotation is pending, the
-    ///   account is unusable, a login fails, the guest script fails, the time runs out, or the task
-    ///   is cancelled. Other ``MacpoolError`` values report bundle files that cannot be read or
-    ///   written, including a `known_hosts` file that exists and cannot be read.
+    ///   account is unusable, `known_hosts` pins no Ed25519 key, a login fails, the guest script
+    ///   fails, the time runs out, or the task is cancelled. Other ``MacpoolError`` values report
+    ///   bundle files that cannot be read or written, including a `known_hosts` file that exists
+    ///   and cannot be read.
     public static func rotate(
         bundle: VMBundle,
         address: String,
@@ -179,6 +182,12 @@ public enum CredentialRotation {
             )
         }
         let pinned = try inheritedKeys(of: bundle)
+        guard pinned != [] else {
+            throw .credentialRotation(
+                step: "starting",
+                reason: "known_hosts pins no Ed25519 key, so remove it to trust the clone's first key",
+            )
+        }
         if pinned == nil {
             logger.warning("The source pins no host key, so the rotation trusts the key the clone presents first")
         }
