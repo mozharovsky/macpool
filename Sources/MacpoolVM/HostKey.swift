@@ -55,25 +55,36 @@ public struct HostKey: Sendable, Hashable {
         "\(alias) \(Self.algorithm) \(base64)"
     }
 
-    /// Collects the Ed25519 keys of a `known_hosts` file.
+    /// Collects the Ed25519 keys that a `known_hosts` file trusts.
     ///
     /// The host names are ignored, because a bundle's file only ever holds keys of its own guest.
     /// Older bundles name the guest by its address, and later ones by ``VMBundle/hostKeyAlias``.
-    /// Comments, marked lines such as `@revoked`, and keys of other types are skipped.
+    /// A key that an `@revoked` line names is left out wherever else it appears. Comments, other
+    /// marked lines, and keys of other types are skipped.
     ///
     /// - Parameter text: The file's contents.
-    /// - Returns: The distinct keys in file order.
+    /// - Returns: The distinct trusted keys in file order.
     public static func pinnedKeys(inKnownHosts text: String) -> [HostKey] {
         var keys: [HostKey] = []
+        var revoked: Set<HostKey> = []
         for line in text.split(whereSeparator: \.isNewline) {
-            let fields = line.split(whereSeparator: \.isWhitespace)
-            guard fields.count >= 3, !fields[0].hasPrefix("#"), !fields[0].hasPrefix("@"), fields[1] == algorithm,
-                  let key = HostKey(base64: fields[2]), !keys.contains(key) else {
+            var fields = line.split(whereSeparator: \.isWhitespace)[...]
+            let isRevoked = fields.first == "@revoked"
+            if isRevoked {
+                fields = fields.dropFirst()
+            }
+            guard fields.count >= 3, let marker = fields.first?.first, marker != "#", marker != "@",
+                  fields[fields.startIndex + 1] == algorithm,
+                  let key = HostKey(base64: fields[fields.startIndex + 2]) else {
                 continue
             }
-            keys.append(key)
+            if isRevoked {
+                revoked.insert(key)
+            } else if !keys.contains(key) {
+                keys.append(key)
+            }
         }
-        return keys
+        return keys.filter { !revoked.contains($0) }
     }
 
     /// Reports whether a decoded blob is a complete Ed25519 public key.

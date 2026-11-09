@@ -37,7 +37,7 @@ struct HostKeyTests {
         let text = """
         # A comment
         192.168.64.4 ssh-ed25519 \(Self.first)
-        @revoked * ssh-ed25519 \(Self.second)
+        @cert-authority * ssh-ed25519 \(Self.second)
         192.168.64.4 ecdsa-sha2-nistp256 \(Self.ecdsa)
         macpool-guest ssh-ed25519 \(Self.first)
         macpool-guest ssh-ed25519 \(Self.second) comment
@@ -46,5 +46,17 @@ struct HostKeyTests {
         let keys = HostKey.pinnedKeys(inKnownHosts: text)
         #expect(keys.map(\.base64) == [Self.first, Self.second])
         #expect(HostKey.pinnedKeys(inKnownHosts: "").isEmpty)
+    }
+
+    /// Leaves out a key that any `@revoked` line names, before or after its pin.
+    @Test func dropsRevokedKeys() {
+        let text = """
+        192.168.64.4 ssh-ed25519 \(Self.first)
+        macpool-guest ssh-ed25519 \(Self.second)
+        @revoked 192.168.64.4 ssh-ed25519 \(Self.first)
+        """
+        #expect(HostKey.pinnedKeys(inKnownHosts: text).map(\.base64) == [Self.second])
+        let allRevoked = "@revoked * ssh-ed25519 \(Self.second)\nmacpool-guest ssh-ed25519 \(Self.second)\n"
+        #expect(HostKey.pinnedKeys(inKnownHosts: allRevoked).isEmpty)
     }
 }

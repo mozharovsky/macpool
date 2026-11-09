@@ -121,9 +121,9 @@ public enum CredentialRotation {
     /// ASCII letters, digits, `.`, `_`, and `-`, and its password only ASCII letters and digits,
     /// as generated passwords do.
     ///
-    /// When the bundle's `known_hosts` exists, it must pin at least one Ed25519 key, and the first
-    /// connection must present one of them. Without the file, the first connection trusts the key
-    /// the guest presents, and the call logs a warning.
+    /// When the bundle's `known_hosts` exists, it must pin at least one Ed25519 key that no
+    /// `@revoked` line names, and the first connection must present one of them. Without the
+    /// file, the first connection trusts the key the guest presents, and the call logs a warning.
     ///
     /// On success the bundle's account file holds the new password with owner-only permissions,
     /// its `known_hosts` pins only the new key, and its settings record
@@ -246,7 +246,7 @@ public enum CredentialRotation {
         return key
     }
 
-    /// Reads the Ed25519 keys that the clone's copied `known_hosts` pins.
+    /// Reads the Ed25519 keys that the clone's copied `known_hosts` pins and does not revoke.
     ///
     /// - Parameter bundle: The clone's bundle.
     /// - Returns: The pinned keys, or `nil` when the file does not exist.
