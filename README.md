@@ -98,8 +98,8 @@ Every command prints `measure key=value` lines with its timings and sizes.
 - A clone accepts its source's password and host key until its first `run` prints `ready`, which
   took 11 to 69 seconds after SSH answered. Anyone with the source's password, in another guest or
   on the host, can log in during that time and leave access behind that `ready` does not reveal.
-- When the source's `known_hosts` pins no Ed25519 key, a clone's first `run` trusts the first key
-  the clone presents.
+- When the source has no `known_hosts` file, a clone's first `run` trusts the first key the clone
+  presents. A file without an unrevoked Ed25519 pin makes that `run` fail instead.
 - The host finds a guest's service process by comparing process listings from before and after
   the start. When another VM starts in the same moment, `run` skips the priority change and the
   memory sample.
