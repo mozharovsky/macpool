@@ -184,15 +184,18 @@ public actor PoolDaemon {
 
     /// Takes the data directory's lock and reads the stored leases.
     ///
-    /// A state file that cannot be read moves aside with an `.invalid-` suffix and the time, and
-    /// the daemon starts without leases. ``start()`` then stops the supervisors and deletes the
-    /// clones that belong to no lease.
+    /// A malformed state file moves aside with an `.invalid-` suffix and the time, and the daemon
+    /// starts without leases. ``start()`` then stops the supervisors and deletes the clones that
+    /// belong to no lease. A state file in another build's format, or one that cannot be opened,
+    /// stops the daemon instead and keeps every lease for a daemon that can read it.
     ///
     /// - Parameter configuration: The settings and collaborators.
     /// - Throws: ``PoolError/daemonRunning(path:)`` when another daemon serves the directory,
     ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range,
     ///   ``PoolError/insecureDirectory(path:reason:)`` when another user could control the
-    ///   directory, or another ``PoolError`` when the directory or the state file cannot be used.
+    ///   directory, ``PoolError/unsupportedStateVersion(path:version:)`` when another build wrote
+    ///   the state file, or another ``PoolError`` when the directory or the state file cannot be
+    ///   used.
     public init(configuration: Configuration) throws(PoolError) {
         guard (1 ... PoolPolicy.maximumSlots).contains(configuration.policy.slots) else {
             throw .invalidRequest(reason: "the daemon takes 1 to \(PoolPolicy.maximumSlots) slots")

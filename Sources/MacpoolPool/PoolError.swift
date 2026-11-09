@@ -52,6 +52,16 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: Why the contents are unusable.
     case invalidState(path: String, reason: String)
 
+    /// The pool state file has a format version that this build does not read.
+    ///
+    /// Another build wrote the file, and that build can still resume its leases, so the daemon
+    /// leaves the file and the clones alone.
+    ///
+    /// - Parameters:
+    ///   - path: The state file.
+    ///   - version: The file's format version.
+    case unsupportedStateVersion(path: String, version: Int)
+
     /// A lease request names values outside the accepted ranges.
     ///
     /// - Parameter reason: The rejected value and its range.
@@ -116,6 +126,8 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "malformed message: \(reason)"
         case let .invalidState(path, reason):
             "the pool state \(path) is unusable: \(reason)"
+        case let .unsupportedStateVersion(path, version):
+            "the pool state \(path) has format version \(version), so start the macpool build that wrote it"
         case let .invalidRequest(reason):
             reason
         case let .unknownLease(id):

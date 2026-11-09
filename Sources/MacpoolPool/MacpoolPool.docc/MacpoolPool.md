@@ -46,9 +46,10 @@ between restarts double up to a limit, and ``PoolPolicy`` sets the number of res
 
 The daemon stores its leases in a JSON file in the data directory after every change and holds an
 exclusive lock on the directory while it runs. A new daemon reads the file, reconnects to the
-supervisors that still run, and treats a supervisor that ended meanwhile as a stopped VM. A file
-that cannot be read moves aside, and the daemon starts without leases. It then stops the
-supervisors and deletes the clones that belong to no lease. Clients
+supervisors that still run, and treats a supervisor that ended meanwhile as a stopped VM. A
+malformed file moves aside, and the daemon starts without leases. It then stops the supervisors
+and deletes the clones that belong to no lease. A file in another build's format keeps the daemon
+from starting, so that build can still resume the leases. Clients
 of attached leases get a grace period to reattach. ``LaunchAgent`` describes the launchd job that
 starts the daemon at login and again after it exits.
 

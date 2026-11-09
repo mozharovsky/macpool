@@ -6,15 +6,24 @@ import Foundation
 /// write goes to a temporary file that reaches the disk before it replaces the old one by rename,
 /// so a crash or a power loss leaves either the old state or the new one.
 struct PoolStore {
+    /// The part of the state file that every format version shares.
+    private struct Header: Decodable {
+        /// The format version.
+        let version: Int
+    }
+
     /// The state file.
     let file: URL
 
     /// Reads the stored state.
     ///
+    /// The call reads the format version before the rest, so a file in another build's format
+    /// never counts as malformed.
+    ///
     /// - Returns: The state, or an empty state when the file does not exist.
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the file exists and cannot
-    ///   be read, or ``PoolError/invalidState(path:reason:)`` when it is malformed or has another
-    ///   format version.
+    ///   be read, ``PoolError/unsupportedStateVersion(path:version:)`` when it has another format
+    ///   version, or ``PoolError/invalidState(path:reason:)`` when it is malformed.
     func load() throws(PoolError) -> PoolState {
         let data: Data
         do {
@@ -24,19 +33,21 @@ struct PoolStore {
         } catch {
             throw .fileSystem("reading the pool state", file, error)
         }
-        let state: PoolState
+        let path = file.path(percentEncoded: false)
+        let header: Header
         do {
-            state = try MessageCoding.decoder.decode(PoolState.self, from: data)
+            header = try MessageCoding.decoder.decode(Header.self, from: data)
         } catch {
-            throw .invalidState(path: file.path(percentEncoded: false), reason: "\(error)")
+            throw .invalidState(path: path, reason: "\(error)")
         }
-        guard state.version == PoolState.currentVersion else {
-            throw .invalidState(
-                path: file.path(percentEncoded: false),
-                reason: "format version \(state.version) instead of \(PoolState.currentVersion)",
-            )
+        guard header.version == PoolState.currentVersion else {
+            throw .unsupportedStateVersion(path: path, version: header.version)
         }
-        return state
+        do {
+            return try MessageCoding.decoder.decode(PoolState.self, from: data)
+        } catch {
+            throw .invalidState(path: path, reason: "\(error)")
+        }
     }
 
     /// Replaces the stored state.

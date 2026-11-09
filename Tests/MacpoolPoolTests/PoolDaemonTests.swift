@@ -261,6 +261,23 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
+    /// Refuses to start on another build's state file and leaves the file and the clones alone.
+    @Test func keepsStateOfAnotherBuild() throws {
+        let pool = try PoolFixture()
+        try pool.directory.prepare()
+        let text = Data(#"{"version": 99, "leases": []}"#.utf8)
+        try text.write(to: pool.directory.stateFile)
+        let id = try #require(LeaseID("0a1b2c3d"))
+        let clone = pool.directory.bundle(for: id).root
+        try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: false)
+        let path = pool.directory.stateFile.path(percentEncoded: false)
+        #expect(throws: PoolError.unsupportedStateVersion(path: path, version: 99)) {
+            try pool.daemon()
+        }
+        #expect(try Data(contentsOf: pool.directory.stateFile) == text)
+        #expect(FileManager.default.fileExists(atPath: clone.path(percentEncoded: false)))
+    }
+
     /// Refuses a second daemon for the same data directory.
     @Test func refusesSecondDaemon() async throws {
         let pool = try PoolFixture()

@@ -45,7 +45,7 @@ struct PoolStoreTests {
         #expect(text.contains("\"supervisor_pid\" : 4242"))
     }
 
-    /// Rejects malformed files and other format versions.
+    /// Rejects malformed files and tells other format versions apart from them.
     @Test func rejectsUnusableFiles() throws {
         let directory = try ShortDirectory()
         let store = PoolStore(file: directory.url.appending(path: "state.json"))
@@ -59,15 +59,10 @@ struct PoolStoreTests {
                 false
             }
         }
-        try Data(#"{"version": 99, "leases": []}"#.utf8).write(to: store.file)
-        #expect {
+        // A newer format may change every other field, so only the version decides.
+        try Data(#"{"version": 99, "leases": "changed"}"#.utf8).write(to: store.file)
+        #expect(throws: PoolError.unsupportedStateVersion(path: store.file.path(percentEncoded: false), version: 99)) {
             try store.load()
-        } throws: { error in
-            if case let .invalidState(_, reason) = error as? PoolError {
-                reason == "format version 99 instead of 1"
-            } else {
-                false
-            }
         }
     }
 
