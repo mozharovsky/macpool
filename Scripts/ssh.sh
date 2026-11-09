@@ -9,7 +9,8 @@
 # bundle paths that contain them.
 #
 # Bundles from older versions pinned the guest's Ed25519 key under its address. The script
-# copies such keys to the alias before it connects, so those pins keep applying.
+# copies such keys and any revocations of Ed25519 keys to the alias before it connects, so they
+# keep applying.
 #
 # A clone whose credential rotation is pending or unfinished has no usable account, so the
 # script refuses it. A running macpool run on the bundle means the rotation is still under way.
@@ -34,6 +35,13 @@ case $rotation in
         ;;
 esac
 known_hosts=$bundle/known_hosts
+if [ -f "$known_hosts" ]; then
+    revoked=$(awk '$1 == "@revoked" && $3 == "ssh-ed25519" { keys[$4] = 1; if (("," $2 ",") ~ /,macpool-guest,/) done[$4] = 1 }
+        END { for (key in keys) if (!(key in done)) print "@revoked macpool-guest ssh-ed25519 " key }' "$known_hosts")
+    if [ -n "$revoked" ]; then
+        printf "%s\n" "$revoked" >>"$known_hosts"
+    fi
+fi
 if [ -f "$known_hosts" ] && ! awk '$1 !~ /^[#@]/ && ("," $1 ",") ~ /,macpool-guest,/ { found = 1 } END { exit !found }' "$known_hosts"; then
     legacy=$(awk '$1 !~ /^[#@]/ && $2 == "ssh-ed25519" { print "macpool-guest ssh-ed25519 " $3 }' "$known_hosts")
     if [ -n "$legacy" ]; then
