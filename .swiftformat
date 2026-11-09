@@ -1,0 +1,12 @@
+--swiftversion 6.2
+--indent 4
+--linebreaks lf
+--maxwidth 120
+--semicolons never
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--closingparen balanced
+--trailing-commas always
+--disable opaqueGenericParameters,swiftTestingTestCaseNames,wrapMultilineStatementBraces
+--exclude .build,.cache

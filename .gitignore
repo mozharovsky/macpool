@@ -1,0 +1,5 @@
+/.build
+/.cache
+/.swiftpm
+/.docc-build
+.DS_Store

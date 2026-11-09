@@ -1,0 +1,11 @@
+#!/bin/sh
+# Checks formatting and lint rules before a commit.
+#
+# Scripts/install-hooks.sh installs this hook. It also runs by hand from any directory of the
+# repository.
+set -eu
+root=$(git rev-parse --show-toplevel)
+. "$root/Scripts/toolchain.sh"
+cd "$root"
+xcrun swift package plugin --allow-writing-to-package-directory swiftformat --lint --cache ignore
+xcrun swift package plugin --allow-writing-to-package-directory swiftlint --strict

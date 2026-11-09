@@ -1,0 +1,20 @@
+#!/bin/sh
+# Rejects a commit subject that does not follow the repository's Conventional Commits form.
+#
+# The subject reads `type(scope): summary` with an optional scope and stays under 72 characters.
+# Git's own merge, fixup, and squash subjects pass unchanged.
+set -eu
+subject=$(sed -n 1p "$1")
+case $subject in
+    Merge\ * | fixup!\ * | squash!\ * | amend!\ *) exit 0 ;;
+esac
+types='feat|fix|docs|refactor|test|perf|ci|build|chore'
+scopes='vm|cli|tools|docs|ci'
+if ! printf '%s\n' "$subject" | grep -qE "^($types)(\(($scopes)\))?!?: [^ ].*$"; then
+    echo "Commit subjects read 'type(scope): summary'. Types are $types and scopes are $scopes." >&2
+    exit 1
+fi
+if [ "${#subject}" -ge 72 ]; then
+    echo "Commit subjects stay under 72 characters. This one has ${#subject}." >&2
+    exit 1
+fi

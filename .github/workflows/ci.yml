@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Format, lint, build, test, and docs
+    # Hosted macOS runners are VMs themselves, so the opt-in VM tests stay off here.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select the pinned Xcode
+        id: xcode
+        run: |
+          version=$(cat .xcode-version)
+          developer_dir="/Applications/Xcode_$version.app/Contents/Developer"
+          if [ ! -d "$developer_dir" ]; then
+            echo "::error::The runner image has no $developer_dir. The package needs Xcode $version and its macOS 27 SDK."
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Show the toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          selected=$(xcodebuild -version | sed -n 1p)
+          if [ "$selected" != "Xcode ${{ steps.xcode.outputs.version }}" ]; then
+            echo "::error::DEVELOPER_DIR selects $selected. The repository pins Xcode ${{ steps.xcode.outputs.version }}."
+            exit 1
+          fi
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-${{ steps.xcode.outputs.version }}-${{ hashFiles('Package.resolved') }}
+
+      - name: Check dependency licenses
+        run: Scripts/check-licenses.sh
+
+      - name: Check formatting
+        run: xcrun swift package plugin --allow-writing-to-package-directory swiftformat --lint --cache ignore
+
+      - name: Lint
+        run: xcrun swift package plugin --allow-writing-to-package-directory swiftlint --strict
+
+      - name: Build
+        run: xcrun swift build --build-tests
+
+      - name: Test
+        run: xcrun swift test --skip-build
+
+      - name: Build the release binary and sign it
+        run: Scripts/build.sh
+
+      - name: Build documentation
+        run: |
+          mkdir -p .build/docs
+          for target in MacpoolVM MacpoolCLI; do
+            xcrun swift package --allow-writing-to-directory .build/docs \
+              generate-documentation --target "$target" --warnings-as-errors \
+              --output-path ".build/docs/$target"
+          done

@@ -1,0 +1,94 @@
+excluded:
+  - .build
+  - .cache
+
+only_rules:
+  - closing_brace
+  - closure_parameter_position
+  - colon
+  - comma
+  - comment_spacing
+  - contains_over_first_not_nil
+  - custom_rules
+  - discouraged_direct_init
+  - duplicate_imports
+  - empty_count
+  - fatal_error_message
+  - first_where
+  - force_cast
+  - force_try
+  - force_unwrapping
+  - identical_operands
+  - implicitly_unwrapped_optional
+  - leading_whitespace
+  - legacy_objc_type
+  - legacy_random
+  - line_length
+  - missing_docs
+  - opening_brace
+  - function_name_whitespace
+  - private_over_fileprivate
+  - redundant_discardable_let
+  - implicit_optional_initialization
+  - return_arrow_whitespace
+  - shorthand_operator
+  - statement_position
+  - syntactic_sugar
+  - toggle_bool
+  - trailing_comma
+  - trailing_newline
+  - trailing_semicolon
+  - trailing_whitespace
+  - unowned_variable_capture
+  - unused_closure_parameter
+  - unused_enumerated
+  - vertical_whitespace
+  - void_return
+
+force_cast: error
+force_try: error
+force_unwrapping: error
+implicitly_unwrapped_optional: error
+unowned_variable_capture: error
+
+trailing_comma:
+  mandatory_comma: true
+
+line_length:
+  warning: 120
+  error: 120
+  ignores_comments: false
+  ignores_urls: true
+
+missing_docs:
+  error:
+    - open
+    - public
+    - package
+    - internal
+    - fileprivate
+    - private
+  excludes_extensions: false
+  excludes_inherited_types: false
+  excludes_trivial_init: true
+  evaluate_effective_access_control_level: true
+
+custom_rules:
+  unchecked_sendable:
+    name: Unchecked Sendable
+    regex: '@unchecked\s+Sendable'
+    message: Make the type Sendable through its stored properties, or explain the framework type that forces this in AGENTS.md.
+    severity: error
+  nonisolated_unsafe:
+    name: Unsafe nonisolated
+    regex: 'nonisolated\s*\(\s*unsafe\s*\)'
+    message: Protect shared state with an actor or a Mutex.
+    severity: error
+  unowned_reference:
+    name: Unowned reference
+    regex: '\bunowned\b'
+    match_kinds:
+      - keyword
+      - identifier
+    message: Use a strong or weak reference.
+    severity: error
