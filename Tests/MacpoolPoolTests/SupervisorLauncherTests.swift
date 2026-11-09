@@ -1,46 +1,39 @@
 import Foundation
 @testable import MacpoolPool
-import Subprocess
-import System
 import Testing
 
 /// Tests of the launcher that starts and signals supervisor processes.
-@Suite(.timeLimit(.minutes(1)))
+///
+/// The tests start no processes. A process that starts while another test closes a lock file
+/// briefly holds that file's lock, so a spawn here could make a daemon test fail at random.
 struct SupervisorLauncherTests {
-    /// Signals only a process whose command line names the data directory and the lease.
-    @Test func signalsOnlyTheLeaseSupervisor() async throws {
-        let root = try ShortDirectory()
-        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+    /// Recognizes only a command line that names the data directory and the lease.
+    @Test func recognizesOnlyTheLeaseSupervisor() throws {
+        let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
         let id = try #require(LeaseID("0a1b2c3d"))
         let other = try #require(LeaseID("1a2b3c4d"))
-        let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/usr/bin/false"))
-        // The shell runs a loop instead of replacing itself, so its command line keeps the
-        // supervisor's arguments.
-        let result = try await Subprocess.run(
-            .path("/bin/sh"),
-            arguments: [
-                "-c", "while :; do sleep 1; done",
-                "supervise", "--data-dir", directory.root.path(percentEncoded: false), "--lease", id.rawValue,
-                "--boot-timeout", "60",
-            ],
-            input: .none,
-            output: .discarded,
-            error: .discarded,
-        ) { execution in
-            let processID = execution.processIdentifier.value
-            await launcher.signal(.terminate, processID: processID, of: other, in: directory)
-            // The parent of the data directory is a prefix of its path and must not match.
-            await launcher.signal(.kill, processID: processID, of: id, in: PoolDirectory(root: root.url))
-            try? await Task.sleep(for: .milliseconds(300))
-            let survived = kill(processID, 0) == 0
-            await launcher.signal(.terminate, processID: processID, of: id, in: directory)
-            return survived
-        }
-        #expect(result.closureResult)
-        guard case let .signaled(signal) = result.terminationStatus else {
-            Issue.record("unexpected status \(result.terminationStatus)")
-            return
-        }
-        #expect(signal == SIGTERM)
+        let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/opt/macpool"))
+        let arguments = launcher.arguments(for: SupervisorLaunch(
+            lease: id,
+            directory: directory,
+            sharedDirectory: nil,
+            bootTimeout: 60,
+        ))
+        let command = "/opt/macpool " + arguments.joined(separator: " ") + "\n"
+        #expect(ProcessSupervisorLauncher.isSupervisor(command, of: id, in: directory))
+        #expect(!ProcessSupervisorLauncher.isSupervisor(command, of: other, in: directory))
+        // The parent of the data directory is a prefix of its path.
+        let parent = PoolDirectory(root: URL(filePath: "/Users/me", directoryHint: .isDirectory))
+        #expect(!ProcessSupervisorLauncher.isSupervisor(command, of: id, in: parent))
+        #expect(!ProcessSupervisorLauncher.isSupervisor("sleep 600\n", of: id, in: directory))
+    }
+
+    /// Sends no signal for the process identifier 0, which `kill` would apply to the test's whole
+    /// process group.
+    @Test func ignoresUnrecordedProcess() async throws {
+        let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/opt/macpool"))
+        let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
+        let id = try #require(LeaseID("0a1b2c3d"))
+        await launcher.signal(.kill, processID: 0, of: id, in: directory)
     }
 }

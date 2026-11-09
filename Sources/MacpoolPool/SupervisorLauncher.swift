@@ -173,12 +173,23 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
             arguments: ["-ww", "-o", "command=", "-p", String(processID)],
             output: .string(limit: 1 << 16),
         )
-        // The arguments appear in the order that arguments(for:) writes them. Matching them as one
-        // run keeps a data directory that is a prefix of another from matching.
-        let expected = " supervise --data-dir \(directory.root.path(percentEncoded: false)) --lease \(id.rawValue) "
-        guard let command = result?.standardOutput, command.contains(expected) else {
+        guard let command = result?.standardOutput, Self.isSupervisor(command, of: id, in: directory) else {
             return
         }
         kill(processID, signal == .kill ? SIGKILL : SIGTERM)
+    }
+
+    /// Checks whether a process's command line belongs to a lease's supervisor.
+    ///
+    /// The arguments must appear in the order that ``arguments(for:)`` writes them. Matching them
+    /// as one run keeps a data directory that is a prefix of another from matching.
+    ///
+    /// - Parameters:
+    ///   - command: The command line as `ps` prints it, with the arguments separated by spaces.
+    ///   - id: The lease.
+    ///   - directory: The data directory.
+    /// - Returns: Whether the command runs `supervise` for the lease in the data directory.
+    static func isSupervisor(_ command: String, of id: LeaseID, in directory: PoolDirectory) -> Bool {
+        command.contains(" supervise --data-dir \(directory.root.path(percentEncoded: false)) --lease \(id.rawValue) ")
     }
 }
