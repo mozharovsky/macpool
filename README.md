@@ -112,8 +112,8 @@ $macpool daemon uninstall
 starts it at login and again whenever it exits. Running `daemon install` again replaces the job.
 `macpool daemon` runs the same daemon in the foreground, and `--slots 1` limits it to one VM. The
 daemon keeps its state, clones, sockets, and logs in `~/Library/Application Support/macpool`.
-Every pool command accepts `--data-dir` for another directory, which must be on the same APFS
-volume as the source bundles. The daemon refuses a data directory that belongs to another user or
+Every pool command except `daemon uninstall` accepts `--data-dir` for another directory, which
+must be on the same APFS volume as the source bundles. The daemon refuses a data directory that belongs to another user or
 that other users can write to.
 
 `lease` waits in a queue while every slot is busy and prints `queued position=N`. A higher
@@ -143,11 +143,12 @@ cannot reconnect or its lease ends, it stops the command after `--` first.
 
 The daemon ends a supervisor when it cannot reconnect within 30 seconds after the connection
 broke, or when the supervisor ignores a stop for 30 seconds. It tries another stop, then `SIGTERM`,
-then `SIGKILL`, 10 seconds apart. The lease then boots again or ends as after a crash.
+then `SIGKILL`, 10 seconds apart. A lease that was ending then loses its clone, and any other
+lease boots again or ends as after a crash.
 
 A malformed state file moves aside as `state.json.invalid-TIME`. The daemon then starts without
-leases and stops the VMs that it finds. A state file from another macpool build, or one that cannot
-be opened, keeps the daemon from starting, and the VMs keep running.
+leases and stops the VMs that it finds. A state file in a format version that this build does not
+read, or one that cannot be opened, keeps the daemon from starting, and the VMs keep running.
 
 ## Known limitations
 

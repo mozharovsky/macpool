@@ -29,7 +29,8 @@ later one's.
 
 A supervisor whose connection ends while it holds the lock gets reconnected. One that does not
 answer, ignores a stop, or reports another protocol version gets a stop command, then `SIGTERM`,
-and then `SIGKILL` as a ``SupervisorSignal``. Its run then counts as a failure.
+and then `SIGKILL` as a ``SupervisorSignal``. A lease that was ending then deletes its clone, and
+for any other lease the run counts as a failure under the restart policy.
 
 ### Lease lifetime
 

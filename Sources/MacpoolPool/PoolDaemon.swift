@@ -18,7 +18,8 @@ import MacpoolVM
 /// The daemon treats a supervisor as gone only once its ``SupervisorLock`` is free. A supervisor
 /// whose connection ends while it holds the lock gets reconnected. One that does not answer within
 /// the reconnect window, ignores a stop, or speaks another protocol version gets `SIGTERM` and then
-/// `SIGKILL`. A run that the daemon ended this way counts as a failure under the restart policy.
+/// `SIGKILL`. A lease that was ending then deletes its clone. For any other lease, a run that the
+/// daemon ended this way counts as a failure under the restart policy.
 ///
 /// A lease ends on release, on expiry, when its attached client disconnects, or when its VM stops
 /// and the restart policy does not boot it again. The daemon then stops the VM, waits until the
