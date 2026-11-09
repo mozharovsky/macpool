@@ -69,8 +69,9 @@ Changes to the daemon or the supervisors also need a run with real VMs. Start
 `macpool daemon --data-dir DIR` in the foreground with a directory under `.cache`, lease from a
 stopped bundle, and check the queue, release, expiry, and a restart of the daemon and of a
 supervisor. Do not install the launchd job for such a check. An installed daemon does not count
-the test daemon's VMs, so stop it or give the test daemon `--slots` that fit beside it. Release
-every lease and stop the daemon afterward.
+the test daemon's VMs, and its VMs keep running when it stops. Release its leases first, or give
+the test daemon `--slots` that fit beside its VMs. Release every lease and stop the daemon
+afterward.
 
 ## Swift standards
 

@@ -136,14 +136,18 @@ seconds and then ends the lease. `--restart never` ends the lease at the first s
 `--restart always` also boots the clone again after the guest shuts down.
 
 Each leased VM runs in its own `macpool supervise` process with a log in `logs/LEASE.log` in the
-data directory. The log stays for 7 days after the lease ends. The VMs keep running when the daemon
-stops. A new daemon reconnects to them, and a `lease` without `--detach` reconnects within 60
-seconds. When `lease` cannot reconnect or its lease ends, it stops the command after `--` first.
+data directory. When the daemon starts or deletes a clone, it also deletes the logs of ended leases
+that have not changed for 7 days. The VMs keep running when the daemon stops. A new daemon
+reconnects to them, and a `lease` without `--detach` reconnects within 60 seconds. When `lease`
+cannot reconnect or its lease ends, it stops the command after `--` first.
 
-A supervisor that stops answering for 30 seconds, or ignores a stop for 30 seconds, gets `SIGTERM`
-and 10 seconds later `SIGKILL`. Its lease then boots again or ends as after a crash. A state file
-that the daemon cannot read moves aside as `state.json.invalid-TIME`, and the daemon starts without
-leases and stops the VMs that it finds.
+The daemon ends a supervisor when it cannot reconnect within 30 seconds after the connection
+broke, or when the supervisor ignores a stop for 30 seconds. It tries another stop, then `SIGTERM`,
+then `SIGKILL`, 10 seconds apart. The lease then boots again or ends as after a crash.
+
+A malformed state file moves aside as `state.json.invalid-TIME`. The daemon then starts without
+leases and stops the VMs that it finds. A state file from another macpool build, or one that cannot
+be opened, keeps the daemon from starting, and the VMs keep running.
 
 ## Known limitations
 
