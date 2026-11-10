@@ -156,7 +156,8 @@ struct MessageTests {
         server.close()
     }
 
-    /// Closes the connection instead of queueing more than 4 MiB for a peer that stops reading.
+    /// Closes the connection instead of queueing more than 4 MiB for a peer that stops reading,
+    /// and drops the requests that arrived before.
     @Test func closesWhenThePeerStopsReading() async throws {
         let directory = try ShortDirectory()
         let socket = directory.url.appending(path: "test.sock")
@@ -165,6 +166,10 @@ struct MessageTests {
         let client = try await MessageChannel.connect(to: socket)
         var connections = listener.connections.makeAsyncIterator()
         let server = try #require(await connections.next())
+        // One write carries both lines, so the second waits in the server's buffer.
+        let requests = try client.takeStream()
+        try await requests.send(Data("{\"request\":\"status\"}\n{\"request\":\"status\"}\n".utf8))
+        #expect(try await server.receive(PoolRequest.self) == .status)
 
         let text = String(repeating: "a", count: 512 << 10)
         let count = MessageChannel.maximumQueuedBytes / text.utf8.count + 2
@@ -172,12 +177,13 @@ struct MessageTests {
             try server.send(text)
         }
         #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        #expect(try await server.receive(PoolRequest.self) == nil)
         var received = 0
-        while try await client.receive(String.self) != nil {
-            received += 1
+        while let chunk = await requests.receive() {
+            received += chunk.count { $0 == UInt8(ascii: "\n") }
         }
         #expect(received < count)
-        client.close()
+        requests.close()
         server.close()
     }
 

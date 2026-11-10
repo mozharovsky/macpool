@@ -253,22 +253,24 @@ public final class MessageChannel: Sendable {
     /// Receives the next message.
     ///
     /// One task at a time may wait. The wait ignores task cancellation, so the owner calls
-    /// ``close()`` to end it early.
+    /// ``close()`` to end it early. Once the channel begins to close its connection, lines that
+    /// arrived earlier are dropped.
     ///
     /// - Parameter type: The message type.
-    /// - Returns: The message, or `nil` once the connection has ended or went to a ``ByteStream``.
+    /// - Returns: The message, or `nil` once the connection has ended, the channel began to close
+    ///   it, or it went to a ``ByteStream``.
     /// - Throws: ``PoolError/malformedMessage(reason:)`` when a line is not a valid message or is
     ///   longer than 1 MiB.
     public func receive<Message: Decodable>(_ type: Message.Type) async throws(PoolError) -> Message? {
         while true {
             let scan = try state.withLock { state throws(PoolError) -> LineScan in
-                guard state.user != .stream else {
-                    return .streaming
+                guard state.user == .channel else {
+                    return .unavailable
                 }
                 return try state.buffer.takeLine().map(LineScan.line) ?? .incomplete
             }
             switch scan {
-            case .streaming:
+            case .unavailable:
                 return nil
             case let .line(line):
                 do {
@@ -356,8 +358,8 @@ public final class MessageChannel: Sendable {
 
 /// What a channel finds when it looks for the next line.
 private enum LineScan {
-    /// The connection went to a ``ByteStream``.
-    case streaming
+    /// The channel began to close the connection, or the connection went to a ``ByteStream``.
+    case unavailable
     /// No line is complete yet.
     case incomplete
     /// A complete line without its line break.
