@@ -12,15 +12,38 @@ struct PoolStore {
         let version: Int
     }
 
+    /// A state file in version 1, whose leases have no owner.
+    private struct UnownedState: Decodable {
+        /// The stored leases.
+        let leases: [UnownedLease]
+    }
+
+    /// A version 1 lease, which belongs to the local user.
+    private struct UnownedLease: Decodable {
+        /// The lease with the local user as its owner.
+        let record: LeaseRecord
+
+        /// Decodes a lease without an owner.
+        ///
+        /// - Parameter decoder: The decoder to read from.
+        /// - Throws: `DecodingError` when a field is missing or malformed.
+        init(from decoder: any Decoder) throws {
+            record = try LeaseRecord(from: decoder, defaultOwner: .local)
+        }
+    }
+
     /// The state file.
     let file: URL
 
     /// Reads the stored state.
     ///
     /// The call reads the format version before the rest, so a file in another build's format
-    /// never counts as malformed.
+    /// never counts as malformed. A version 1 file loads with the local user as the owner of
+    /// every lease. The daemon saves the state as soon as it starts, so its first start rewrites
+    /// the file in the current version.
     ///
-    /// - Returns: The state, or an empty state when the file does not exist.
+    /// - Returns: The state in the current version, or an empty state when the file does not
+    ///   exist.
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the file exists and cannot
     ///   be read, ``PoolError/unsupportedStateVersion(path:version:)`` when it has another format
     ///   version, or ``PoolError/invalidState(path:reason:)`` when it is malformed or lists a lease
@@ -34,28 +57,41 @@ struct PoolStore {
         } catch {
             throw .fileSystem("reading the pool state", file, error)
         }
-        let path = file.path(percentEncoded: false)
-        let header: Header
-        do {
-            header = try MessageCoding.decoder.decode(Header.self, from: data)
-        } catch {
-            throw .invalidState(path: path, reason: "\(error)")
-        }
-        guard header.version == PoolState.currentVersion else {
-            throw .unsupportedStateVersion(path: path, version: header.version)
-        }
+        let header = try decode(Header.self, from: data)
         let state: PoolState
-        do {
-            state = try MessageCoding.decoder.decode(PoolState.self, from: data)
-        } catch {
-            throw .invalidState(path: path, reason: "\(error)")
+        switch header.version {
+        case PoolState.currentVersion:
+            state = try decode(PoolState.self, from: data)
+        case PoolState.unownedVersion:
+            let earlier = try decode(UnownedState.self, from: data)
+            state = PoolState(version: PoolState.currentVersion, leases: earlier.leases.map(\.record))
+        default:
+            throw .unsupportedStateVersion(path: file.path(percentEncoded: false), version: header.version)
         }
         // The daemon writes each lease once, so a repeated lease means the file was damaged.
         var seen: Set<LeaseID> = []
         for lease in state.leases where !seen.insert(lease.id).inserted {
-            throw .invalidState(path: path, reason: "it lists lease \(lease.id) more than once")
+            throw .invalidState(
+                path: file.path(percentEncoded: false),
+                reason: "it lists lease \(lease.id) more than once",
+            )
         }
         return state
+    }
+
+    /// Decodes the state file's contents.
+    ///
+    /// - Parameters:
+    ///   - type: The type to decode.
+    ///   - data: The file's contents.
+    /// - Returns: The decoded value.
+    /// - Throws: ``PoolError/invalidState(path:reason:)`` when the contents do not match the type.
+    private func decode<Value: Decodable>(_ type: Value.Type, from data: Data) throws(PoolError) -> Value {
+        do {
+            return try MessageCoding.decoder.decode(type, from: data)
+        } catch {
+            throw .invalidState(path: file.path(percentEncoded: false), reason: "\(error)")
+        }
     }
 
     /// Replaces the stored state.

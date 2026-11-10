@@ -61,7 +61,7 @@ public final class SocketListener: Sendable {
         }
         let (connections, continuation) = AsyncStream.makeStream(of: MessageChannel.self)
         listener.newConnectionHandler = { connection in
-            continuation.yield(MessageChannel(connection: connection, path: path, start: true))
+            continuation.yield(MessageChannel(connection: connection, peer: path, start: true))
         }
         let failure: String? = await withCheckedContinuation { ready in
             let once = ResumeOnce(ready)

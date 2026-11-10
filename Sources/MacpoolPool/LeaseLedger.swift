@@ -99,6 +99,9 @@ struct LeaseRecord: Codable, Sendable, Equatable {
     /// The lease's identifier.
     let id: LeaseID
 
+    /// Who requested the lease and may act on it.
+    let owner: LeaseOwner
+
     /// The terms from the request.
     let terms: LeaseTerms
 
@@ -130,6 +133,8 @@ struct LeaseRecord: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         /// The `id` key.
         case id
+        /// The `owner` key.
+        case owner
         /// The `terms` key.
         case terms
         /// The `phase` key.
@@ -159,10 +164,57 @@ struct LeaseRecord: Codable, Sendable, Equatable {
     }
 }
 
+/// The decoding of stored records, which also reads records from before lease owners.
+extension LeaseRecord {
+    /// Decodes a record that names its owner.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError` when a field is missing or malformed.
+    init(from decoder: any Decoder) throws {
+        try self.init(from: decoder, defaultOwner: nil)
+    }
+
+    /// Decodes a record from a format that may predate owners.
+    ///
+    /// - Parameters:
+    ///   - decoder: The decoder to read from.
+    ///   - defaultOwner: The owner of a record without one, or `nil` when every record names its
+    ///     owner.
+    /// - Throws: `DecodingError` when a field is missing or malformed.
+    init(from decoder: any Decoder, defaultOwner: LeaseOwner?) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let owner = try container.decodeIfPresent(LeaseOwner.self, forKey: .owner) ?? defaultOwner else {
+            throw DecodingError.keyNotFound(CodingKeys.owner, DecodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "a lease has no owner",
+            ))
+        }
+        try self.init(
+            id: container.decode(LeaseID.self, forKey: .id),
+            owner: owner,
+            terms: container.decode(LeaseTerms.self, forKey: .terms),
+            phase: container.decode(LeasePhase.self, forKey: .phase),
+            address: container.decodeIfPresent(String.self, forKey: .address),
+            grantedAt: container.decode(Date.self, forKey: .grantedAt),
+            expiresAt: container.decodeIfPresent(Date.self, forKey: .expiresAt),
+            restarts: container.decode(Int.self, forKey: .restarts),
+            restartAt: container.decodeIfPresent(Date.self, forKey: .restartAt),
+            endReason: container.decodeIfPresent(String.self, forKey: .endReason),
+            supervisorProcessID: container.decodeIfPresent(Int32.self, forKey: .supervisorProcessID),
+        )
+    }
+}
+
 /// The durable part of the pool, which the daemon writes after every change.
+///
+/// Version 2 stores each lease's owner. A version 1 file predates paired clients, so its leases
+/// belong to the local user.
 struct PoolState: Codable, Sendable, Equatable {
     /// The state file's format version.
-    static let currentVersion = 1
+    static let currentVersion = 2
+
+    /// The format version before lease owners, which the daemon still reads.
+    static let unownedVersion = 1
 
     /// The format version of the stored file.
     var version: Int
@@ -181,6 +233,9 @@ struct QueuedRequest: Sendable, Equatable {
 
     /// The client that waits.
     let client: ClientID
+
+    /// Who requested the lease.
+    let owner: LeaseOwner
 
     /// The requested terms.
     let terms: LeaseTerms
@@ -230,6 +285,9 @@ enum LedgerAction: Sendable, Equatable {
 ///
 /// A lease holds its slot from the moment it leaves the queue until the daemon deletes its clone.
 /// The queue orders requests by priority and then by arrival.
+///
+/// Each request names its ``LeaseOwner``. A paired client acts only on its own leases, and the
+/// ledger answers its calls about any other lease as if that lease did not exist.
 struct LeaseLedger {
     /// The limits and timings.
     let policy: PoolPolicy
@@ -275,10 +333,16 @@ struct LeaseLedger {
     /// - Parameters:
     ///   - terms: The requested terms, which the caller already validated.
     ///   - client: The client that waits for the lease.
+    ///   - owner: Who requests the lease and later acts on it.
     ///   - now: The current time.
     /// - Returns: The replies and launches that follow.
-    mutating func request(_ terms: LeaseTerms, from client: ClientID, now: Date) -> [LedgerAction] {
-        let request = QueuedRequest(ticket: nextTicket, client: client, terms: terms, since: now)
+    mutating func request(
+        _ terms: LeaseTerms,
+        from client: ClientID,
+        owner: LeaseOwner,
+        now: Date,
+    ) -> [LedgerAction] {
+        let request = QueuedRequest(ticket: nextTicket, client: client, owner: owner, terms: terms, since: now)
         nextTicket += 1
         let index = queue.firstIndex { $0.terms.priority < terms.priority } ?? queue.endIndex
         queue.insert(request, at: index)
@@ -308,14 +372,13 @@ struct LeaseLedger {
     /// - Parameters:
     ///   - id: The lease.
     ///   - client: The client that takes over the lease's replies.
+    ///   - owner: Who the client acts for.
     /// - Returns: A reply that tells the client the lease's current stage.
-    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot,
-    ///   ``PoolError/leaseEnding(id:)`` when it is stopping, or ``PoolError/leaseAttached(id:)``
-    ///   when another client is attached.
-    mutating func attach(_ id: LeaseID, client: ClientID) throws(PoolError) -> [LedgerAction] {
-        guard let record = leases[id] else {
-            throw .unknownLease(id: id.rawValue)
-        }
+    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
+    ///   not act on it, ``PoolError/leaseEnding(id:)`` when it is stopping, or
+    ///   ``PoolError/leaseAttached(id:)`` when another client is attached.
+    mutating func attach(_ id: LeaseID, client: ClientID, owner: LeaseOwner) throws(PoolError) -> [LedgerAction] {
+        let record = try record(id, for: owner)
         guard record.phase != .stopping else {
             throw .leaseEnding(id: id.rawValue)
         }
@@ -339,13 +402,13 @@ struct LeaseLedger {
     ///
     /// - Parameters:
     ///   - id: The lease.
+    ///   - owner: Who asks for the release.
     ///   - reason: Why the lease ends, which its client receives.
     /// - Returns: The notice, stop, or discard that follows.
-    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot.
-    mutating func release(_ id: LeaseID, reason: String) throws(PoolError) -> [LedgerAction] {
-        guard leases[id] != nil else {
-            throw .unknownLease(id: id.rawValue)
-        }
+    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
+    ///   not act on it.
+    mutating func release(_ id: LeaseID, owner: LeaseOwner, reason: String) throws(PoolError) -> [LedgerAction] {
+        _ = try record(id, for: owner)
         return end(id, reason: reason)
     }
 
@@ -355,14 +418,13 @@ struct LeaseLedger {
     ///
     /// - Parameters:
     ///   - id: The lease.
+    ///   - owner: Who asks for the renewal.
     ///   - now: The current time.
     /// - Returns: The lease with its new expiry.
-    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot, or
-    ///   ``PoolError/leaseEnding(id:)`` when it is stopping.
-    mutating func renew(_ id: LeaseID, now: Date) throws(PoolError) -> LeaseSummary {
-        guard var record = leases[id] else {
-            throw .unknownLease(id: id.rawValue)
-        }
+    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
+    ///   not act on it, or ``PoolError/leaseEnding(id:)`` when it is stopping.
+    mutating func renew(_ id: LeaseID, owner: LeaseOwner, now: Date) throws(PoolError) -> LeaseSummary {
+        var record = try record(id, for: owner)
         guard record.phase != .stopping else {
             throw .leaseEnding(id: id.rawValue)
         }
@@ -543,14 +605,22 @@ struct LeaseLedger {
         return actions
     }
 
-    /// Describes the pool for clients.
+    /// Describes the pool as an owner may see it.
     ///
-    /// - Returns: The slots, the leases ordered by identifier, and the queue in grant order.
-    func summary() -> PoolSummary {
+    /// A paired client sees only its own leases and requests. Its requests keep their positions
+    /// in the whole queue.
+    ///
+    /// - Parameter owner: Who asks.
+    /// - Returns: The slots, the visible leases ordered by identifier, and the visible requests in
+    ///   grant order.
+    func summary(for owner: LeaseOwner) -> PoolSummary {
         PoolSummary(
             slots: policy.slots,
-            leases: leases.values.sorted { $0.id < $1.id }.map(summary(of:)),
-            queue: queue.enumerated().map { index, request in
+            leases: leases.values
+                .filter { owner.mayAct(on: $0.owner) }
+                .sorted { $0.id < $1.id }
+                .map(summary(of:)),
+            queue: queue.enumerated().filter { owner.mayAct(on: $1.owner) }.map { index, request in
                 QueuedSummary(
                     position: index + 1,
                     source: request.terms.source,
@@ -559,6 +629,21 @@ struct LeaseLedger {
                 )
             },
         )
+    }
+
+    /// Finds a lease that an owner may act on.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - owner: Who asks.
+    /// - Returns: The stored lease.
+    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
+    ///   not act on it, so a paired client learns nothing about the leases of others.
+    private func record(_ id: LeaseID, for owner: LeaseOwner) throws(PoolError) -> LeaseRecord {
+        guard let record = leases[id], owner.mayAct(on: record.owner) else {
+            throw .unknownLease(id: id.rawValue)
+        }
+        return record
     }
 
     /// Describes one lease for clients.
@@ -593,6 +678,7 @@ struct LeaseLedger {
             }
             let record = LeaseRecord(
                 id: id,
+                owner: request.owner,
                 terms: request.terms,
                 phase: .starting,
                 grantedAt: now,

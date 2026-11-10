@@ -11,15 +11,29 @@ struct PoolStoreTests {
         #expect(try store.load() == .empty)
     }
 
+    /// A fingerprint in the stored form.
+    static let fingerprint = String(repeating: "0123456789abcdef", count: 4)
+
     /// Writes and reads leases with every field.
     @Test func roundTripsLeases() throws {
         let directory = try ShortDirectory()
         let store = PoolStore(file: directory.url.appending(path: "state.json"))
         let record = try Self.record()
-        let state = PoolState(version: PoolState.currentVersion, leases: [record])
+        let local = try LeaseRecord(
+            id: #require(LeaseID("0a1b2c3e")),
+            owner: .local,
+            terms: LeaseTerms(source: "/vms/base", timeToLive: 60),
+            phase: .starting,
+            grantedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            restarts: 0,
+        )
+        let state = PoolState(version: PoolState.currentVersion, leases: [record, local])
         try store.save(state)
         #expect(try store.load() == state)
         let text = try String(contentsOf: store.file, encoding: .utf8)
+        #expect(text.contains("\"version\" : 2"))
+        #expect(text.contains("\"owner\" : \"\(Self.fingerprint)\""))
+        #expect(text.contains("\"owner\" : \"local\""))
         #expect(text.contains("\"ttl_seconds\" : 600"))
         #expect(text.contains("\"restart\" : \"always\""))
         #expect(text.contains("\"supervisor_pid\" : 4242"))
@@ -39,12 +53,13 @@ struct PoolStoreTests {
 
     /// Creates a lease record with every field set.
     ///
-    /// - Returns: The record of lease `0a1b2c3d`.
-    /// - Throws: An error when the identifier is invalid.
+    /// - Returns: The record of lease `0a1b2c3d`, which a paired client owns.
+    /// - Throws: An error when the identifier or the fingerprint is invalid.
     static func record() throws -> LeaseRecord {
         let id = try #require(LeaseID("0a1b2c3d"))
-        return LeaseRecord(
+        return try LeaseRecord(
             id: id,
+            owner: .client(#require(KeyFingerprint(Self.fingerprint))),
             terms: LeaseTerms(
                 source: "/vms/base",
                 timeToLive: 600,
@@ -63,6 +78,70 @@ struct PoolStoreTests {
             endReason: nil,
             supervisorProcessID: 4242,
         )
+    }
+
+    /// Reads a file from before lease owners with the local user as every lease's owner.
+    @Test func readsLeasesWithoutOwnersAsLocal() throws {
+        let directory = try ShortDirectory()
+        let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        try Data(#"""
+        {
+          "leases" : [
+            {
+              "granted_at" : "2027-01-15T08:00:00Z",
+              "id" : "0a1b2c3d",
+              "phase" : "ready",
+              "restarts" : 0,
+              "terms" : {
+                "boot_timeout_seconds" : 900,
+                "detached" : false,
+                "priority" : 0,
+                "restart" : "on-failure",
+                "source" : "/vms/base",
+                "ttl_seconds" : 600
+              }
+            }
+          ],
+          "version" : 1
+        }
+        """#.utf8).write(to: store.file)
+        let state = try store.load()
+        #expect(state.version == PoolState.currentVersion)
+        #expect(state.leases.map(\.owner) == [.local])
+        #expect(state.leases.map(\.id.rawValue) == ["0a1b2c3d"])
+    }
+
+    /// Rejects a current file whose lease has no owner or an owner in another form.
+    @Test func requiresOwnersInCurrentFiles() throws {
+        let directory = try ShortDirectory()
+        let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        let lease = #"{"granted_at": "2027-01-15T08:00:00Z", "id": "0a1b2c3d", "phase": "ready", "restarts": 0, "#
+            + #""terms": {"boot_timeout_seconds": 900, "detached": false, "priority": 0, "restart": "never", "#
+            + #""source": "/vms/base", "ttl_seconds": 600}"#
+        for owner in ["", #", "owner": "LOCAL""#, #", "owner": "\#(Self.fingerprint.uppercased())""#] {
+            try Data(#"{"version": 2, "leases": [\#(lease)\#(owner)}]}"#.utf8).write(to: store.file)
+            #expect {
+                try store.load()
+            } throws: { error in
+                if case .invalidState = error as? PoolError {
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+        try Data(#"{"version": 2, "leases": [\#(lease), "owner": "local"}]}"#.utf8).write(to: store.file)
+        #expect(try store.load().leases.map(\.owner) == [.local])
+    }
+
+    /// Accepts only 64 lowercase hexadecimal digits as a fingerprint.
+    @Test func checksFingerprints() {
+        #expect(KeyFingerprint(Self.fingerprint)?.rawValue == Self.fingerprint)
+        #expect(KeyFingerprint(Self.fingerprint.uppercased()) == nil)
+        #expect(KeyFingerprint(String(Self.fingerprint.dropLast())) == nil)
+        #expect(KeyFingerprint(Self.fingerprint + "0") == nil)
+        #expect(KeyFingerprint(String(Self.fingerprint.dropLast()) + "g") == nil)
+        #expect(KeyFingerprint("") == nil)
     }
 
     /// Rejects malformed files and tells other format versions apart from them.
