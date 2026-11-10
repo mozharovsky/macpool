@@ -21,8 +21,7 @@ public final class MessageChannel: Sendable {
     /// The socket path or network endpoint of the peer, for error messages.
     let peer: String
 
-    /// The bytes that arrived and do not yet form a complete line, and whether the connection
-    /// already went to a ``ByteStream``.
+    /// The bytes that arrived and do not yet form a complete line, and who uses the connection.
     private let state = Mutex(ChannelState())
 
     /// Wraps a connection and starts it on its own queue.
@@ -162,8 +161,8 @@ public final class MessageChannel: Sendable {
 
     /// Queues a message for sending.
     ///
-    /// The call does not wait for the peer. A message to a closed connection, or to one that went
-    /// to a ``ByteStream``, is dropped.
+    /// The call does not wait for the peer. A message sent after ``close()`` or
+    /// ``finish(within:)`` began, or after the connection went to a ``ByteStream``, is dropped.
     ///
     /// - Parameter message: The message to send.
     /// - Throws: ``PoolError/malformedMessage(reason:)`` when the message cannot be encoded.
@@ -174,10 +173,14 @@ public final class MessageChannel: Sendable {
         } catch {
             throw .malformedMessage(reason: "\(error)")
         }
-        guard !state.withLock(\.isStreaming) else {
-            return
+        // Queueing under the lock keeps a line from following the bytes of a stream that took
+        // the connection in between.
+        state.withLock { state in
+            guard state.user == .channel else {
+                return
+            }
+            connection.send(content: data, completion: .contentProcessed { _ in })
         }
-        connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
     /// Receives the next message.
@@ -192,7 +195,7 @@ public final class MessageChannel: Sendable {
     public func receive<Message: Decodable>(_ type: Message.Type) async throws(PoolError) -> Message? {
         while true {
             let scan = try state.withLock { state throws(PoolError) -> LineScan in
-                guard !state.isStreaming else {
+                guard state.user != .stream else {
                     return .streaming
                 }
                 return try state.buffer.takeLine().map(LineScan.line) ?? .incomplete
@@ -224,39 +227,57 @@ public final class MessageChannel: Sendable {
     ///
     /// - Returns: The stream that now owns the connection.
     /// - Throws: ``PoolError/connection(path:reason:)`` when an earlier call already handed the
-    ///   connection to a stream.
+    ///   connection to a stream, or when ``close()`` or ``finish(within:)`` already began to end
+    ///   it.
     public func takeStream() throws(PoolError) -> ByteStream {
-        let leftover: Data? = state.withLock { state in
-            guard !state.isStreaming else {
-                return nil
+        let claim: Result<Data, PoolError> = state.withLock { state in
+            switch state.user {
+            case .channel:
+                state.user = .stream
+                return .success(state.buffer.takeAll())
+            case .ending:
+                return .failure(.connection(path: peer, reason: "the channel is closing it"))
+            case .stream:
+                return .failure(.connection(path: peer, reason: "a byte stream already owns it"))
             }
-            state.isStreaming = true
-            return state.buffer.takeAll()
         }
-        guard let leftover else {
-            throw .connection(path: peer, reason: "a byte stream already owns it")
-        }
-        return ByteStream(connection: connection, peer: peer, leftover: leftover)
+        return try ByteStream(connection: connection, peer: peer, leftover: claim.get())
     }
 
     /// Closes the connection and ends a pending receive.
     ///
     /// Messages that are still queued may be lost. Use ``finish(within:)`` to deliver them first.
-    /// A connection that went to a ``ByteStream`` stays open.
+    /// A connection that went to a ``ByteStream`` stays open, and ``takeStream()`` refuses the
+    /// connection once the close begins.
     public func close() {
-        guard !state.withLock(\.isStreaming) else {
-            return
+        let ownsConnection = state.withLock { state in
+            guard state.user != .stream else {
+                return false
+            }
+            state.user = .ending
+            return true
         }
-        connection.cancel()
+        if ownsConnection {
+            connection.cancel()
+        }
     }
 
     /// Delivers the queued messages, signals the end of the stream, and closes the connection.
     ///
-    /// A connection that went to a ``ByteStream`` stays open.
+    /// The call returns at once when the connection went to a ``ByteStream``, which keeps it open,
+    /// or when ``close()`` or another finish already ends it. ``takeStream()`` refuses the
+    /// connection once the finish begins, so the end never reaches a stream.
     ///
     /// - Parameter timeout: The longest wait for the queued messages to leave.
     public func finish(within timeout: Duration = .seconds(2)) async {
-        guard !state.withLock(\.isStreaming) else {
+        let starts = state.withLock { state in
+            guard state.user == .channel else {
+                return false
+            }
+            state.user = .ending
+            return true
+        }
+        guard starts else {
             return
         }
         await connection.sendEnd(within: timeout)
@@ -274,13 +295,23 @@ private enum LineScan {
     case line(Data)
 }
 
-/// The receiving state of a channel.
+/// The receiving state of a channel and who uses its connection.
 private struct ChannelState {
     /// The bytes after the last complete line.
     var buffer = LineBuffer(maximumLength: MessageChannel.maximumLineLength)
 
-    /// Whether the connection went to a ``ByteStream``.
-    var isStreaming = false
+    /// Who uses the connection, which changes only under the channel's lock.
+    var user = ConnectionUser.channel
+}
+
+/// Who uses a channel's connection.
+private enum ConnectionUser {
+    /// The channel sends and receives lines.
+    case channel
+    /// A close or finish began, and no stream may take the connection.
+    case ending
+    /// A ``ByteStream`` owns the connection.
+    case stream
 }
 
 /// Bytes that arrived on a connection and do not yet form a complete line.

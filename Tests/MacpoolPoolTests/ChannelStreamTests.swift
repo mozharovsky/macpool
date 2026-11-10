@@ -96,6 +96,34 @@ struct ChannelStreamTests {
         serverStream.close()
     }
 
+    /// Refuses a stream once the channel began to finish or close, so the end never reaches a
+    /// stream.
+    @Test func refusesAStreamWhileEnding() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        // The client reads nothing, so these lines keep the finish waiting for them to leave.
+        let line = PoolReply.failure(String(repeating: "x", count: 60000))
+        for _ in 0 ..< 200 {
+            try server.send(line)
+        }
+        let finishing = Task { await server.finish(within: .seconds(5)) }
+        try await Task.sleep(for: .milliseconds(100))
+        let closing = PoolError.connection(path: "test client", reason: "the channel is closing it")
+        #expect(throws: closing) {
+            try server.takeStream()
+        }
+        server.close()
+        await finishing.value
+        #expect(throws: closing) {
+            try server.takeStream()
+        }
+        client.close()
+    }
+
     /// Ends a stream's own pending receive and send when the stream closes.
     @Test func closeEndsPendingReceiveAndSend() async throws {
         let listener = try await LoopbackListener()
