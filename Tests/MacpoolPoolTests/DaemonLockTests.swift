@@ -25,6 +25,7 @@ struct DaemonLockTests {
         try directory.prepare()
         var lock: DaemonLock? = try DaemonLock(directory: directory)
         let copy = try #require(lock.map { dup($0.descriptor) })
+        try #require(copy >= 0)
         defer { close(copy) }
         lock = nil
         #expect(throws: Never.self) {

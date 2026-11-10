@@ -43,6 +43,7 @@ struct SupervisorLockTests {
 
         var lock: SupervisorLock? = try SupervisorLock(of: id, in: directory, processID: 4242, startTime: 7)
         let copy = try #require(lock.map { dup($0.descriptor) })
+        try #require(copy >= 0)
         defer { close(copy) }
         lock = nil
         #expect(SupervisorLock.holder(of: id, in: directory) == nil)

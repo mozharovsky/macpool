@@ -27,6 +27,7 @@ struct BundleLockTests {
         let bundle = VMBundle(root: directory.url)
         var lock: BundleLock? = try BundleLock(bundle: bundle)
         let copy = try #require(lock.map { dup($0.descriptor) })
+        try #require(copy >= 0)
         defer { close(copy) }
         lock = nil
         #expect(!BundleLock.isHeld(on: bundle))
