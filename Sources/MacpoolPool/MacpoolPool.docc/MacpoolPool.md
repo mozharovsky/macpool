@@ -28,6 +28,10 @@ or enter the directory. The pool creates the key when it first needs it. It refu
 that other users can reach and never replaces an unusable one, because paired Macs know the Mac by
 its key.
 
+Permission bits alone do not keep other users out. The pool also refuses the key and the `trust`
+directory on a volume that ignores ownership and when either has an access control list. The
+`trust` directory is excluded from backups, which Time Machine honors.
+
 The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.
 The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and
 not the certificate's names or dates.

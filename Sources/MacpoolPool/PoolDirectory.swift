@@ -12,7 +12,8 @@ public import MacpoolVM
 ///   supervisors leave behind. Only the owner can enter it.
 /// - `leases` holds one cloned bundle per lease, named after the lease.
 /// - `logs` holds the supervisors' output and, under launchd, the daemon's.
-/// - `trust` holds this Mac's key for connections between Macs. Only the owner can enter it.
+/// - `trust` holds this Mac's key for connections between Macs. Only the owner can enter it, and
+///   backups skip it.
 ///
 /// Clones must live on the same APFS volume as their sources, so the data directory shares a
 /// volume with the source bundles.
@@ -190,16 +191,22 @@ public struct PoolDirectory: Sendable, Hashable {
         _ = try SocketPath.endpoint(for: supervisorSocket(for: LeaseID.random()), aliasDirectory: aliasDirectory)
     }
 
-    /// Creates the trust directory, restricts it to its owner, and checks that no other user
-    /// controls it or the data directory.
+    /// Creates the trust directory, restricts it to its owner, keeps it out of backups, and
+    /// checks that no other user controls it or the data directory.
     ///
     /// Another user who could replace the trust directory could put their own key in it, so it
-    /// gets the same checks as the run directory.
+    /// gets the same checks as the run directory. The directory must also have no access control
+    /// list and lie on a volume that honors ownership, because either would let other users read
+    /// the key.
+    ///
+    /// A backup would keep a readable copy of the key, and restoring it on another Mac would give
+    /// two Macs one key.
     ///
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be
-    ///   created or its permissions cannot be set, or ``PoolError/insecureDirectory(path:reason:)``
-    ///   when the data directory or the trust directory is not a real directory or belongs to
-    ///   another user, or when other users can write to the data directory.
+    ///   created, inspected, or changed, or ``PoolError/insecureDirectory(path:reason:)`` when the
+    ///   data directory or the trust directory is not a real directory or belongs to another user,
+    ///   when other users can write to the data directory, or when a ``FileExposure`` lets other
+    ///   users reach the trust directory.
     func prepareTrustDirectory() throws(PoolError) {
         do {
             try FileManager.default.createDirectory(
@@ -213,8 +220,19 @@ public struct PoolDirectory: Sendable, Hashable {
         try Self.checkOwnership(of: root, forbidden: 0o022)
         // The check before the change of permissions keeps chmod from following a symbolic link.
         try Self.checkOwnership(of: trustDirectory, forbidden: 0)
+        if let exposure = try FileExposure.find(inDirectoryAt: trustDirectory) {
+            throw .insecureDirectory(path: trustDirectory.pathWithoutTrailingSlash, reason: exposure.reason)
+        }
         guard chmod(trustDirectory.path(percentEncoded: false), 0o700) == 0 else {
             throw .systemCall("restricting", trustDirectory)
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var trust = trustDirectory
+        do {
+            try trust.setResourceValues(values)
+        } catch {
+            throw .fileSystem("excluding from backups", trustDirectory, error)
         }
     }
 
@@ -228,11 +246,7 @@ public struct PoolDirectory: Sendable, Hashable {
     /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the check fails, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when the directory cannot be inspected.
     static func checkOwnership(of directory: URL, forbidden: mode_t) throws(PoolError) {
-        var path = directory.path(percentEncoded: false)
-        // A trailing slash would make lstat follow a symbolic link.
-        while path.count > 1, path.hasSuffix("/") {
-            path.removeLast()
-        }
+        let path = directory.pathWithoutTrailingSlash
         var status = stat()
         guard lstat(path, &status) == 0 else {
             throw .systemCall("inspecting", directory)
@@ -273,5 +287,19 @@ public struct PoolDirectory: Sendable, Hashable {
             return nil
         }
         return try? MessageCoding.decoder.decode(MachineOutcome.self, from: data)
+    }
+}
+
+/// The path forms that system calls on directories need.
+extension URL {
+    /// The path without a trailing slash, which keeps the slash only for the root directory.
+    ///
+    /// A trailing slash would make `lstat` and `open` follow a symbolic link at the path.
+    var pathWithoutTrailingSlash: String {
+        var text = path(percentEncoded: false)
+        while text.count > 1, text.hasSuffix("/") {
+            text.removeLast()
+        }
+        return text
     }
 }

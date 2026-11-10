@@ -99,10 +99,10 @@ struct MacIdentity: Sendable {
     /// - Parameter directory: The data directory.
     /// - Returns: The identity.
     /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when another user could control
-    ///   the trust directory, ``PoolError/unusableIdentity(path:reason:)`` when the key file is
-    ///   not a regular file of the current user, other users can read or change it, or it holds
-    ///   no P-256 key, or ``PoolError/fileSystem(operation:path:reason:)`` when a file operation
-    ///   fails.
+    ///   or read the trust directory, ``PoolError/unusableIdentity(path:reason:)`` when the key
+    ///   file is not a regular file of the current user, other users can reach it, it holds no
+    ///   P-256 key, or its certificate cannot be built, or
+    ///   ``PoolError/fileSystem(operation:path:reason:)`` when a file operation fails.
     static func loadOrCreate(in directory: PoolDirectory) throws(PoolError) -> MacIdentity {
         try directory.prepareTrustDirectory()
         let file = directory.identityFile
@@ -126,6 +126,10 @@ struct MacIdentity: Sendable {
 
     /// Computes the digest that names the key in a peer's certificate.
     ///
+    /// The digest covers the SubjectPublicKeyInfo that CryptoKit encodes for the certificate's
+    /// key, not the bytes in the certificate. Every certificate for one key therefore gets one
+    /// digest. For the certificates that macpool builds, the two encodings are the same.
+    ///
     /// - Parameter certificate: The peer's certificate.
     /// - Returns: The SHA-256 digest of the key's SubjectPublicKeyInfo in DER, or `nil` when the
     ///   certificate carries no P-256 key.
@@ -141,16 +145,18 @@ struct MacIdentity: Sendable {
     /// Reads a private key from a file that only the current user can read.
     ///
     /// The checks run on the open file, so the file cannot change between the check and the
-    /// read.
+    /// read. The file opens without waiting, so a FIFO at its path fails the type check instead
+    /// of blocking until a writer appears.
     ///
     /// - Parameter file: The key file.
     /// - Returns: The key, or `nil` when the file does not exist.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when the file is a symbolic link,
-    ///   not a regular file, owned by another user, open to other users, or holds no P-256 key in
-    ///   PEM, or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
+    ///   not a regular file, owned by another user, open to other users through its permissions
+    ///   or a ``FileExposure``, or holds no P-256 key in PEM, or
+    ///   ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
     private static func readKey(at file: URL) throws(PoolError) -> P256.Signing.PrivateKey? {
         let path = file.path(percentEncoded: false)
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
             switch errno {
             case ENOENT:
@@ -176,6 +182,9 @@ struct MacIdentity: Sendable {
             let mode = String(status.st_mode & 0o777, radix: 8)
             throw .unusableIdentity(path: path, reason: "its permissions \(mode) let other users in")
         }
+        if let exposure = try FileExposure.find(in: descriptor, of: file) {
+            throw .unusableIdentity(path: path, reason: exposure.reason)
+        }
         let data: Data
         do {
             data = try handle.readToEnd() ?? Data()
@@ -195,8 +204,8 @@ struct MacIdentity: Sendable {
     /// name, which fails when another process created the file first and keeps that file.
     ///
     /// - Parameter file: The key file.
-    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the key cannot be written
-    ///   or named.
+    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the key cannot be written,
+    ///   flushed, or named.
     private static func createKey(at file: URL) throws(PoolError) {
         let path = file.path(percentEncoded: false)
         let temporary = file.deletingLastPathComponent()
@@ -210,10 +219,14 @@ struct MacIdentity: Sendable {
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         do {
             try handle.write(contentsOf: Data(P256.Signing.PrivateKey().pemRepresentation.utf8))
-            // Without the flush a power loss can leave the named file empty.
-            try handle.synchronize()
         } catch {
             throw .fileSystem("writing this Mac's key", temporary, error)
+        }
+        // The full flush puts the key on the disk before the link names it, so a power loss leaves
+        // no key file or a complete one. A volume without full flushes gets fsync, which reaches
+        // only the drive's cache.
+        guard fcntl(descriptor, F_FULLFSYNC) == 0 || fsync(descriptor) == 0 else {
+            throw .systemCall("flushing this Mac's key", temporary)
         }
         guard link(temporaryPath, path) == 0 || errno == EEXIST else {
             throw .systemCall("naming this Mac's key", file)

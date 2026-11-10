@@ -2,13 +2,16 @@ import CryptoKit
 import Foundation
 @testable import MacpoolPool
 import Security
+import Subprocess
 import SwiftASN1
+import System
 import Testing
 import X509
 
 /// Tests of this Mac's key, its certificate, and the digests that name keys.
 struct MacIdentityTests {
-    /// Creates the key once with permissions for the owner only and reads the same key back.
+    /// Creates the key once with permissions for the owner only and outside backups, and reads
+    /// the same key back.
     @Test func createsKeyOnceAndReadsItBack() throws {
         let root = try ShortDirectory()
         let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
@@ -25,6 +28,8 @@ struct MacIdentityTests {
         #expect(try manager.attributesOfItem(atPath: trust)[.posixPermissions] as? Int == 0o700)
         #expect(try manager.contentsOfDirectory(atPath: trust) == ["identity.pem"])
         #expect(try String(contentsOfFile: file, encoding: .utf8).hasPrefix("-----BEGIN PRIVATE KEY-----\n"))
+        let backup = try directory.trustDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(backup.isExcludedFromBackup == true)
     }
 
     /// Leaves processes that create the key at the same time with one shared key.
@@ -129,6 +134,82 @@ struct MacIdentityTests {
         #expect(throws: refusal("it is not a regular file")) {
             try MacIdentity.loadOrCreate(in: directory)
         }
+
+        // Opening a FIFO for reading would wait for a writer without the nonblocking flag.
+        try manager.removeItem(atPath: file)
+        #expect(mkfifo(file, 0o600) == 0)
+        #expect(throws: refusal("it is not a regular file")) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+    }
+
+    /// Refuses a key file or a trust directory with an access control list, including one that the
+    /// trust directory inherits from the data directory.
+    @Test func refusesAccessControlLists() async throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        let file = directory.identityFile.path(percentEncoded: false)
+        let trust = directory.trustDirectory.pathWithoutTrailingSlash
+        let reason = FileExposure.accessControlList.reason
+
+        try await Self.changeMode("+a", "everyone allow read", file)
+        #expect(throws: PoolError.unusableIdentity(path: file, reason: reason)) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+        try await Self.changeMode("-N", file)
+        try await Self.changeMode("+a", "everyone allow list", trust)
+        #expect(throws: PoolError.insecureDirectory(path: trust, reason: reason)) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+        try await Self.changeMode("-N", trust)
+        _ = try MacIdentity.loadOrCreate(in: directory)
+
+        let shared = PoolDirectory(root: root.url.appending(path: "shared", directoryHint: .isDirectory))
+        try FileManager.default.createDirectory(
+            at: shared.root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700],
+        )
+        let inheritable = "everyone allow read,file_inherit,directory_inherit"
+        try await Self.changeMode("+a", inheritable, shared.root.pathWithoutTrailingSlash)
+        let inherited = PoolError.insecureDirectory(
+            path: shared.trustDirectory.pathWithoutTrailingSlash,
+            reason: reason,
+        )
+        #expect(throws: inherited) {
+            try MacIdentity.loadOrCreate(in: shared)
+        }
+        #expect(!FileManager.default.fileExists(atPath: shared.identityFile.path(percentEncoded: false)))
+    }
+
+    /// Refuses to keep a key on a volume that ignores ownership, where every local user acts as
+    /// the owner of every file.
+    @Test func refusesVolumeThatIgnoresOwnership() async throws {
+        let root = try ShortDirectory()
+        try await OwnerlessVolume.withVolume(in: root.url) { volume in
+            let directory = PoolDirectory(root: volume.appending(path: "pool", directoryHint: .isDirectory))
+            let refusal = PoolError.insecureDirectory(
+                path: directory.trustDirectory.pathWithoutTrailingSlash,
+                reason: FileExposure.ownerlessVolume.reason,
+            )
+            #expect(throws: refusal) {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            #expect(!FileManager.default.fileExists(atPath: directory.identityFile.path(percentEncoded: false)))
+
+            // The key file gets the same check, which the directory check above runs first.
+            let file = volume.appending(path: "identity.pem")
+            #expect(FileManager.default.createFile(
+                atPath: file.path(percentEncoded: false),
+                contents: Data(),
+                attributes: [.posixPermissions: 0o600],
+            ))
+            let descriptor = open(file.path(percentEncoded: false), O_RDONLY)
+            defer { close(descriptor) }
+            let exposure = try FileExposure.find(in: descriptor, of: file)
+            #expect(exposure == .ownerlessVolume)
+        }
     }
 
     /// Refuses a trust directory that is a symbolic link and leaves the link's target alone.
@@ -157,5 +238,60 @@ struct MacIdentityTests {
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: target).isEmpty)
         #expect(try FileManager.default.attributesOfItem(atPath: target)[.posixPermissions] as? Int == 0o755)
+    }
+
+    /// Runs `chmod` for the access control list changes that Foundation does not offer.
+    ///
+    /// - Parameter arguments: The arguments, such as `+a`, an entry, and a path.
+    /// - Throws: An error when `chmod` cannot start or fails.
+    static func changeMode(_ arguments: String...) async throws {
+        let result = try await run(
+            .path(FilePath("/bin/chmod")),
+            arguments: Arguments(arguments),
+            output: .discarded,
+            error: .string(limit: 1 << 16),
+        )
+        try #require(result.terminationStatus.isSuccess, "chmod \(arguments) failed: \(result.standardError)")
+    }
+}
+
+/// A small APFS disk image that a test mounts with ownership ignored, as an external volume can be.
+private enum OwnerlessVolume {
+    /// Mounts a new image inside a directory, runs a body with the mounted volume, and detaches the
+    /// image again.
+    ///
+    /// - Parameters:
+    ///   - directory: The directory that holds the image and its mount point.
+    ///   - body: The work on the volume, which receives the volume's root.
+    /// - Throws: An error when the image cannot be created or mounted, or the body's error.
+    static func withVolume(in directory: URL, _ body: (URL) async throws -> Void) async throws {
+        let image = directory.appending(path: "volume.dmg").path(percentEncoded: false)
+        let mountPoint = directory.appending(path: "volume", directoryHint: .isDirectory)
+        try await hdiutil("create", "-quiet", "-size", "20m", "-fs", "APFS", "-volname", "macpool-test", image)
+        try await hdiutil(
+            "attach", "-quiet", "-owners", "off", "-nobrowse",
+            "-mountpoint", mountPoint.pathWithoutTrailingSlash, image,
+        )
+        do {
+            try await body(mountPoint)
+        } catch {
+            try? await hdiutil("detach", "-quiet", "-force", mountPoint.pathWithoutTrailingSlash)
+            throw error
+        }
+        try await hdiutil("detach", "-quiet", "-force", mountPoint.pathWithoutTrailingSlash)
+    }
+
+    /// Runs `hdiutil`.
+    ///
+    /// - Parameter arguments: The verb and its options.
+    /// - Throws: An error when `hdiutil` cannot start or fails.
+    private static func hdiutil(_ arguments: String...) async throws {
+        let result = try await run(
+            .path(FilePath("/usr/bin/hdiutil")),
+            arguments: Arguments(arguments),
+            output: .discarded,
+            error: .string(limit: 1 << 16),
+        )
+        try #require(result.terminationStatus.isSuccess, "hdiutil \(arguments) failed: \(result.standardError)")
     }
 }

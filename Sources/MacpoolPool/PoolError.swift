@@ -112,13 +112,15 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: What is wrong with its owner, type, or permissions.
     case insecureDirectory(path: String, reason: String)
 
-    /// This Mac's key file exists but cannot be used.
+    /// This Mac's key cannot be used.
     ///
-    /// The pool never replaces such a file, because paired Macs know this Mac by its key.
+    /// The key file may be unsafe, hold no key, or have vanished right after its creation. The
+    /// certificate or the Security identity for the key may also fail to build. The pool never
+    /// replaces an existing key file, because paired Macs know this Mac by its key.
     ///
     /// - Parameters:
     ///   - path: The key file.
-    ///   - reason: What is wrong with the file's type, owner, permissions, or contents.
+    ///   - reason: What is wrong with the file or the key.
     case unusableIdentity(path: String, reason: String)
 
     /// A one-line description for logs and command output.
