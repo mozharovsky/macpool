@@ -3,6 +3,9 @@ import Foundation
 import Testing
 
 /// Tests of the `ssh` arguments and of how a command's input, outputs, and status are collected.
+///
+/// The time limit turns a collection that never ends into a failure.
+@Suite(.timeLimit(.minutes(1)))
 struct GuestShellTests {
     /// Builds arguments that ignore the user's configuration and agent and pin the host key.
     @Test(arguments: [false, true])

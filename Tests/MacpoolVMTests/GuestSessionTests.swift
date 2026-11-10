@@ -25,42 +25,81 @@ struct GuestSessionTests {
         #expect(!call.trustsFirstKey)
     }
 
-    /// Runs a root command through `sudo` and a shell that checks the marker after the password.
+    /// Runs a root command through `sudo` and a shell that checks a new marker after the password.
     @Test func sendsPasswordAndMarkerToSudo() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: false, rotation: nil)
         let account = try GuestAccount.load(from: bundle.guestAccountFile)
-        let guest = try ScriptedGuest(directory: directory, replies: [.success("0\n")])
+        let guest = try ScriptedGuest(directory: directory, replies: [.success("0\n"), .success("0\n")])
         let session = try GuestSession(bundle: bundle, runner: guest)
 
         _ = try await session.run("id -u", input: "data\n", asRoot: true)
+        _ = try await session.run("id -u", input: "data\n", asRoot: true)
+
+        let markers = guest.calls.map { Self.marker(in: $0) }
+        #expect(markers[0] != markers[1])
+        for (call, marker) in zip(guest.calls, markers) {
+            #expect(marker.hasPrefix("macpool-sudo-"))
+            #expect(marker.count == "macpool-sudo-".count + 36)
+            let script = #"IFS= read -r line && [ "$line" = \#(marker) ] || "#
+                + #"{ echo "macpool: sudo did not read the password (\#(marker))" >&2; exit 125; }; "#
+                + #"exec /bin/sh -c "$1""#
+            #expect(call.command == "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(script)' macpool-sudo 'id -u'")
+            #expect(call.input == account.password + "\n" + marker + "\ndata\n")
+            #expect(!call.command.contains(account.password))
+        }
+    }
+
+    /// Sends a marker that differs from the password, even if the password looks like a marker.
+    @Test func keepsMarkerDistinctFromPassword() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        let password = "macpool-sudo-input"
+        try GuestAccount(fullName: "a", username: "macpool", password: password).write(to: bundle.guestAccountFile)
+        let guest = try ScriptedGuest(directory: directory, replies: [.success("")])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        _ = try await session.run("/bin/cat", asRoot: true)
 
         let call = try #require(guest.calls.first)
-        let script = #"IFS= read -r line && [ "$line" = macpool-sudo-input ] || "#
-            + #"{ echo "macpool: sudo did not read the password" >&2; exit 125; }; exec /bin/sh -c "$1""#
-        #expect(call.command == "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(script)' macpool-sudo 'id -u'")
-        #expect(call.input == account.password + "\nmacpool-sudo-input\ndata\n")
-        #expect(!call.command.contains(account.password))
-        #expect(!GuestSession.rootScript.contains("'"))
+        #expect(Self.marker(in: call) != password)
+        #expect(!call.command.contains(password + " ]"))
     }
 
     /// Throws when the root script reports that `sudo` did not read the password.
     @Test func refusesPasswordlessSudo() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
-        let refused = GuestCommandResult(
-            status: .exited(125),
-            output: "",
-            errorOutput: "macpool: sudo did not read the password\n",
-        )
-        let guest = try ScriptedGuest(directory: directory, replies: [.result(refused), .result(refused)])
+        let reply = ScriptedGuest.Reply.respond { call in
+            GuestCommandResult(
+                status: .exited(125),
+                output: "",
+                errorOutput: "macpool: sudo did not read the password (\(Self.marker(in: call)))\n",
+            )
+        }
+        let guest = try ScriptedGuest(directory: directory, replies: [reply])
         let session = try GuestSession(bundle: bundle, runner: guest)
 
         await #expect(throws: MacpoolError.passwordlessSudo(path: bundle.root.filePath)) {
             try await session.run("/bin/cat", input: "x\n", asRoot: true)
         }
-        // The same status from an account command is the command's own result.
-        #expect(try await session.run("/bin/cat") == refused)
+    }
+
+    /// Returns the result of a command that prints the `sudo` message without this call's marker.
+    @Test func keepsResultWithoutCallMarker() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        let imitation = GuestCommandResult(
+            status: .exited(125),
+            output: "",
+            errorOutput: "macpool: sudo did not read the password (macpool-sudo-input)\n",
+        )
+        let guest = try ScriptedGuest(directory: directory, replies: [.result(imitation), .result(imitation)])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        #expect(try await session.run("/bin/cat", asRoot: true) == imitation)
+        // A command without `sudo` sends no marker. Its result comes back unchanged.
+        #expect(try await session.run("/bin/cat") == imitation)
     }
 
     /// Returns status 125 from a root command that exits with it on its own.
@@ -181,5 +220,14 @@ struct GuestSessionTests {
         #expect(GuestSession.quoted("") == "''")
         #expect(GuestSession.quoted("it's") == #"'it'\''s'"#)
         #expect(GuestSession.quoted("$HOME `x` \"y\"") == "'$HOME `x` \"y\"'")
+    }
+
+    /// Reads the marker line that a root call sent after the password.
+    ///
+    /// - Parameter call: A recorded root call.
+    /// - Returns: The second line of the call's input, or an empty string when it has none.
+    private static func marker(in call: ScriptedGuest.Call) -> String {
+        let lines = call.input.split(separator: "\n", omittingEmptySubsequences: false)
+        return lines.count > 1 ? String(lines[1]) : ""
     }
 }

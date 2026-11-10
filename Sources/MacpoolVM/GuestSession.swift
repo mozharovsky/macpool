@@ -8,7 +8,8 @@ import Foundation
 /// line.
 ///
 /// If a command runs as root, it goes through `sudo`. The session sends the account's password and
-/// a marker line ahead of the command's input, so the password never appears in a command line.
+/// a random marker line ahead of the command's input, so the password never appears in a command
+/// line. Each call uses a new marker.
 /// A root shell reads the marker before it starts the command. If `sudo` did not read the password,
 /// the shell reads the password in place of the marker, discards it, and stops. The call then
 /// throws ``MacpoolError/passwordlessSudo(path:)``.
@@ -86,7 +87,8 @@ public final class GuestSession: Sendable {
     ///
     /// Cancelling the calling task ends the connection and throws
     /// ``MacpoolError/guestCommandCancelled``. The command in the guest keeps running until it ends
-    /// by itself.
+    /// or until it writes to its standard output or standard error. That write ends it. The guest's
+    /// state after a cancellation is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that `/bin/sh` runs in the guest.
@@ -98,7 +100,8 @@ public final class GuestSession: Sendable {
     /// - Throws: ``MacpoolError/invalidBundle(path:reason:)`` when the account's user name needs
     ///   shell quoting or, for a root command, its password holds a line break.
     ///   ``MacpoolError/passwordlessSudo(path:)`` when `sudo` runs a root command without the
-    ///   password. ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start, and
+    ///   password. ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or reading its
+    ///   output fails, and
     ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled. Another
     ///   ``MacpoolError`` when the account file cannot be read.
     public func run(
@@ -114,14 +117,17 @@ public final class GuestSession: Sendable {
         let quotedCommand = Self.quoted(command)
         var line = "/bin/sh -c \(quotedCommand)"
         var standardInput = input
+        var marker = ""
         if asRoot {
             guard !account.password.contains(where: \.isNewline) else {
                 throw .invalidBundle(path: accountFile.filePath, reason: "the password holds a line break")
             }
             // -k ignores a cached sudo ticket, so sudo reads the password line whenever its
             // rules require a password.
-            line = "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(Self.rootScript)' macpool-sudo \(quotedCommand)"
-            standardInput = account.password + "\n" + Self.inputMarker + "\n" + input
+            marker = "macpool-sudo-\(UUID().uuidString)"
+            let script = Self.rootScript(marker: marker)
+            line = "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(script)' macpool-sudo \(quotedCommand)"
+            standardInput = account.password + "\n" + marker + "\n" + input
         }
         let result = try await runner.run(
             line,
@@ -132,29 +138,42 @@ public final class GuestSession: Sendable {
             trustsFirstKey: false,
         )
         let skippedPassword = result.status == .exited(Self.passwordlessSudoStatus)
-            && result.errorOutput.contains(Self.passwordlessSudoMessage)
+            && result.errorOutput.contains(Self.passwordlessSudoMessage(marker: marker))
         if asRoot, skippedPassword {
             throw .passwordlessSudo(path: bundle.root.filePath)
         }
         return result
     }
 
-    /// The line that follows the password on a root command's standard input.
-    static let inputMarker = "macpool-sudo-input"
-
     /// The exit status of the root script when the marker is missing.
     static let passwordlessSudoStatus: Int32 = 125
 
-    /// The message that the root script prints when the marker is missing.
-    static let passwordlessSudoMessage = "macpool: sudo did not read the password"
+    /// Returns the message that the root script prints when the marker is missing.
+    ///
+    /// The message names the call's marker. A command that prints the same text without the marker
+    /// does not count as a `sudo` that skipped the password.
+    ///
+    /// - Parameter marker: The marker that this call sent after the password.
+    /// - Returns: One line of text without a line break.
+    static func passwordlessSudoMessage(marker: String) -> String {
+        "macpool: sudo did not read the password (\(marker))"
+    }
 
-    /// The root shell script that checks the marker and then runs the command in its first argument.
+    /// Returns the root shell script that checks the marker and then runs the command in its
+    /// first argument.
     ///
     /// The script contains no single quote, because the command line wraps it in single quotes.
-    static let rootScript = """
-    IFS= read -r line && [ "$line" = \(inputMarker) ] \
-    || { echo "\(passwordlessSudoMessage)" >&2; exit \(passwordlessSudoStatus); }; exec /bin/sh -c "$1"
-    """
+    ///
+    /// - Parameter marker: The marker that this call sends after the password. It must hold no
+    ///   single quote or line break.
+    /// - Returns: The script on one line.
+    static func rootScript(marker: String) -> String {
+        """
+        IFS= read -r line && [ "$line" = \(marker) ] \
+        || { echo "\(passwordlessSudoMessage(marker: marker))" >&2; exit \(passwordlessSudoStatus); }; \
+        exec /bin/sh -c "$1"
+        """
+    }
 
     /// Quotes text as one word for a POSIX shell.
     ///

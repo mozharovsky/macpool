@@ -12,6 +12,8 @@ final class ScriptedGuest: GuestCommandRunner {
         case hang
         /// The runner throws this error.
         case failure(MacpoolError)
+        /// The command finishes with the result that the closure builds from the call.
+        case respond(@Sendable (Call) -> GuestCommandResult)
 
         /// A successful command that printed the given output.
         ///
@@ -138,6 +140,8 @@ final class ScriptedGuest: GuestCommandRunner {
             return GuestCommandResult(status: .signaled(15), output: "", errorOutput: "")
         case let .failure(error):
             throw error
+        case let .respond(build):
+            return build(call)
         case nil:
             throw .credentialRotation(step: "test", reason: "no scripted reply left")
         }

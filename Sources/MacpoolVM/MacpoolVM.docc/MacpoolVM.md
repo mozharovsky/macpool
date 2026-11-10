@@ -75,6 +75,7 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 - ``SSHProbe``
 - ``GuestSession``
 - ``GuestCommandResult``
+- ``GuestCommandStatus``
 - ``CredentialRotation``
 - ``HostKey``
 

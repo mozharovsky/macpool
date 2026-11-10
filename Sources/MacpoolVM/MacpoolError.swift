@@ -77,8 +77,9 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
 
     /// The calling task was cancelled while a guest command ran.
     ///
-    /// The connection ends at once. The command in the guest keeps running until it ends by
-    /// itself.
+    /// The connection ends at once. The command in the guest keeps running until it ends or until
+    /// it writes to its standard output or standard error. That write ends it. The guest's state
+    /// after a cancellation is unknown.
     case guestCommandCancelled
 
     /// `sudo` in the guest did not ask for the account's password, so the root command did not run.

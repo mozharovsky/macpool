@@ -6,10 +6,11 @@ import System
 public enum GuestCommandStatus: Sendable, Hashable, CustomStringConvertible {
     /// `ssh` exited with this code.
     ///
-    /// The code is the remote command's exit code. If `ssh` fails itself, the code is 255.
+    /// The code is the remote command's exit code. If `ssh` fails itself, or if a signal ends the
+    /// remote command, the code is 255.
     case exited(Int32)
 
-    /// A signal with this number ended `ssh`. For example, 9 is `SIGKILL`.
+    /// A signal with this number ended the local `ssh`. For example, 9 is `SIGKILL`.
     case signaled(Int32)
 
     /// The status in the form `exited(3)` or `signaled(9)`.
@@ -94,7 +95,8 @@ protocol GuestCommandRunner: Sendable {
     /// Runs a command in the guest.
     ///
     /// Cancelling the calling task ends the connection. The command in the guest keeps running
-    /// until it ends by itself.
+    /// until it ends or until it writes to its standard output or standard error. That write ends
+    /// it. The guest's state after a cancellation is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -105,8 +107,9 @@ protocol GuestCommandRunner: Sendable {
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
     /// - Returns: The command's outputs and exit status.
-    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the command cannot start, or
-    ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the command cannot start or reading
+    ///   its output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   cancelled.
     func run(
         _ command: String,
         input: String,
@@ -189,7 +192,8 @@ struct GuestShell: GuestCommandRunner {
     /// Runs a command in the guest through `ssh`.
     ///
     /// Cancelling the calling task terminates `ssh`. The command in the guest keeps running until
-    /// it ends by itself.
+    /// it ends or until it writes to its standard output or standard error. That write ends it.
+    /// The guest's state after a cancellation is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -200,8 +204,8 @@ struct GuestShell: GuestCommandRunner {
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
     /// - Returns: The command's outputs and exit status.
-    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start, or
-    ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or reading its
+    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
     func run(
         _ command: String,
         input: String,
@@ -278,8 +282,8 @@ struct GuestShell: GuestCommandRunner {
     ///   - environment: The program's environment.
     ///   - input: The program's standard input.
     /// - Returns: The exit status and at most the last ``outputLimit`` bytes of each stream.
-    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the process cannot start, or
-    ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the process cannot start or reading its
+    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
     static func collect(
         executable: String,
         arguments: [String],
@@ -288,7 +292,10 @@ struct GuestShell: GuestCommandRunner {
     ) async throws(MacpoolError) -> GuestCommandResult {
         let pipe: (readEnd: FileDescriptor, writeEnd: FileDescriptor)
         do {
-            pipe = try FileDescriptor.pipe()
+            // Both ends close on exec, so a process that the caller spawns meanwhile cannot hold
+            // them open. Subprocess clears the flag on the child's standard input when it moves
+            // the read end there.
+            pipe = try FileDescriptor.pipe(options: .closeOnExec)
         } catch {
             throw .guestCommand(reason: "creating the input pipe failed: \(error)")
         }
