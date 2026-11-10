@@ -108,6 +108,74 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Refuses a trusted client that speaks only TLS 1.2.
+    @Test func refusesTLS12() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: client.keyDigest)]).settings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { _ in true }
+        let options = try securityOptions(of: parameters)
+        sec_protocol_options_set_min_tls_protocol_version(options, .TLSv12)
+        sec_protocol_options_set_max_tls_protocol_version(options, .TLSv12)
+        #expect(await !hostGreets(endpoint, using: parameters))
+        #expect(fixture.logs.entries("A paired Mac connected").isEmpty)
+        // The same client gets in with TLS 1.3.
+        let standard = try PeerSecurity.parameters(identity: client, isServer: false) { _ in true }
+        #expect(await hostGreets(endpoint, using: standard))
+        await daemon.shutdown()
+    }
+
+    /// Names a client by the first certificate that it sends. A trusted certificate later in the
+    /// chain admits nobody.
+    @Test func refusesATrustedCertificateAfterTheFirst() async throws {
+        let fixture = try PoolFixture()
+        let trusted = try makeIdentity()
+        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: trusted.keyDigest)]).settings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+
+        let stranger = try makeIdentity()
+        let parameters = try PeerSecurity.parameters(identity: stranger, isServer: false) { _ in true }
+        try present(stranger, then: trusted.certificate, in: parameters)
+        #expect(await !hostGreets(endpoint, using: parameters))
+        #expect(fixture.logs.entries("A paired Mac connected").isEmpty)
+        // The trusted key gets in when it comes first.
+        let standard = try PeerSecurity.parameters(identity: trusted, isServer: false) { _ in true }
+        #expect(await hostGreets(endpoint, using: standard))
+        await daemon.shutdown()
+    }
+
+    /// Names a host by the first certificate that it sends. The pinned certificate later in the
+    /// chain does not make another Mac the host.
+    @Test func refusesAHostWithThePinnedCertificateAfterTheFirst() async throws {
+        let client = try makeIdentity()
+        let host = try makeIdentity()
+        let impostor = try makeIdentity()
+        let parameters = try PeerSecurity.parameters(identity: impostor, isServer: true) { _ in true }
+        try present(impostor, then: host.certificate, in: parameters)
+        var greeting = try JSONEncoder().encode(HostGreeting(version: PeerSecurity.protocolVersion, role: .host))
+        greeting.append(UInt8(ascii: "\n"))
+        let line = greeting
+        let listener = try await LoopbackListener(using: parameters) { connection in
+            connection.stateUpdateHandler = { state in
+                if case .ready = state {
+                    connection.send(content: line, completion: .idempotent)
+                }
+            }
+            connection.start(queue: DispatchQueue(label: "macpool.test.impostor"))
+        }
+        defer { listener.close() }
+
+        let endpoint = try loopback(listener.port)
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let reason = try #require(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        })
+        let impostorKey = KeyFingerprint(digest: impostor.keyDigest)
+        #expect(reason == "the host presented the key \(impostorKey) instead of \(hostKey)")
+    }
+
     /// Checks the trusted keys during every handshake, so a change applies to the next connection.
     @Test func readsTrustedKeysAtEveryHandshake() async throws {
         let fixture = try PoolFixture()
@@ -167,7 +235,7 @@ struct PeerConnectionTests {
     /// the port is free.
     @Test func keepsTheLocalSocketWithABusyPort() async throws {
         let fixture = try PoolFixture()
-        let holder = try await PortHolder()
+        let holder = try await LoopbackListener()
         let daemon = try await fixture.start(peers: TrustList().settings(port: holder.port))
 
         guard case .status = try await PoolClient.send(.status, to: fixture.directory) else {
@@ -281,8 +349,8 @@ private final class TrustList: Sendable {
     }
 }
 
-/// A plain TCP listener on 127.0.0.1 that holds a port.
-private final class PortHolder: Sendable {
+/// A listener on 127.0.0.1 that holds a port or stands in for a host.
+private final class LoopbackListener: Sendable {
     /// The underlying listener.
     private let listener: NWListener
 
@@ -291,12 +359,17 @@ private final class PortHolder: Sendable {
 
     /// Starts listening on a free port and waits until the listener is ready.
     ///
+    /// - Parameters:
+    ///   - parameters: The parameters of the listener. The initializer sets their local endpoint.
+    ///   - accept: Handles each new connection. By default it closes the connection.
     /// - Throws: An error when the listener cannot start.
-    init() async throws {
-        let parameters = NWParameters.tcp
+    init(
+        using parameters: NWParameters = .tcp,
+        accept: @escaping @Sendable (NWConnection) -> Void = { $0.cancel() },
+    ) async throws {
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         let listener = try NWListener(using: parameters)
-        listener.newConnectionHandler = { $0.cancel() }
+        listener.newConnectionHandler = accept
         let failure: String? = await withCheckedContinuation { ready in
             let once = ResumeOnce(ready)
             listener.stateUpdateHandler = { state in
@@ -323,6 +396,51 @@ private final class PortHolder: Sendable {
     func close() {
         listener.cancel()
     }
+}
+
+/// Returns the TLS options of parameters that ``PeerSecurity`` made, so a test can change them.
+///
+/// - Parameter parameters: Parameters from ``PeerSecurity/parameters(identity:protocols:isServer:admits:)``.
+/// - Returns: The options.
+/// - Throws: An error when the parameters carry no TLS.
+private func securityOptions(of parameters: NWParameters) throws -> sec_protocol_options_t {
+    let tls = try #require(parameters.defaultProtocolStack.applicationProtocols.first as? NWProtocolTLS.Options)
+    return tls.securityProtocolOptions
+}
+
+/// Makes a connection send an identity's certificate followed by another certificate.
+///
+/// - Parameters:
+///   - identity: The key that the connection proves, and the first certificate.
+///   - certificate: The certificate that follows it.
+///   - parameters: Parameters from ``PeerSecurity/parameters(identity:protocols:isServer:admits:)``.
+/// - Throws: An error when Network rejects the chain.
+private func present(_ identity: MacIdentity, then certificate: SecCertificate, in parameters: NWParameters) throws {
+    let secIdentity = try identity.secIdentity()
+    let chain = [identity.certificate, certificate] as CFArray
+    let local = try #require(sec_identity_create_with_certificates(secIdentity, chain))
+    try sec_protocol_options_set_local_identity(securityOptions(of: parameters), local)
+}
+
+/// Connects with the given parameters and reports whether the host greeted.
+///
+/// - Parameters:
+///   - endpoint: The host.
+///   - parameters: The client's parameters.
+/// - Returns: Whether a greeting arrived within 10 seconds.
+private func hostGreets(_ endpoint: NWEndpoint, using parameters: NWParameters) async -> Bool {
+    guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
+        return false
+    }
+    let watchdog = Task {
+        try? await Task.sleep(for: .seconds(10))
+        channel.close()
+    }
+    defer {
+        watchdog.cancel()
+        channel.close()
+    }
+    return await (try? channel.receive(HostGreeting.self)) != nil
 }
 
 /// Creates a key for a Mac that exists only in the test.
