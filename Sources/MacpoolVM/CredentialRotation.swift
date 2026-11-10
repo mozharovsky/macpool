@@ -408,6 +408,8 @@ private struct Login<Shell: GuestCommandRunner> {
             return result
         case let .failed(.guestCommand(reason)):
             throw .credentialRotation(step: step, reason: reason)
+        case .failed(.guestCommandCancelled):
+            throw .credentialRotation(step: step, reason: "the rotation was cancelled")
         case let .failed(error):
             throw error
         case .timedOut:

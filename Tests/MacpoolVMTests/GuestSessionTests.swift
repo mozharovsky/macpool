@@ -25,8 +25,8 @@ struct GuestSessionTests {
         #expect(!call.trustsFirstKey)
     }
 
-    /// Runs a root command through `sudo` with the password as the first line of input.
-    @Test func sendsPasswordToSudoOnInput() async throws {
+    /// Runs a root command through `sudo` and a shell that checks the marker after the password.
+    @Test func sendsPasswordAndMarkerToSudo() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: false, rotation: nil)
         let account = try GuestAccount.load(from: bundle.guestAccountFile)
@@ -36,16 +36,86 @@ struct GuestSessionTests {
         _ = try await session.run("id -u", input: "data\n", asRoot: true)
 
         let call = try #require(guest.calls.first)
-        #expect(call.command == "/usr/bin/sudo -S -k -p '' -- /bin/sh -c 'id -u'")
-        #expect(call.input == account.password + "\ndata\n")
+        let script = #"IFS= read -r line && [ "$line" = macpool-sudo-input ] || "#
+            + #"{ echo "macpool: sudo did not read the password" >&2; exit 125; }; exec /bin/sh -c "$1""#
+        #expect(call.command == "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(script)' macpool-sudo 'id -u'")
+        #expect(call.input == account.password + "\nmacpool-sudo-input\ndata\n")
         #expect(!call.command.contains(account.password))
+        #expect(!GuestSession.rootScript.contains("'"))
+    }
+
+    /// Throws when the root script reports that `sudo` did not read the password.
+    @Test func refusesPasswordlessSudo() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        let refused = GuestCommandResult(
+            status: .exited(125),
+            output: "",
+            errorOutput: "macpool: sudo did not read the password\n",
+        )
+        let guest = try ScriptedGuest(directory: directory, replies: [.result(refused), .result(refused)])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        await #expect(throws: MacpoolError.passwordlessSudo(path: bundle.root.filePath)) {
+            try await session.run("/bin/cat", input: "x\n", asRoot: true)
+        }
+        // The same status from an account command is the command's own result.
+        #expect(try await session.run("/bin/cat") == refused)
+    }
+
+    /// Returns status 125 from a root command that exits with it on its own.
+    @Test func keepsOwnStatusOfRootCommand() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        let own = GuestCommandResult(status: .exited(125), output: "", errorOutput: "other\n")
+        let guest = try ScriptedGuest(directory: directory, replies: [.result(own)])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        #expect(try await session.run("exit 125", asRoot: true) == own)
+    }
+
+    /// Rejects an account whose user name needs shell quoting before it contacts the guest.
+    @Test func rejectsUsernameThatNeedsQuoting() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        try GuestAccount(fullName: "a", username: "a b", password: "secret").write(to: bundle.guestAccountFile)
+        let guest = try ScriptedGuest(directory: directory, replies: [])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        await #expect(throws: MacpoolError.invalidBundle(
+            path: bundle.guestAccountFile.filePath,
+            reason: "the user name needs shell quoting",
+        )) {
+            try await session.run("true")
+        }
+        #expect(guest.calls.isEmpty)
+    }
+
+    /// Rejects a root command when the password holds a line break. The break would split the input.
+    @Test func rejectsPasswordWithLineBreakForRoot() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        try GuestAccount(fullName: "a", username: "macpool", password: "one\ntwo").write(to: bundle.guestAccountFile)
+        let guest = try ScriptedGuest(directory: directory, replies: [.success("")])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        await #expect(throws: MacpoolError.invalidBundle(
+            path: bundle.guestAccountFile.filePath,
+            reason: "the password holds a line break",
+        )) {
+            try await session.run("true", asRoot: true)
+        }
+        #expect(guest.calls.isEmpty)
+        // An account command sends no password, so it still runs.
+        _ = try await session.run("true")
+        #expect(guest.calls.count == 1)
     }
 
     /// Returns a failed command as a result rather than an error.
     @Test func reportsFailedCommand() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
-        let failed = GuestCommandResult(succeeded: false, status: "exited(3)", output: "", errorOutput: "no\n")
+        let failed = GuestCommandResult(status: .exited(3), output: "", errorOutput: "no\n")
         let guest = try ScriptedGuest(directory: directory, replies: [.result(failed)])
         let session = try GuestSession(bundle: bundle, runner: guest)
 

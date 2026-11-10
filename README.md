@@ -93,8 +93,10 @@ starts the shutdown. `run` then reports `measure stop=guest`, and a forced stop 
 `measure stop=forced`.
 
 Swift code runs commands in a running guest through `GuestSession` from MacpoolVM. It logs in as
-the bundle's account and accepts only the host key that `known_hosts` pins. A root command goes
-through sudo. Sudo reads the password from the first line of standard input.
+the bundle's account and accepts only the host key that `known_hosts` pins. A clone pins its key
+on its first run. A bundle from `create` has no pinned key until `Scripts/ssh.sh` connects once.
+A root command goes through sudo. Sudo reads the password from standard input. If sudo runs
+without a password, the session stops the command before it starts.
 
 Every command prints `measure key=value` lines with its timings and sizes.
 

@@ -68,12 +68,26 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// - Parameter path: The bundle directory.
     case credentialRotationInProgress(path: String)
 
-    /// A command could not run in a guest, or its output exceeded the collected size.
+    /// A command could not run in a guest.
     ///
     /// If the command runs and exits with a failure status, the result reports it instead.
     ///
     /// - Parameter reason: Why `ssh` could not run the command.
     case guestCommand(reason: String)
+
+    /// The calling task was cancelled while a guest command ran.
+    ///
+    /// The connection ends at once. The command in the guest keeps running until it ends by
+    /// itself.
+    case guestCommandCancelled
+
+    /// `sudo` in the guest did not ask for the account's password, so the root command did not run.
+    ///
+    /// The session sends the password on standard input and checks that `sudo` read it. Without
+    /// that check, a `NOPASSWD` or `!authenticate` rule would pass the password to the command.
+    ///
+    /// - Parameter path: The bundle directory.
+    case passwordlessSudo(path: String)
 
     /// A one-line description for logs and command output.
     public var description: String {
@@ -100,6 +114,10 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "another macpool run is replacing the guest credentials of \(path), so wait until it prints ready"
         case let .guestCommand(reason):
             "running a command in the guest failed: \(reason)"
+        case .guestCommandCancelled:
+            "the guest command was cancelled, and it may still run in the guest"
+        case let .passwordlessSudo(path):
+            "sudo in the guest of \(path) runs without a password, so the root command did not run"
         }
     }
 

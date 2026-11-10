@@ -132,6 +132,8 @@ struct VirtualMachineRunTests {
 
     /// Runs commands as the account and as root through a session and checks their results.
     ///
+    /// The last step lets the account use sudo without a password. The clone is deleted afterward.
+    ///
     /// - Parameters:
     ///   - bundle: The bundle that the running guest booted from.
     ///   - address: The guest's IPv4 address.
@@ -149,8 +151,23 @@ struct VirtualMachineRunTests {
         #expect(echoed.output == input)
         let failed = try await session.run("echo refused >&2; exit 3")
         #expect(!failed.succeeded)
-        #expect(failed.status == "exited(3)")
+        #expect(failed.status == .exited(3))
         #expect(failed.errorOutput == "refused\n")
+
+        let long = try await session.run(#"head -c 200000 /dev/zero | tr '\0' a; echo end"#, asRoot: true)
+        #expect(long.succeeded)
+        #expect(long.isOutputTruncated)
+        #expect(long.output.hasSuffix("aend\n"))
+
+        // With a NOPASSWD rule, sudo skips the password line. The root script then discards it.
+        let rule = "\(account.username) ALL=(ALL) NOPASSWD: ALL"
+        let file = "/etc/sudoers.d/macpool-test"
+        let allowed = try await session.run("echo '\(rule)' > \(file); chmod 440 \(file)", asRoot: true)
+        #expect(allowed.succeeded)
+        await #expect(throws: MacpoolError.passwordlessSudo(path: bundle.root.path(percentEncoded: false))) {
+            let leaked = try await session.run("/bin/cat", input: "x\n", asRoot: true)
+            #expect(!leaked.output.contains(account.password), "cat printed the account's password")
+        }
     }
 
     /// Reads one `measure` value from a command's output.

@@ -10,13 +10,15 @@ final class ScriptedGuest: GuestCommandRunner {
         case result(GuestCommandResult)
         /// The command runs until its task is cancelled.
         case hang
+        /// The runner throws this error.
+        case failure(MacpoolError)
 
         /// A successful command that printed the given output.
         ///
         /// - Parameter output: The command's standard output.
         /// - Returns: The reply.
         static func success(_ output: String) -> Reply {
-            .result(GuestCommandResult(succeeded: true, status: "exited(0)", output: output, errorOutput: ""))
+            .result(GuestCommandResult(status: .exited(0), output: output, errorOutput: ""))
         }
     }
 
@@ -133,7 +135,9 @@ final class ScriptedGuest: GuestCommandRunner {
                 try? await Task.sleep(for: .seconds(1))
             }
             record.withLock { $0.cancelledCalls += 1 }
-            return GuestCommandResult(succeeded: false, status: "signaled(15)", output: "", errorOutput: "")
+            return GuestCommandResult(status: .signaled(15), output: "", errorOutput: "")
+        case let .failure(error):
+            throw error
         case nil:
             throw .credentialRotation(step: "test", reason: "no scripted reply left")
         }

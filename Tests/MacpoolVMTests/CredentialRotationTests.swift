@@ -166,7 +166,7 @@ struct CredentialRotationTests {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .pending)
         let account = try Data(contentsOf: bundle.guestAccountFile)
-        let refused = GuestCommandResult(succeeded: false, status: "exited(255)", output: "", errorOutput: "denied")
+        let refused = GuestCommandResult(status: .exited(255), output: "", errorOutput: "denied")
         let guest = try ScriptedGuest(
             directory: directory,
             replies: Array(repeating: .result(refused), count: CredentialRotation.loginAttempts),
@@ -184,11 +184,25 @@ struct CredentialRotationTests {
         #expect(!FileManager.default.fileExists(atPath: bundle.rotatingGuestAccountFile.filePath))
     }
 
+    /// Reports an `ssh` that cannot start as a failed rotation step.
+    @Test func reportsUnstartableCommandAsRotationFailure() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .pending)
+        let guest = try ScriptedGuest(directory: directory, replies: [.failure(.guestCommand(reason: "no ssh"))])
+        await #expect(throws: MacpoolError.credentialRotation(
+            step: "logging in with the inherited account",
+            reason: "no ssh",
+        )) {
+            try await Self.rotate(bundle, through: guest)
+        }
+        #expect(try bundle.settings().credentialRotation == .pending)
+    }
+
     /// Leaves the started record and the private next account when the guest script fails.
     @Test func keepsStartedAfterFailedScript() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .pending)
-        let failed = GuestCommandResult(succeeded: false, status: "exited(1)", output: "", errorOutput: "dscl failed")
+        let failed = GuestCommandResult(status: .exited(1), output: "", errorOutput: "dscl failed")
         try await Self.expectStarted(bundle, in: directory, replies: [.success(""), .result(failed)])
         #expect(try Self.permissions(of: bundle.rotatingGuestAccountFile) == 0o600)
     }
@@ -204,7 +218,7 @@ struct CredentialRotationTests {
     @Test func keepsStartedAfterFailedVerification() async throws {
         let directory = try TemporaryDirectory()
         let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .pending)
-        let refused = GuestCommandResult(succeeded: false, status: "exited(255)", output: "", errorOutput: "denied")
+        let refused = GuestCommandResult(status: .exited(255), output: "", errorOutput: "denied")
         let replies: [ScriptedGuest.Reply] = [.success(""), .success("ssh-ed25519 \(HostKeyTests.second)\n")]
             + Array(repeating: .result(refused), count: CredentialRotation.loginAttempts)
         try await Self.expectStarted(bundle, in: directory, replies: replies)

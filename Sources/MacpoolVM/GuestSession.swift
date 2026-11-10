@@ -7,9 +7,11 @@ import Foundation
 /// A clone's ``CredentialRotation`` pins its key there. In the guest, `/bin/sh` runs the command
 /// line.
 ///
-/// If a command runs as root, it goes through `sudo`. The session sends the account's password
-/// as the first line of standard input. `sudo` reads that line, and the command reads the rest.
-/// The password therefore never appears in a command line on the host or in the guest.
+/// If a command runs as root, it goes through `sudo`. The session sends the account's password and
+/// a marker line ahead of the command's input, so the password never appears in a command line.
+/// A root shell reads the marker before it starts the command. If `sudo` did not read the password,
+/// the shell reads the password in place of the marker, discards it, and stops. The call then
+/// throws ``MacpoolError/passwordlessSudo(path:)``.
 ///
 /// The session keeps an askpass script and a copy of the pinned keys in a private temporary
 /// directory. It removes the directory when it is released. The directory never holds a
@@ -80,20 +82,25 @@ public final class GuestSession: Sendable {
     /// Runs a command in the guest and waits until it ends.
     ///
     /// Each call reads the account file again. If the file changes, later calls use the new
-    /// password. Cancelling the calling task terminates `ssh` and ends the command.
+    /// password.
+    ///
+    /// Cancelling the calling task ends the connection and throws
+    /// ``MacpoolError/guestCommandCancelled``. The command in the guest keeps running until it ends
+    /// by itself.
     ///
     /// - Parameters:
     ///   - command: The command line that `/bin/sh` runs in the guest.
     ///   - input: The command's standard input. Pass secrets here rather than in `command`.
-    ///   - asRoot: Whether `sudo` runs the command as root. The account must need its password
-    ///     for `sudo`. If the password is wrong, `sudo` reads later lines of `input` as further
-    ///     attempts.
+    ///   - asRoot: Whether `sudo` runs the command as root. If the password is wrong, `sudo` reads
+    ///     the marker and the first line of `input` as further attempts and fails.
     /// - Returns: The command's outputs and exit status. A command that fails is a result rather
     ///   than an error.
     /// - Throws: ``MacpoolError/invalidBundle(path:reason:)`` when the account's user name needs
     ///   shell quoting or, for a root command, its password holds a line break.
-    ///   ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or an output stream
-    ///   exceeds 64 KiB. Another ``MacpoolError`` when the account file cannot be read.
+    ///   ``MacpoolError/passwordlessSudo(path:)`` when `sudo` runs a root command without the
+    ///   password. ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start, and
+    ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled. Another
+    ///   ``MacpoolError`` when the account file cannot be read.
     public func run(
         _ command: String,
         input: String = "",
@@ -104,19 +111,19 @@ public final class GuestSession: Sendable {
         guard CredentialRotation.isPlainUsername(account.username) else {
             throw .invalidBundle(path: accountFile.filePath, reason: "the user name needs shell quoting")
         }
-        let script = "/bin/sh -c \(Self.quoted(command))"
-        var line = script
+        let quotedCommand = Self.quoted(command)
+        var line = "/bin/sh -c \(quotedCommand)"
         var standardInput = input
         if asRoot {
             guard !account.password.contains(where: \.isNewline) else {
                 throw .invalidBundle(path: accountFile.filePath, reason: "the password holds a line break")
             }
-            // Without -k, a cached sudo ticket would skip the prompt. The password line would
-            // then reach the command as input.
-            line = "/usr/bin/sudo -S -k -p '' -- \(script)"
-            standardInput = account.password + "\n" + input
+            // -k ignores a cached sudo ticket, so sudo reads the password line whenever its
+            // rules require a password.
+            line = "/usr/bin/sudo -S -k -p '' -- /bin/sh -c '\(Self.rootScript)' macpool-sudo \(quotedCommand)"
+            standardInput = account.password + "\n" + Self.inputMarker + "\n" + input
         }
-        return try await runner.run(
+        let result = try await runner.run(
             line,
             input: standardInput,
             username: account.username,
@@ -124,7 +131,30 @@ public final class GuestSession: Sendable {
             knownHosts: knownHosts,
             trustsFirstKey: false,
         )
+        let skippedPassword = result.status == .exited(Self.passwordlessSudoStatus)
+            && result.errorOutput.contains(Self.passwordlessSudoMessage)
+        if asRoot, skippedPassword {
+            throw .passwordlessSudo(path: bundle.root.filePath)
+        }
+        return result
     }
+
+    /// The line that follows the password on a root command's standard input.
+    static let inputMarker = "macpool-sudo-input"
+
+    /// The exit status of the root script when the marker is missing.
+    static let passwordlessSudoStatus: Int32 = 125
+
+    /// The message that the root script prints when the marker is missing.
+    static let passwordlessSudoMessage = "macpool: sudo did not read the password"
+
+    /// The root shell script that checks the marker and then runs the command in its first argument.
+    ///
+    /// The script contains no single quote, because the command line wraps it in single quotes.
+    static let rootScript = """
+    IFS= read -r line && [ "$line" = \(inputMarker) ] \
+    || { echo "\(passwordlessSudoMessage)" >&2; exit \(passwordlessSudoStatus); }; exec /bin/sh -c "$1"
+    """
 
     /// Quotes text as one word for a POSIX shell.
     ///
