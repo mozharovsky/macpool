@@ -268,7 +268,7 @@ struct PoolDaemonTests {
     }
 
     /// Limits a paired client to its own leases, to the sources that the host offers, and to
-    /// leases without a shared directory.
+    /// leases without a shared directory or a raised priority.
     @Test func limitsPairedClients() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start(offeredSources: ["base": pool.source])
@@ -282,6 +282,10 @@ struct PoolDaemonTests {
             (
                 LeaseTerms(source: "base", timeToLive: 60, sharedDirectory: pool.root.url.path(percentEncoded: false)),
                 "a paired client cannot share a host directory",
+            ),
+            (
+                LeaseTerms(source: "base", timeToLive: 60, priority: 1),
+                "a paired client cannot ask for a priority above 0",
             ),
         ]
         for (terms, reason) in refusals {

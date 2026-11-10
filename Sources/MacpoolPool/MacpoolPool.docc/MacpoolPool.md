@@ -28,7 +28,8 @@ may see and change every lease. A paired client from another Mac is named by the
 requests about any other lease as if that lease did not exist.
 
 A paired client names its source by one of the names that the host offers, and the daemon clones
-the bundle behind that name. It cannot share a host directory with its guest.
+the bundle behind that name. It cannot share a host directory with its guest. Its requests take
+at most the default priority, so they never wait ahead of the local user's.
 
 ### Supervisors
 

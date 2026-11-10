@@ -27,8 +27,8 @@ import MacpoolVM
 ///
 /// Each lease has a ``LeaseOwner``. A client on the socket acts for the local user and may act on
 /// every lease. A paired client from another Mac sees and changes only its own leases. It names a
-/// source by one of the names in ``Configuration/offeredSources`` and cannot share a host
-/// directory.
+/// source by one of the names in ``Configuration/offeredSources``. It cannot share a host
+/// directory or ask for a priority above the default of 0.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -457,20 +457,24 @@ public actor PoolDaemon {
     ///
     /// A paired client's source is a name from ``Configuration/offeredSources``, which becomes
     /// the bundle's path. A paired client may not share a host directory, because the guest
-    /// would reach the host's files through it.
+    /// would reach the host's files through it. Its priority stays at or below the default, so
+    /// its requests never wait ahead of the local user's.
     ///
     /// - Parameters:
     ///   - terms: The requested terms.
     ///   - owner: Who requests the lease.
     /// - Returns: The terms with the source's path.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
-    ///   the host does not offer or asks for a shared directory, or the errors of
-    ///   ``LeaseTerms/validate()`` and ``checkSource(of:)``.
+    ///   the host does not offer, asks for a shared directory, or asks for a priority above 0,
+    ///   or the errors of ``LeaseTerms/validate()`` and ``checkSource(of:)``.
     private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> LeaseTerms {
         var terms = terms
         if case .client = owner {
             guard terms.sharedDirectory == nil else {
                 throw .invalidRequest(reason: "a paired client cannot share a host directory")
+            }
+            guard terms.priority <= 0 else {
+                throw .invalidRequest(reason: "a paired client cannot ask for a priority above 0")
             }
             guard let path = configuration.offeredSources[terms.source] else {
                 throw .invalidRequest(reason: "the host offers no source named \(terms.source)")
