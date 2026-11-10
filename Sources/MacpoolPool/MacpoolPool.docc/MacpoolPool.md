@@ -24,6 +24,18 @@ user's temporary directory, so the socket file keeps its full name in the data d
 also tries the truncated name that earlier builds listened on, which keeps their supervisors
 reachable after an upgrade.
 
+### Lease owners
+
+Each lease has a ``LeaseOwner``. A client on the socket acts for the user who runs the daemon and
+may see and change every lease. A paired client from another Mac is named by the
+``KeyFingerprint`` of its key. It sees and changes only its own leases, and the daemon answers its
+requests about any other lease as if that lease did not exist.
+
+A paired client names its source by one of the names that the host offers, and the daemon clones
+the bundle behind that name. It cannot share a host directory with its guest or raise its
+priority above the default of 0. Requests of equal priority wait in the order they arrive. The
+local user gets ahead of a paired client's waiting request by asking for a higher priority.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
@@ -80,10 +92,14 @@ The daemon stores its leases in a JSON file in the data directory after every ch
 exclusive lock on the directory while it runs. A new daemon reads the file, reconnects to the
 supervisors that still run, and treats a supervisor that ended meanwhile as a stopped VM. A
 malformed file moves aside, and the daemon starts without leases. It then stops the supervisors
-and deletes the clones that belong to no lease. A file in another build's format keeps the daemon
-from starting, so that build can still resume the leases. Clients
+and deletes the clones that belong to no lease. A file in a format that this build does not read
+keeps the daemon from starting, so the build that wrote it can still resume the leases. Clients
 of attached leases get a grace period to reattach. ``LaunchAgent`` describes the launchd job that
 starts the daemon at login and again after it exits.
+
+The file is in format version 2, which stores each lease's owner. A version 1 file from an earlier
+build loads with the local user as the owner of every lease. The first start of this build
+rewrites the file in version 2 before any lease changes. An earlier build then refuses the file.
 
 ## Topics
 
@@ -101,6 +117,8 @@ starts the daemon at login and again after it exits.
 - ``PoolReply``
 - ``LeaseTerms``
 - ``LeaseID``
+- ``LeaseOwner``
+- ``KeyFingerprint``
 - ``RestartPolicy``
 - ``LeasePhase``
 - ``LeaseSummary``

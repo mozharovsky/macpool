@@ -267,6 +267,159 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
+    /// Limits a paired client to its own leases, to the sources that the host offers, and to
+    /// leases without a shared directory or a raised priority.
+    @Test func limitsPairedClients() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let local = try await pool.readyLease(pool.terms())
+        let alice = try LeaseLedgerTests.paired("a")
+        let remote = try await pool.pairedClient(of: daemon, owner: alice)
+
+        let refusals = [
+            (LeaseTerms(source: pool.source, timeToLive: 60), "the host offers no source named \(pool.source)"),
+            (LeaseTerms(source: "other", timeToLive: 60), "the host offers no source named other"),
+            (
+                LeaseTerms(source: "base", timeToLive: 60, sharedDirectory: pool.root.url.path(percentEncoded: false)),
+                "a paired client cannot share a host directory",
+            ),
+            (
+                LeaseTerms(source: "base", timeToLive: 60, priority: 1),
+                "a paired client cannot ask for a priority above 0",
+            ),
+        ]
+        for (terms, reason) in refusals {
+            try remote.send(PoolRequest.lease(terms))
+            #expect(try await next(remote) == .failure(PoolError.invalidRequest(reason: reason).description))
+        }
+        let unknown = PoolError.unknownLease(id: local.lease.id.rawValue).description
+        for request in [PoolRequest.renew(local.lease.id), .release(local.lease.id), .attach(local.lease.id)] {
+            try remote.send(request)
+            #expect(try await next(remote) == .failure(unknown))
+        }
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
+
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        let starting = try await next(remote)
+        #expect(starting.lease?.source == pool.source)
+        let ready = try #require(await next(remote).lease)
+        #expect(ready.phase == .ready)
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [ready], queue: [])))
+        let stored = try PoolStore(file: pool.directory.stateFile).load().leases
+        #expect(stored.first { $0.id == ready.id }?.owner == alice)
+        #expect(stored.first { $0.id == local.lease.id }?.owner == .local)
+        #expect(await daemon.summary().leases.count == 2)
+
+        #expect(try await PoolClient.send(.release(ready.id), to: pool.directory) == .released(ready.id))
+        #expect(try await next(remote) == .ended(ready.id, reason: "released by a client"))
+        #expect(pool.logs.entries("Booting a lease").map { $0.metadata["owner"] } == ["local", "\(alice)"])
+        await daemon.shutdown()
+    }
+
+    /// Lets a paired client attach to and release its own lease from a new connection.
+    @Test func pairedClientReturnsToItsLease() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let alice = try LeaseLedgerTests.paired("a")
+        let first = try await pool.pairedClient(of: daemon, owner: alice)
+        try first.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, detached: true)))
+        _ = try await next(first)
+        let lease = try #require(await next(first).lease)
+        #expect(lease.phase == .ready)
+        first.close()
+
+        let second = try await pool.pairedClient(of: daemon, owner: alice)
+        // The lease stays attached to the first connection until the daemon notices its end.
+        let busy = PoolReply.failure(PoolError.leaseAttached(id: lease.id.rawValue).description)
+        var reply = busy
+        var attempts = 0
+        while reply == busy, attempts < 250 {
+            attempts += 1
+            try second.send(PoolRequest.attach(lease.id))
+            reply = try await next(second)
+            if reply == busy {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        try #require(reply != busy, "the lease stayed attached after \(attempts) attempts: \(reply)")
+        #expect(reply == .ready(lease))
+        try second.send(PoolRequest.release(lease.id))
+        #expect(try await next(second) == .ended(lease.id, reason: "released by a client"))
+        #expect(try await next(second) == .released(lease.id))
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        #expect(!pool.launcher.isRunning(lease.id))
+        await daemon.shutdown()
+    }
+
+    /// Keeps two paired clients from seeing or changing each other's leases.
+    @Test func separatesPairedClients() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let alice = try LeaseLedgerTests.paired("a")
+        let bob = try LeaseLedgerTests.paired("b")
+        let clients = try await [
+            pool.pairedClient(of: daemon, owner: alice),
+            pool.pairedClient(of: daemon, owner: bob),
+        ]
+        var leases: [LeaseSummary] = []
+        for client in clients {
+            try client.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+            _ = try await next(client)
+            try leases.append(#require(await next(client).lease))
+        }
+
+        for (index, client) in clients.enumerated() {
+            let own = leases[index]
+            let other = leases[1 - index]
+            try client.send(PoolRequest.status)
+            #expect(try await next(client) == .status(PoolSummary(slots: 2, leases: [own], queue: [])))
+            let unknown = PoolReply.failure(PoolError.unknownLease(id: other.id.rawValue).description)
+            for request in [PoolRequest.renew(other.id), .release(other.id), .attach(other.id)] {
+                try client.send(request)
+                #expect(try await next(client) == unknown)
+            }
+        }
+        #expect(await daemon.summary().leases.map(\.phase) == [.ready, .ready])
+        let owners = try PoolStore(file: pool.directory.stateFile).load().leases.map(\.owner)
+        #expect(Set(owners) == [alice, bob])
+        await daemon.shutdown()
+    }
+
+    /// Resumes a running lease from a version 1 state file as the local user's, and rewrites the
+    /// file in version 2 as soon as the daemon starts.
+    @Test func resumesLeasesFromUnownedState() async throws {
+        let pool = try PoolFixture()
+        let first = try await pool.start()
+        let granted = try await pool.readyLease(pool.terms(detached: true))
+        let id = granted.lease.id
+        granted.client.close()
+        await first.shutdown()
+
+        let file = pool.directory.stateFile
+        let stored = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let leases = try #require(stored["leases"] as? [[String: Any]])
+        #expect(leases.map { $0["owner"] as? String } == ["local"])
+        let earlier: [String: Any] = [
+            "version": PoolState.unownedVersion,
+            "leases": leases.map { $0.filter { $0.key != "owner" } },
+        ]
+        try JSONSerialization.data(withJSONObject: earlier).write(to: file)
+
+        let second = try await pool.start()
+        let rewritten = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(rewritten["version"] as? Int == PoolState.currentVersion)
+        #expect(try PoolStore(file: file).load().leases.map(\.owner) == [.local])
+        #expect(await eventually { await second.summary().leases.map(\.phase) == [.ready] })
+        #expect(pool.launcher.launches(of: id) == 1)
+        let remote = try await pool.pairedClient(of: second, owner: LeaseLedgerTests.paired("a"))
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        await second.shutdown()
+    }
+
     /// Refuses a data directory that another user could replace or write to.
     @Test func refusesDirectoryOthersControl() throws {
         let pool = try PoolFixture()
