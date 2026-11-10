@@ -267,6 +267,53 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
+    /// Limits a paired client to its own leases, to the sources that the host offers, and to
+    /// leases without a shared directory.
+    @Test func limitsPairedClients() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let local = try await pool.readyLease(pool.terms())
+        let alice = try LeaseLedgerTests.paired("a")
+        let remote = try await pool.pairedClient(of: daemon, owner: alice)
+
+        let refusals = [
+            (LeaseTerms(source: pool.source, timeToLive: 60), "the host offers no source named \(pool.source)"),
+            (LeaseTerms(source: "other", timeToLive: 60), "the host offers no source named other"),
+            (
+                LeaseTerms(source: "base", timeToLive: 60, sharedDirectory: pool.root.url.path(percentEncoded: false)),
+                "a paired client cannot share a host directory",
+            ),
+        ]
+        for (terms, reason) in refusals {
+            try remote.send(PoolRequest.lease(terms))
+            #expect(try await next(remote) == .failure(PoolError.invalidRequest(reason: reason).description))
+        }
+        let unknown = PoolError.unknownLease(id: local.lease.id.rawValue).description
+        for request in [PoolRequest.renew(local.lease.id), .release(local.lease.id), .attach(local.lease.id)] {
+            try remote.send(request)
+            #expect(try await next(remote) == .failure(unknown))
+        }
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
+
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        let starting = try await next(remote)
+        #expect(starting.lease?.source == pool.source)
+        let ready = try #require(await next(remote).lease)
+        #expect(ready.phase == .ready)
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [ready], queue: [])))
+        let stored = try PoolStore(file: pool.directory.stateFile).load().leases
+        #expect(stored.first { $0.id == ready.id }?.owner == alice)
+        #expect(stored.first { $0.id == local.lease.id }?.owner == .local)
+        #expect(await daemon.summary().leases.count == 2)
+
+        #expect(try await PoolClient.send(.release(ready.id), to: pool.directory) == .released(ready.id))
+        #expect(try await next(remote) == .ended(ready.id, reason: "released by a client"))
+        #expect(pool.logs.entries("Booting a lease").map { $0.metadata["owner"] } == ["local", "\(alice)"])
+        await daemon.shutdown()
+    }
+
     /// Refuses a data directory that another user could replace or write to.
     @Test func refusesDirectoryOthersControl() throws {
         let pool = try PoolFixture()

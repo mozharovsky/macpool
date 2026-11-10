@@ -57,6 +57,15 @@ struct LeaseLedgerTests {
         ClientID(value: number)
     }
 
+    /// Returns a paired client whose fingerprint repeats one digit.
+    ///
+    /// - Parameter digit: A lowercase hexadecimal digit.
+    /// - Returns: The owner.
+    /// - Throws: An error when the digit is not a lowercase hexadecimal digit.
+    static func paired(_ digit: Character) throws -> LeaseOwner {
+        try .client(#require(KeyFingerprint(String(repeating: digit, count: 64))))
+    }
+
     /// Finds the leases that a list of actions launches.
     ///
     /// - Parameter actions: The actions.
@@ -75,6 +84,7 @@ struct LeaseLedgerTests {
     /// - Parameters:
     ///   - ledger: The ledger.
     ///   - client: The requesting client.
+    ///   - owner: Who the client acts for.
     ///   - terms: The terms.
     ///   - now: The time of the request and the ready report.
     /// - Returns: The new lease.
@@ -82,10 +92,11 @@ struct LeaseLedgerTests {
     static func readyLease(
         in ledger: inout LeaseLedger,
         for client: ClientID,
+        owner: LeaseOwner = .local,
         terms: LeaseTerms = terms(),
         at now: Date = start,
     ) throws -> LeaseID {
-        let id = try #require(launches(ledger.request(terms, from: client, now: now)).first)
+        let id = try #require(launches(ledger.request(terms, from: client, owner: owner, now: now)).first)
         _ = ledger.supervisorReported(id, SupervisorStatus(phase: .ready, address: "192.168.64.2"), now: now)
         return id
     }
@@ -93,9 +104,9 @@ struct LeaseLedgerTests {
     /// Grants free slots and queues the rest.
     @Test func grantsFreeSlotsAndQueuesTheRest() {
         var ledger = Self.ledger(slots: 2)
-        let first = ledger.request(Self.terms(), from: Self.client(1), now: Self.start)
-        let second = ledger.request(Self.terms(), from: Self.client(2), now: Self.start)
-        let third = ledger.request(Self.terms(), from: Self.client(3), now: Self.start)
+        let first = ledger.request(Self.terms(), from: Self.client(1), owner: .local, now: Self.start)
+        let second = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.start)
+        let third = ledger.request(Self.terms(), from: Self.client(3), owner: .local, now: Self.start)
         #expect(Self.launches(first).count == 1)
         #expect(Self.launches(second).count == 1)
         #expect(Self.launches(third).isEmpty)
@@ -108,10 +119,10 @@ struct LeaseLedgerTests {
     @Test func ordersQueueByPriorityThenArrival() throws {
         var ledger = Self.ledger(slots: 1)
         let holder = try Self.readyLease(in: &ledger, for: Self.client(1))
-        _ = ledger.request(Self.terms(priority: 0), from: Self.client(2), now: Self.at(1))
-        _ = ledger.request(Self.terms(priority: 5), from: Self.client(3), now: Self.at(2))
-        _ = ledger.request(Self.terms(priority: 0), from: Self.client(4), now: Self.at(3))
-        let last = ledger.request(Self.terms(priority: 5), from: Self.client(5), now: Self.at(4))
+        _ = ledger.request(Self.terms(priority: 0), from: Self.client(2), owner: .local, now: Self.at(1))
+        _ = ledger.request(Self.terms(priority: 5), from: Self.client(3), owner: .local, now: Self.at(2))
+        _ = ledger.request(Self.terms(priority: 0), from: Self.client(4), owner: .local, now: Self.at(3))
+        let last = ledger.request(Self.terms(priority: 5), from: Self.client(5), owner: .local, now: Self.at(4))
         #expect(ledger.queue.map(\.client) == [3, 5, 2, 4].map(Self.client))
         #expect(last.contains(.notify(Self.client(2), .queued(position: 3))))
         #expect(last.contains(.notify(Self.client(4), .queued(position: 4))))
@@ -123,9 +134,9 @@ struct LeaseLedgerTests {
                 false
             }
         })
-        #expect(ledger.summary().queue.map(\.priority) == [5, 5, 0, 0])
+        #expect(ledger.summary(for: .local).queue.map(\.priority) == [5, 5, 0, 0])
 
-        _ = try ledger.release(holder, reason: "done")
+        _ = try ledger.release(holder, owner: .local, reason: "done")
         _ = ledger.machineExited(holder, .requested, now: Self.at(5))
         let granted = ledger.discarded(holder, now: Self.at(6))
         let next = try #require(Self.launches(granted).first)
@@ -137,8 +148,8 @@ struct LeaseLedgerTests {
     @Test func updatesPositionsWhenClientLeaves() throws {
         var ledger = Self.ledger(slots: 1)
         _ = try Self.readyLease(in: &ledger, for: Self.client(1))
-        _ = ledger.request(Self.terms(), from: Self.client(2), now: Self.at(1))
-        _ = ledger.request(Self.terms(), from: Self.client(3), now: Self.at(2))
+        _ = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.at(1))
+        _ = ledger.request(Self.terms(), from: Self.client(3), owner: .local, now: Self.at(2))
         let actions = ledger.clientDisconnected(Self.client(2), now: Self.at(3))
         #expect(actions == [.notify(Self.client(3), .queued(position: 1))])
         #expect(ledger.queue.map(\.client) == [Self.client(3)])
@@ -148,12 +159,12 @@ struct LeaseLedgerTests {
     @Test func releaseFreesSlotAfterDiscard() throws {
         var ledger = Self.ledger(slots: 1)
         let id = try Self.readyLease(in: &ledger, for: Self.client(1))
-        _ = ledger.request(Self.terms(), from: Self.client(2), now: Self.at(1))
+        _ = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.at(1))
 
-        let released = try ledger.release(id, reason: "released by a client")
+        let released = try ledger.release(id, owner: .local, reason: "released by a client")
         #expect(released == [.notify(Self.client(1), .ended(id, reason: "released by a client")), .stop(id)])
         #expect(ledger.leases[id]?.phase == .stopping)
-        #expect(try ledger.release(id, reason: "again").isEmpty)
+        #expect(try ledger.release(id, owner: .local, reason: "again").isEmpty)
 
         #expect(ledger.machineExited(id, .requested, now: Self.at(2)) == [.discard(id)])
         #expect(ledger.queue.count == 1)
@@ -166,8 +177,9 @@ struct LeaseLedgerTests {
     /// Starts the time to live at the first ready report and moves it on renewal.
     @Test func readyStartsTimeToLiveAndRenewalMovesIt() throws {
         var ledger = Self.ledger()
-        let id = try #require(Self.launches(ledger.request(Self.terms(), from: Self.client(1), now: Self.start)).first)
-        #expect(try ledger.renew(id, now: Self.at(5)).expiresAt == nil)
+        let requested = ledger.request(Self.terms(), from: Self.client(1), owner: .local, now: Self.start)
+        let id = try #require(Self.launches(requested).first)
+        #expect(try ledger.renew(id, owner: .local, now: Self.at(5)).expiresAt == nil)
 
         let ready = ledger.supervisorReported(
             id,
@@ -180,12 +192,12 @@ struct LeaseLedgerTests {
         #expect(summary.expiresAt == Self.at(610))
         #expect(summary.bundle == "/pool/leases/\(id)")
 
-        #expect(try ledger.renew(id, now: Self.at(100)).expiresAt == Self.at(700))
+        #expect(try ledger.renew(id, owner: .local, now: Self.at(100)).expiresAt == Self.at(700))
         #expect(ledger.tick(now: Self.at(699)).isEmpty)
         let expired = ledger.tick(now: Self.at(700))
         #expect(expired == [.notify(Self.client(1), .ended(id, reason: "the lease expired")), .stop(id)])
         #expect(throws: PoolError.leaseEnding(id: id.rawValue)) {
-            try ledger.renew(id, now: Self.at(701))
+            try ledger.renew(id, owner: .local, now: Self.at(701))
         }
     }
 
@@ -219,7 +231,7 @@ struct LeaseLedgerTests {
     /// Ends a detached lease whose client leaves before the VM is ready.
     @Test func detachedLeaseEndsWhenClientLeavesBeforeReady() throws {
         var ledger = Self.ledger()
-        let actions = ledger.request(Self.terms(detached: true), from: Self.client(1), now: Self.start)
+        let actions = ledger.request(Self.terms(detached: true), from: Self.client(1), owner: .local, now: Self.start)
         let id = try #require(Self.launches(actions).first)
         #expect(ledger.clientDisconnected(Self.client(1), now: Self.at(1)) == [.stop(id)])
     }
@@ -326,16 +338,52 @@ struct LeaseLedgerTests {
         let id = try Self.readyLease(in: &before, for: Self.client(1))
         var after = LeaseLedger(policy: Self.policy, directory: before.directory, state: before.state)
         _ = after.recover(now: Self.at(100))
-        let attached = try after.attach(id, client: Self.client(7))
+        let attached = try after.attach(id, client: Self.client(7), owner: .local)
         let summary = try #require(after.leases[id].map(after.summary(of:)))
         #expect(attached == [.notify(Self.client(7), .ready(summary))])
         #expect(after.tick(now: Self.at(200)).isEmpty)
         #expect(throws: PoolError.leaseAttached(id: id.rawValue)) {
-            try after.attach(id, client: Self.client(8))
+            try after.attach(id, client: Self.client(8), owner: .local)
         }
         #expect(throws: PoolError.unknownLease(id: "00000000")) {
-            try after.attach(#require(LeaseID("00000000")), client: Self.client(8))
+            try after.attach(#require(LeaseID("00000000")), client: Self.client(8), owner: .local)
         }
+    }
+
+    /// Lets a paired client see and change only its own leases and requests, and lets the local
+    /// user act on every lease.
+    @Test func pairedClientActsOnlyOnItsOwnLeases() throws {
+        var ledger = Self.ledger(slots: 2)
+        let alice = try Self.paired("a")
+        let bob = try Self.paired("b")
+        let local = try Self.readyLease(in: &ledger, for: Self.client(1))
+        let own = try Self.readyLease(in: &ledger, for: Self.client(2), owner: alice)
+        _ = ledger.request(Self.terms(), from: Self.client(3), owner: bob, now: Self.at(1))
+        _ = ledger.request(Self.terms(), from: Self.client(4), owner: alice, now: Self.at(2))
+
+        let seen = ledger.summary(for: alice)
+        #expect(seen.leases.map(\.id) == [own])
+        #expect(seen.queue.map(\.position) == [2])
+        #expect(ledger.summary(for: .local).leases.count == 2)
+        #expect(ledger.summary(for: .local).queue.map(\.position) == [1, 2])
+
+        let unknown = PoolError.unknownLease(id: local.rawValue)
+        #expect(throws: unknown) {
+            try ledger.renew(local, owner: alice, now: Self.at(3))
+        }
+        #expect(throws: unknown) {
+            try ledger.release(local, owner: alice, reason: "taken")
+        }
+        #expect(throws: unknown) {
+            try ledger.attach(local, client: Self.client(4), owner: alice)
+        }
+        #expect(ledger.leases[local]?.phase == .ready)
+        #expect(ledger.clients[local] == Self.client(1))
+
+        #expect(try ledger.renew(own, owner: alice, now: Self.at(3)).expiresAt == Self.at(603))
+        let released = try ledger.release(own, owner: .local, reason: "released on the host")
+        #expect(released == [.notify(Self.client(2), .ended(own, reason: "released on the host")), .stop(own)])
+        #expect(ledger.leases[own]?.owner == alice)
     }
 
     /// Leaves a lease that waits to restart alone during recovery and launches it on time.

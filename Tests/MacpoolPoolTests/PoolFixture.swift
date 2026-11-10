@@ -51,16 +51,19 @@ final class PoolFixture {
 
     /// Creates a daemon for the data directory without starting it.
     ///
-    /// - Parameter slots: The number of slots.
+    /// - Parameters:
+    ///   - slots: The number of slots.
+    ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     /// - Returns: The daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
-    func daemon(slots: Int = 2) throws(PoolError) -> PoolDaemon {
+    func daemon(slots: Int = 2, offeredSources: [String: String] = [:]) throws(PoolError) -> PoolDaemon {
         let clock = clock
         let logs = logs
         return try PoolDaemon(configuration: PoolDaemon.Configuration(
             directory: directory,
             policy: PoolPolicy(slots: slots),
             launcher: launcher,
+            offeredSources: offeredSources,
             now: { clock.now },
             tickInterval: nil,
             supervisorConnectTimeout: .seconds(10),
@@ -73,13 +76,36 @@ final class PoolFixture {
 
     /// Creates and starts a daemon for the data directory.
     ///
-    /// - Parameter slots: The number of slots.
+    /// - Parameters:
+    ///   - slots: The number of slots.
+    ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     /// - Returns: The listening daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory or listen.
-    func start(slots: Int = 2) async throws(PoolError) -> PoolDaemon {
-        let daemon = try daemon(slots: slots)
+    func start(slots: Int = 2, offeredSources: [String: String] = [:]) async throws(PoolError) -> PoolDaemon {
+        let daemon = try daemon(slots: slots, offeredSources: offeredSources)
         try await daemon.start()
         return daemon
+    }
+
+    /// Connects a client that the daemon serves for a paired Mac.
+    ///
+    /// The test's own socket stands in for the network listener. The daemon receives the
+    /// accepted connection with the owner that a handshake would establish.
+    ///
+    /// - Parameters:
+    ///   - daemon: The daemon.
+    ///   - owner: Who the client acts for.
+    /// - Returns: The client's end of the connection.
+    /// - Throws: An error when the socket cannot listen or the connection fails.
+    func pairedClient(of daemon: PoolDaemon, owner: LeaseOwner) async throws -> MessageChannel {
+        let socket = root.url.appending(path: "paired.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+        await daemon.accept(server, owner: owner)
+        return client
     }
 
     /// Creates lease terms for the source bundle.
