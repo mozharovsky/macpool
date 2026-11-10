@@ -297,21 +297,34 @@ struct PeerConnectionTests {
     @Test func waitsForRepliesBeforeTheNextRequest() async throws {
         let fixture = try PoolFixture()
         let daemon = try await fixture.start()
-        let client = try await PoolClient.connect(to: fixture.directory)
-        // The requests exceed what the daemon reads at once and what the socket buffers. Their
-        // replies stay far below the limit on queued bytes.
-        let count = 8000
-        for _ in 0 ..< count {
-            try client.send(PoolRequest.status)
+        let client = try await PoolClient.connect(to: fixture.directory).takeStream()
+        // Padding makes each request 2 KiB. Once the replies back up, fewer than 200 such
+        // requests fill the sockets and the daemon's read buffer, so 1000 leave a wide margin.
+        // Few requests keep the daemon's work small, so tests that run beside this one keep
+        // their timing.
+        var line = try MessageCoding.encoder.encode(PoolRequest.status)
+        line.append(Data(repeating: UInt8(ascii: " "), count: 2048))
+        line.append(UInt8(ascii: "\n"))
+        let count = 1000
+        let requests = Data(Array(repeating: line, count: count).joined())
+        let sending = Task { try? await client.send(requests) }
+        #expect(await !finishes(within: .milliseconds(500)) { await sending.value })
+        var replies = Data()
+        var lineBreaks = 0
+        while lineBreaks < count, let chunk = await client.receive() {
+            replies.append(chunk)
+            lineBreaks += chunk.count { $0 == UInt8(ascii: "\n") }
         }
-        #expect(await !finishes(within: .milliseconds(500)) { await client.delivered() })
-        for index in 0 ..< count {
-            guard case .status = try await next(client) else {
-                Issue.record("reply \(index) of \(count) is missing")
-                break
+        let lines = replies.split(separator: UInt8(ascii: "\n"))
+        #expect(lines.count == count)
+        #expect(try lines.allSatisfy { line in
+            if case .status = try MessageCoding.decoder.decode(PoolReply.self, from: Data(line)) {
+                true
+            } else {
+                false
             }
-        }
-        #expect(await finishes(within: .seconds(10)) { await client.delivered() })
+        })
+        #expect(await finishes(within: .seconds(10)) { await sending.value })
         client.close()
         await daemon.shutdown()
     }
