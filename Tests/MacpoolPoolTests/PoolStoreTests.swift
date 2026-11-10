@@ -18,8 +18,46 @@ struct PoolStoreTests {
     @Test func roundTripsLeases() throws {
         let directory = try ShortDirectory()
         let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        let record = try Self.record()
+        let local = try LeaseRecord(
+            id: #require(LeaseID("0a1b2c3e")),
+            owner: .local,
+            terms: LeaseTerms(source: "/vms/base", timeToLive: 60),
+            phase: .starting,
+            grantedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            restarts: 0,
+        )
+        let state = PoolState(version: PoolState.currentVersion, leases: [record, local])
+        try store.save(state)
+        #expect(try store.load() == state)
+        let text = try String(contentsOf: store.file, encoding: .utf8)
+        #expect(text.contains("\"version\" : 2"))
+        #expect(text.contains("\"owner\" : \"\(Self.fingerprint)\""))
+        #expect(text.contains("\"owner\" : \"local\""))
+        #expect(text.contains("\"ttl_seconds\" : 600"))
+        #expect(text.contains("\"restart\" : \"always\""))
+        #expect(text.contains("\"supervisor_pid\" : 4242"))
+    }
+
+    /// Reads a file that lists one lease twice as malformed.
+    @Test func rejectsRepeatedLeases() throws {
+        let directory = try ShortDirectory()
+        let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        let record = try Self.record()
+        try store.save(PoolState(version: PoolState.currentVersion, leases: [record, record]))
+        let path = store.file.path(percentEncoded: false)
+        #expect(throws: PoolError.invalidState(path: path, reason: "it lists lease 0a1b2c3d more than once")) {
+            try store.load()
+        }
+    }
+
+    /// Creates a lease record with every field set.
+    ///
+    /// - Returns: The record of lease `0a1b2c3d`, which a paired client owns.
+    /// - Throws: An error when the identifier or the fingerprint is invalid.
+    static func record() throws -> LeaseRecord {
         let id = try #require(LeaseID("0a1b2c3d"))
-        let record = try LeaseRecord(
+        return try LeaseRecord(
             id: id,
             owner: .client(#require(KeyFingerprint(Self.fingerprint))),
             terms: LeaseTerms(
@@ -40,24 +78,6 @@ struct PoolStoreTests {
             endReason: nil,
             supervisorProcessID: 4242,
         )
-        let local = try LeaseRecord(
-            id: #require(LeaseID("0a1b2c3e")),
-            owner: .local,
-            terms: LeaseTerms(source: "/vms/base", timeToLive: 60),
-            phase: .starting,
-            grantedAt: Date(timeIntervalSince1970: 1_800_000_000),
-            restarts: 0,
-        )
-        let state = PoolState(version: PoolState.currentVersion, leases: [record, local])
-        try store.save(state)
-        #expect(try store.load() == state)
-        let text = try String(contentsOf: store.file, encoding: .utf8)
-        #expect(text.contains("\"version\" : 2"))
-        #expect(text.contains("\"owner\" : \"\(Self.fingerprint)\""))
-        #expect(text.contains("\"owner\" : \"local\""))
-        #expect(text.contains("\"ttl_seconds\" : 600"))
-        #expect(text.contains("\"restart\" : \"always\""))
-        #expect(text.contains("\"supervisor_pid\" : 4242"))
     }
 
     /// Reads a file from before lease owners with the local user as every lease's owner.
