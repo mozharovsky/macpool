@@ -213,6 +213,31 @@ struct SupervisorRecoveryTests {
         await daemon.shutdown()
     }
 
+    /// Withholds each signal from a process that the launcher does not identify and logs the
+    /// reason once per signal.
+    @Test func logsWhyASignalIsWithheld() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let mismatch = SupervisorMismatch.unreadableArguments(errno: EPERM)
+        pool.launcher.plan(FakeBehavior(ignoresStop: true, mismatch: mismatch))
+        let granted = try await pool.readyLease(pool.terms())
+        let id = granted.lease.id
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        #expect(try await next(granted.client) == .ended(id, reason: "released by a client"))
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        let withheld = "A process is not the lease's supervisor"
+        #expect(await eventually { pool.logs.entries(withheld).count >= 2 })
+        let entries = pool.logs.entries(withheld)
+        #expect(entries.map { $0.metadata["signal"] } == ["terminate", "kill"])
+        #expect(entries.map { $0.metadata["reason"] } == [mismatch.description, mismatch.description])
+        #expect(entries.allSatisfy { $0.metadata["pid"] == "10001" })
+        #expect(pool.launcher.signals().isEmpty)
+        #expect(pool.launcher.isRunning(id))
+        await daemon.shutdown()
+        await pool.launcher.crash(id)
+    }
+
     /// Signals a supervisor that keeps its lock after its run ended, and then deletes the clone.
     @Test func discardEndsLingeringSupervisor() async throws {
         let pool = try PoolFixture()

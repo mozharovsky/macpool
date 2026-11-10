@@ -896,6 +896,9 @@ public actor PoolDaemon {
     /// these waits, so the lease can end in the meantime. Each step therefore checks
     /// ``isStopDeferred(_:)`` first and leaves the supervisor running while it holds.
     ///
+    /// A signal goes only to a process that the launcher identifies as the lease's supervisor.
+    /// Each signal that the daemon withholds logs the launcher's reason.
+    ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - wait: The wait for the supervisor to exit on its own.
@@ -929,7 +932,8 @@ public actor PoolDaemon {
             // the daemon could not store.
             let recorded = SupervisorLock.holder(of: id, in: directory) ?? 0
             let processID = recorded > 0 ? recorded : ledger.leases[id]?.supervisorProcessID ?? 0
-            if await configuration.launcher.identifies(processID: processID, of: id, in: directory) {
+            do {
+                try await configuration.launcher.identify(processID: processID, of: id, in: directory)
                 // The check of the process suspends, so the lease may have ended meanwhile.
                 guard !isStopDeferred(id) else {
                     return .deferred
@@ -940,6 +944,13 @@ public actor PoolDaemon {
                     "signal": "\(signal)",
                 ])
                 configuration.launcher.send(signal, to: processID, of: id, in: directory)
+            } catch {
+                configuration.logger.warning("A process is not the lease's supervisor", metadata: [
+                    "lease": "\(id)",
+                    "pid": "\(processID)",
+                    "signal": "\(signal)",
+                    "reason": "\(error)",
+                ])
             }
             if await waitForSupervisorExit(of: id, within: configuration.signalGrace) {
                 return .endedByDaemon

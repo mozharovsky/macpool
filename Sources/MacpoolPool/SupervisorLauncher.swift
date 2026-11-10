@@ -48,11 +48,11 @@ public protocol SupervisorLauncher: Sendable {
     ///   - processID: The identifier that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    /// - Returns: Whether the process runs as the lease's supervisor. An identifier of 0 or less
-    ///   never matches.
-    func identifies(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async -> Bool
+    /// - Throws: A ``SupervisorMismatch`` that tells why the process does not count as the lease's
+    ///   supervisor. An identifier of 0 or less never matches.
+    func identify(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async throws(SupervisorMismatch)
 
-    /// Sends a signal to a process that ``identifies(processID:of:in:)`` recognized.
+    /// Sends a signal to a process that ``identify(processID:of:in:)`` recognized.
     ///
     /// The call does not suspend. The daemon checks its own state and sends the signal in one
     /// step, so a lease that ends in between cannot receive a signal meant for an earlier state.
@@ -161,30 +161,32 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
         return try started.get()
     }
 
-    /// Checks a process's command line with `ps`.
+    /// Checks a process's arguments as the kernel holds them.
     ///
-    /// The process must run `supervise` with the data directory and the lease's identifier, so a
-    /// reused process identifier never reaches another process.
+    /// The process's arguments after the first must hold `supervise`, `--data-dir`, the data
+    /// directory, `--lease`, and the lease's identifier as consecutive whole arguments. The
+    /// directory may be spelled differently if it resolves to the same root. A reused process
+    /// identifier therefore never reaches another process.
     ///
     /// - Parameters:
     ///   - processID: The identifier that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    /// - Returns: Whether the process runs as the lease's supervisor. An identifier of 0 or less
-    ///   never matches.
-    public func identifies(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async -> Bool {
+    /// - Throws: ``SupervisorMismatch/noProcess`` for an identifier of 0 or less,
+    ///   ``SupervisorMismatch/otherArguments`` when the arguments do not match, and the errors of
+    ///   reading the arguments.
+    public func identify(
+        processID: Int32,
+        of id: LeaseID,
+        in directory: PoolDirectory,
+    ) async throws(SupervisorMismatch) {
         guard processID > 0 else {
-            return false
+            throw .noProcess
         }
-        let result = try? await run(
-            .path("/bin/ps"),
-            arguments: ["-ww", "-o", "command=", "-p", String(processID)],
-            output: .string(limit: 1 << 16),
-        )
-        guard let command = result?.standardOutput else {
-            return false
+        let arguments = try ProcessArguments.read(processID: processID)
+        guard Self.isSupervisor(arguments, of: id, in: directory) else {
+            throw .otherArguments
         }
-        return Self.isSupervisor(command, of: id, in: directory)
     }
 
     /// Sends `SIGTERM` or `SIGKILL` to a supervisor.
@@ -202,31 +204,43 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
         kill(processID, signal == .kill ? SIGKILL : SIGTERM)
     }
 
-    /// Checks whether a process's command line belongs to a lease's supervisor.
+    /// Checks whether a process's arguments belong to a lease's supervisor.
     ///
-    /// The command must run `supervise` with the lease's identifier and a data directory that
-    /// resolves to the same root. The resolution accepts supervisors that an earlier daemon
-    /// started with another spelling of the directory, such as one with a trailing slash. The
-    /// lease argument must follow the directory at once, so a data directory whose path extends
-    /// the root's path, such as `/a/pool2` for `/a/pool`, does not match.
+    /// The arguments after the first must contain five consecutive elements. They are
+    /// `supervise`, `--data-dir`, an absolute data directory, `--lease`, and the lease's
+    /// identifier.
+    ///
+    /// Two facts keep another process from matching. Each element must equal a whole argument, so
+    /// elements spread over other arguments or joined inside one argument do not match. No two
+    /// leases share an identifier, so another lease's supervisor names a different one.
+    ///
+    /// The data directory matches when it resolves to the same root. This accepts supervisors that
+    /// an earlier daemon started with another spelling of the directory, such as one with a
+    /// trailing slash. The executable's path is not compared, so a daemon that runs from a replaced
+    /// or moved binary still recognizes the supervisors that an earlier binary started.
     ///
     /// - Parameters:
-    ///   - command: The command line as `ps` prints it, with the arguments separated by spaces.
+    ///   - arguments: The process's arguments, including the first one.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    /// - Returns: Whether the command runs `supervise` for the lease in the data directory.
-    static func isSupervisor(_ command: String, of id: LeaseID, in directory: PoolDirectory) -> Bool {
-        guard let start = command.range(of: " supervise --data-dir ")?.upperBound,
-              let end = command.range(of: " --lease \(id.rawValue) ", range: start ..< command.endIndex)?.lowerBound
-        else {
-            return false
+    /// - Returns: Whether the arguments run `supervise` for the lease in the data directory.
+    static func isSupervisor(_ arguments: [String], of id: LeaseID, in directory: PoolDirectory) -> Bool {
+        let root = directory.root.path(percentEncoded: false)
+        let expected = ["supervise", "--data-dir", nil, "--lease", id.rawValue]
+        return arguments.indices.dropFirst().contains { start in
+            let window = arguments[start...].prefix(expected.count)
+            guard window.count == expected.count,
+                  zip(window, expected).allSatisfy({ $1 == nil || $0 == $1 })
+            else {
+                return false
+            }
+            let written = window[start + 2]
+            // A relative path would resolve against the daemon's directory instead of the
+            // supervisor's.
+            guard written.hasPrefix("/") else {
+                return false
+            }
+            return PoolDirectory(root: URL(filePath: written)).root.path(percentEncoded: false) == root
         }
-        let written = String(command[start ..< end])
-        // A relative path would resolve against the daemon's directory instead of the supervisor's.
-        guard written.hasPrefix("/") else {
-            return false
-        }
-        let resolved = PoolDirectory(root: URL(filePath: written)).root
-        return resolved.path(percentEncoded: false) == directory.root.path(percentEncoded: false)
     }
 }

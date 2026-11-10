@@ -28,6 +28,9 @@ final class PoolFixture {
     /// The time that the daemons see.
     let clock = TestClock()
 
+    /// The messages that the daemons log.
+    let logs = LogRecorder()
+
     /// Creates the data directory's parent and the source bundle.
     ///
     /// - Throws: An error when the directories or the settings cannot be written.
@@ -53,6 +56,7 @@ final class PoolFixture {
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
     func daemon(slots: Int = 2) throws(PoolError) -> PoolDaemon {
         let clock = clock
+        let logs = logs
         return try PoolDaemon(configuration: PoolDaemon.Configuration(
             directory: directory,
             policy: PoolPolicy(slots: slots),
@@ -63,7 +67,7 @@ final class PoolFixture {
             reconnectWindow: .seconds(1),
             signalGrace: .milliseconds(500),
             releaseTimeout: .seconds(2),
-            logger: Logger(label: "macpool.tests") { _ in SwiftLogNoOpLogHandler() },
+            logger: Logger(label: "macpool.tests") { _ in RecordingLogHandler(recorder: logs) },
         ))
     }
 
@@ -155,8 +159,11 @@ struct FakeBehavior: Sendable {
     /// Whether the supervisor survives `SIGTERM`.
     var ignoresTerminate = false
 
-    /// How long the check of the supervisor's process takes before a signal, like a slow `ps`.
+    /// How long the check of the supervisor's process takes before a signal.
     var identifyDelay: Duration = .zero
+
+    /// Why the check of the supervisor's process fails, or `nil` when it succeeds.
+    var mismatch: SupervisorMismatch?
 
     /// How long the supervisor keeps its locks after it closed its socket at the end of a run.
     var lingerAfterExit: Duration = .zero
@@ -277,21 +284,23 @@ final class FakeLauncher: SupervisorLauncher {
         return processID
     }
 
-    /// Accepts every process identifier after the supervisor's planned delay, so that
-    /// ``signals()`` records each signal the daemon sends.
+    /// Accepts every process identifier after the supervisor's planned delay unless its behavior
+    /// plans a mismatch, so that ``signals()`` records each signal the daemon sends.
     ///
     /// - Parameters:
     ///   - processID: The identifier that the daemon read.
     ///   - id: The lease.
     ///   - directory: The data directory.
-    /// - Returns: `true`.
-    func identifies(processID _: Int32, of id: LeaseID, in _: PoolDirectory) async -> Bool {
-        let delay = state.withLock { state in
+    /// - Throws: The supervisor's planned ``FakeBehavior/mismatch``.
+    func identify(processID _: Int32, of id: LeaseID, in _: PoolDirectory) async throws(SupervisorMismatch) {
+        let behavior = state.withLock { state in
             state.identifications += 1
-            return state.supervisors[id]?.behavior.identifyDelay ?? .zero
+            return state.supervisors[id]?.behavior ?? FakeBehavior()
         }
-        try? await Task.sleep(for: delay)
-        return true
+        try? await Task.sleep(for: behavior.identifyDelay)
+        if let mismatch = behavior.mismatch {
+            throw mismatch
+        }
     }
 
     /// Counts the process checks that the daemon started.
@@ -531,4 +540,65 @@ func eventually(within timeout: Duration = .seconds(10), _ condition: () async -
         try? await Task.sleep(for: .milliseconds(20))
     }
     return await condition()
+}
+
+/// A log message with its metadata.
+struct LogEntry: Sendable {
+    /// The message.
+    let message: String
+
+    /// The metadata of the message, merged with the logger's metadata, as text.
+    let metadata: [String: String]
+}
+
+/// The messages that a test's loggers wrote.
+final class LogRecorder: Sendable {
+    /// The messages in the order of logging.
+    private let entries = Mutex<[LogEntry]>([])
+
+    /// Adds a message.
+    ///
+    /// - Parameter entry: The message.
+    func record(_ entry: LogEntry) {
+        entries.withLock { $0.append(entry) }
+    }
+
+    /// Returns the messages with a text.
+    ///
+    /// - Parameter message: The text of the messages.
+    /// - Returns: The messages in the order of logging.
+    func entries(_ message: String) -> [LogEntry] {
+        entries.withLock { $0.filter { $0.message == message } }
+    }
+}
+
+/// A log handler that keeps every message in a ``LogRecorder``.
+struct RecordingLogHandler: LogHandler {
+    /// The recorder that keeps the messages.
+    let recorder: LogRecorder
+
+    /// The metadata that every message carries.
+    var metadata: Logger.Metadata = [:]
+
+    /// The lowest level that reaches the recorder.
+    var logLevel: Logger.Level = .trace
+
+    /// The provider of extra metadata, which the tests do not use.
+    var metadataProvider: Logger.MetadataProvider?
+
+    /// The logger's value for a metadata key.
+    ///
+    /// - Parameter key: The metadata key.
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    /// Records a message.
+    ///
+    /// - Parameter event: The message with its level and metadata.
+    func log(event: LogEvent) {
+        let merged = metadata.merging(event.metadata ?? [:]) { $1 }
+        recorder.record(LogEntry(message: event.message.description, metadata: merged.mapValues(\.description)))
+    }
 }
