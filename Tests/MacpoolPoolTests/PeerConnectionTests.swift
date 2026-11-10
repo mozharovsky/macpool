@@ -227,9 +227,9 @@ struct PeerConnectionTests {
         let fixture = try PoolFixture()
         let daemon = try await fixture.start()
         let client = try await PoolClient.connect(to: fixture.directory)
-        // The replies fill the socket's buffers many times over and stay far below the limit
-        // on queued bytes.
-        let count = 20000
+        // The requests exceed what the daemon reads at once and what the socket buffers. Their
+        // replies stay far below the limit on queued bytes.
+        let count = 8000
         for _ in 0 ..< count {
             try client.send(PoolRequest.status)
         }
