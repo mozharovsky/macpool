@@ -112,6 +112,15 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: What is wrong with its owner, type, or permissions.
     case insecureDirectory(path: String, reason: String)
 
+    /// This Mac's key file exists but cannot be used.
+    ///
+    /// The pool never replaces such a file, because paired Macs know this Mac by its key.
+    ///
+    /// - Parameters:
+    ///   - path: The key file.
+    ///   - reason: What is wrong with the file's type, owner, permissions, or contents.
+    case unusableIdentity(path: String, reason: String)
+
     /// A one-line description for logs and command output.
     public var description: String {
         switch self {
@@ -152,6 +161,8 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "another supervisor of lease \(id) still runs"
         case let .insecureDirectory(path, reason):
             "the data directory \(path) is unsafe: \(reason)"
+        case let .unusableIdentity(path, reason):
+            "this Mac's key \(path) is unusable: \(reason)"
         }
     }
 

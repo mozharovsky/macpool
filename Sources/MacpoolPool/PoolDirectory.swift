@@ -12,6 +12,7 @@ public import MacpoolVM
 ///   supervisors leave behind. Only the owner can enter it.
 /// - `leases` holds one cloned bundle per lease, named after the lease.
 /// - `logs` holds the supervisors' output and, under launchd, the daemon's.
+/// - `trust` holds this Mac's key for connections between Macs. Only the owner can enter it.
 ///
 /// Clones must live on the same APFS volume as their sources, so the data directory shares a
 /// volume with the source bundles.
@@ -85,6 +86,16 @@ public struct PoolDirectory: Sendable, Hashable {
     /// The directory with the supervisors' logs.
     public var logsDirectory: URL {
         root.appending(path: "logs", directoryHint: .isDirectory)
+    }
+
+    /// The directory with this Mac's key, which only the owner can enter.
+    public var trustDirectory: URL {
+        root.appending(path: "trust", directoryHint: .isDirectory)
+    }
+
+    /// The file with this Mac's P-256 private key in PKCS#8 PEM, which only the owner can read.
+    public var identityFile: URL {
+        trustDirectory.appending(path: "identity.pem")
     }
 
     /// The clone that a lease uses.
@@ -177,6 +188,34 @@ public struct PoolDirectory: Sendable, Hashable {
         let aliasDirectory = SocketPath.userTemporaryDirectory
         _ = try SocketPath.endpoint(for: daemonSocket, aliasDirectory: aliasDirectory)
         _ = try SocketPath.endpoint(for: supervisorSocket(for: LeaseID.random()), aliasDirectory: aliasDirectory)
+    }
+
+    /// Creates the trust directory, restricts it to its owner, and checks that no other user
+    /// controls it or the data directory.
+    ///
+    /// Another user who could replace the trust directory could put their own key in it, so it
+    /// gets the same checks as the run directory.
+    ///
+    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be
+    ///   created or its permissions cannot be set, or ``PoolError/insecureDirectory(path:reason:)``
+    ///   when the data directory or the trust directory is not a real directory or belongs to
+    ///   another user, or when other users can write to the data directory.
+    func prepareTrustDirectory() throws(PoolError) {
+        do {
+            try FileManager.default.createDirectory(
+                at: trustDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700],
+            )
+        } catch {
+            throw .fileSystem("creating", trustDirectory, error)
+        }
+        try Self.checkOwnership(of: root, forbidden: 0o022)
+        // The check before the change of permissions keeps chmod from following a symbolic link.
+        try Self.checkOwnership(of: trustDirectory, forbidden: 0)
+        guard chmod(trustDirectory.path(percentEncoded: false), 0o700) == 0 else {
+            throw .systemCall("restricting", trustDirectory)
+        }
     }
 
     /// Checks that a directory is a real directory of the current user without forbidden

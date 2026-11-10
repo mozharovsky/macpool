@@ -20,6 +20,18 @@ user's temporary directory, so the socket file keeps its full name in the data d
 also tries the truncated name that earlier builds listened on, which keeps their supervisors
 reachable after an upgrade.
 
+### Mac identity
+
+Each Mac has one P-256 key, which serves it as a host and as a client of other Macs. The key lives
+in PKCS#8 PEM in `trust/identity.pem` of the data directory, and only its owner may read the file
+or enter the directory. The pool creates the key when it first needs it. It refuses a key file
+that other users can reach and never replaces an unusable one, because paired Macs know the Mac by
+its key.
+
+The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.
+The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and
+not the certificate's names or dates.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
