@@ -457,8 +457,9 @@ public actor PoolDaemon {
     ///
     /// A paired client's source is a name from ``Configuration/offeredSources``, which becomes
     /// the bundle's path. A paired client may not share a host directory, because the guest
-    /// would reach the host's files through it. Its priority stays at or below the default, so
-    /// its requests never wait ahead of the local user's.
+    /// would reach the host's files through it. Its priority may not exceed the default of 0.
+    /// Requests of equal priority wait in arrival order, so the local user gets ahead of a paired
+    /// client only with a higher priority.
     ///
     /// - Parameters:
     ///   - terms: The requested terms.

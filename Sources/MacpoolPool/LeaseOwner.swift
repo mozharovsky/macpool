@@ -37,6 +37,8 @@ public struct KeyFingerprint: Hashable, Sendable, CustomStringConvertible {
 /// requested, and it cannot tell another lease from one that does not exist.
 ///
 /// The state file stores the local user as `local` and a paired client as its key's fingerprint.
+/// A new kind of owner needs a new format version of the file. An earlier build takes an owner
+/// that it does not know for a malformed file and sets the file aside.
 public enum LeaseOwner: Hashable, Sendable, Codable, CustomStringConvertible {
     /// The user who runs the daemon, through its socket.
     case local

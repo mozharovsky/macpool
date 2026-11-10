@@ -144,6 +144,21 @@ struct LeaseLedgerTests {
         #expect(granted.contains(.notify(Self.client(5), .queued(position: 1))))
     }
 
+    /// Queues a paired client's request by arrival among requests of the default priority, so the
+    /// local user gets ahead of it only with a higher priority.
+    @Test func localUserPassesPairedClientWithHigherPriority() throws {
+        var ledger = Self.ledger(slots: 1)
+        _ = try Self.readyLease(in: &ledger, for: Self.client(1))
+        let alice = try Self.paired("a")
+        _ = ledger.request(Self.terms(), from: Self.client(2), owner: alice, now: Self.at(1))
+        _ = ledger.request(Self.terms(), from: Self.client(3), owner: .local, now: Self.at(2))
+        #expect(ledger.queue.map(\.client) == [2, 3].map(Self.client))
+        let raised = ledger.request(Self.terms(priority: 1), from: Self.client(4), owner: .local, now: Self.at(3))
+        #expect(ledger.queue.map(\.client) == [4, 2, 3].map(Self.client))
+        #expect(ledger.queue.map(\.owner) == [.local, alice, .local])
+        #expect(raised.contains(.notify(Self.client(2), .queued(position: 2))))
+    }
+
     /// Tells the remaining clients their new positions when a waiting client leaves.
     @Test func updatesPositionsWhenClientLeaves() throws {
         var ledger = Self.ledger(slots: 1)

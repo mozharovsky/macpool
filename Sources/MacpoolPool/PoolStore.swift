@@ -39,7 +39,8 @@ struct PoolStore {
     ///
     /// The call reads the format version before the rest, so a file in another build's format
     /// never counts as malformed. A version 1 file loads with the local user as the owner of
-    /// every lease, and the next write stores it in the current version.
+    /// every lease. The daemon saves the state as soon as it starts, so its first start rewrites
+    /// the file in the current version.
     ///
     /// - Returns: The state in the current version, or an empty state when the file does not
     ///   exist.

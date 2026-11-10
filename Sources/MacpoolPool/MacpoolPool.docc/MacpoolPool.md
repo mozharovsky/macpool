@@ -28,8 +28,9 @@ may see and change every lease. A paired client from another Mac is named by the
 requests about any other lease as if that lease did not exist.
 
 A paired client names its source by one of the names that the host offers, and the daemon clones
-the bundle behind that name. It cannot share a host directory with its guest. Its requests take
-at most the default priority, so they never wait ahead of the local user's.
+the bundle behind that name. It cannot share a host directory with its guest or raise its
+priority above the default of 0. Requests of equal priority wait in the order they arrive. The
+local user gets ahead of a paired client's waiting request by asking for a higher priority.
 
 ### Supervisors
 
@@ -93,8 +94,8 @@ of attached leases get a grace period to reattach. ``LaunchAgent`` describes the
 starts the daemon at login and again after it exits.
 
 The file is in format version 2, which stores each lease's owner. A version 1 file from an earlier
-build loads with the local user as the owner of every lease. The daemon's next write stores the
-file in version 2, which an earlier build then refuses.
+build loads with the local user as the owner of every lease. The first start of this build
+rewrites the file in version 2 before any lease changes. An earlier build then refuses the file.
 
 ## Topics
 
