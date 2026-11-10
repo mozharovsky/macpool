@@ -78,6 +78,18 @@ struct MessageTests {
         }
     }
 
+    /// Writes the greeting as a reply line and refuses any other reply in its place.
+    @Test func encodesTheHostGreeting() throws {
+        let greeting = HostGreeting(version: 1, role: .host)
+        let text = try String(decoding: MessageCoding.encoder.encode(greeting), as: UTF8.self)
+        #expect(text == #"{"reply":"hello","role":"host","version":1}"#)
+        #expect(try MessageCoding.decoder.decode(HostGreeting.self, from: Data(text.utf8)) == greeting)
+        let status = try MessageCoding.encoder.encode(PoolReply.status(PoolSummary(slots: 1, leases: [], queue: [])))
+        #expect(throws: DecodingError.self) {
+            try MessageCoding.decoder.decode(HostGreeting.self, from: status)
+        }
+    }
+
     /// Rejects terms with relative paths or durations out of range.
     @Test func validatesTerms() {
         #expect(throws: Never.self) {

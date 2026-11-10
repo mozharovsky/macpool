@@ -1,3 +1,5 @@
+import CryptoKit
+
 /// The SHA-256 digest of a public key's SubjectPublicKeyInfo, in 64 lowercase hexadecimal digits.
 ///
 /// A paired Mac proves its key when it connects, and the daemon names that Mac by the key's
@@ -22,6 +24,23 @@ public struct KeyFingerprint: Hashable, Sendable, CustomStringConvertible {
             return nil
         }
         self.rawValue = rawValue
+    }
+
+    /// Names a key by the digest of its SubjectPublicKeyInfo.
+    ///
+    /// This is the only conversion from a digest to a fingerprint, so every place that names a
+    /// key writes the same text.
+    ///
+    /// - Parameter digest: The SHA-256 digest of the key's SubjectPublicKeyInfo in DER.
+    init(digest: SHA256Digest) {
+        let digits = Array("0123456789abcdef".utf8)
+        var text: [UInt8] = []
+        text.reserveCapacity(Self.length)
+        for byte in digest {
+            text.append(digits[Int(byte >> 4)])
+            text.append(digits[Int(byte & 0x0F)])
+        }
+        rawValue = String(decoding: text, as: UTF8.self)
     }
 
     /// The fingerprint's text.

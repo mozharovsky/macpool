@@ -29,6 +29,15 @@ import MacpoolVM
 /// every lease. A paired client from another Mac sees and changes only its own leases. It names a
 /// source by one of the names in ``Configuration/offeredSources``. It cannot share a host
 /// directory or ask for a priority above the default of 0.
+///
+/// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
+/// Mac's key only then. A key that cannot be loaded or a port that another process holds leaves
+/// the local socket serving, and the daemon tries again later. A paired Mac proves its key in a
+/// TLS handshake, receives a greeting with the protocol version, and then exchanges the same
+/// lines as a local client.
+///
+/// The daemon reads a client's next request only after the replies to the previous one left. A
+/// client that stops reading therefore stalls only its own connection.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -47,6 +56,9 @@ public actor PoolDaemon {
         /// Each value is the bundle's absolute path. An empty dictionary leaves paired clients
         /// without sources.
         public var offeredSources: [String: String]
+
+        /// How the daemon listens for paired Macs, or `nil` when it serves only the local socket.
+        public var peers: PeerSettings?
 
         /// The source of the current time for expiries, restarts, and stop deadlines.
         public var now: @Sendable () -> Date
@@ -87,6 +99,7 @@ public actor PoolDaemon {
         ///   - launcher: The launcher that starts and signals supervisor processes.
         ///   - offeredSources: The absolute paths of the source bundles that paired clients may
         ///     lease, keyed by the name that a client sends.
+        ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
         ///   - now: The source of the current time.
         ///   - tickInterval: The interval between checks of expiries and restart times, or `nil`.
         ///   - supervisorConnectTimeout: The longest wait for a new supervisor's socket.
@@ -102,6 +115,7 @@ public actor PoolDaemon {
             policy: PoolPolicy = PoolPolicy(),
             launcher: any SupervisorLauncher,
             offeredSources: [String: String] = [:],
+            peers: PeerSettings? = nil,
             now: @escaping @Sendable () -> Date = { Date() },
             tickInterval: Duration? = .seconds(1),
             supervisorConnectTimeout: Duration = .seconds(30),
@@ -116,6 +130,7 @@ public actor PoolDaemon {
             self.policy = policy
             self.launcher = launcher
             self.offeredSources = offeredSources
+            self.peers = peers
             self.now = now
             self.tickInterval = tickInterval
             self.supervisorConnectTimeout = supervisorConnectTimeout
@@ -172,6 +187,16 @@ public actor PoolDaemon {
         }
     }
 
+    /// The outcome of one attempt to listen for paired Macs.
+    private enum PeerListenerAttempt {
+        /// The listener is ready.
+        case listening(PeerListener)
+        /// The key or the port failed, and a later attempt may succeed.
+        case failed
+        /// The daemon shut down.
+        case stopped
+    }
+
     /// The settings and collaborators.
     private let configuration: Configuration
 
@@ -186,6 +211,15 @@ public actor PoolDaemon {
 
     /// The client socket while the daemon listens.
     private var listener: SocketListener?
+
+    /// The listener for paired Macs while it listens.
+    private var peerListener: PeerListener?
+
+    /// Why the listener for paired Macs last failed to start, or `nil` after it started.
+    ///
+    /// The daemon logs a failure only when its reason differs from this one. A failure that
+    /// repeats on every attempt therefore appears in the log once.
+    private var peerListenerFailure: String?
 
     /// The connected clients.
     private var clients: [ClientID: MessageChannel] = [:]
@@ -295,6 +329,24 @@ public actor PoolDaemon {
                 }
             })
         }
+        if let peers = configuration.peers {
+            loops.append(Task { [weak self] in
+                while !Task.isCancelled {
+                    switch await self?.openPeerListener(peers) ?? .stopped {
+                    case let .listening(listener):
+                        for await peer in listener.connections {
+                            await self?.acceptPeer(peer)
+                        }
+                        await self?.peerListenerStopped(listener)
+                    case .failed:
+                        break
+                    case .stopped:
+                        return
+                    }
+                    try? await Task.sleep(for: peers.retryInterval)
+                }
+            })
+        }
     }
 
     /// Stops accepting clients and closes every connection, but leaves the supervisors and their
@@ -310,6 +362,8 @@ public actor PoolDaemon {
         loops = []
         listener?.close()
         listener = nil
+        peerListener?.close()
+        peerListener = nil
         for channel in clients.values {
             channel.close()
         }
@@ -381,6 +435,76 @@ public actor PoolDaemon {
         Task { await self.serve(client, owner: owner, on: channel) }
     }
 
+    /// Starts the listener for paired Macs, loading this Mac's key first.
+    ///
+    /// A failure is logged once until its reason changes or the listener starts.
+    ///
+    /// - Parameter settings: The address, the port, and the trusted keys.
+    /// - Returns: The listener, ``PeerListenerAttempt/failed`` when the key or the port failed, or
+    ///   ``PeerListenerAttempt/stopped`` after ``shutdown()``.
+    private func openPeerListener(_ settings: PeerSettings) async -> PeerListenerAttempt {
+        guard !isShutDown else {
+            return .stopped
+        }
+        let started: PeerListener
+        do throws(PoolError) {
+            let identity = try MacIdentity.loadOrCreate(in: configuration.directory)
+            started = try await PeerListener(identity: identity, settings: settings)
+        } catch {
+            if peerListenerFailure != error.description {
+                peerListenerFailure = error.description
+                configuration.logger.error("The listener for paired Macs cannot start", metadata: [
+                    "reason": "\(error)",
+                ])
+            }
+            return .failed
+        }
+        guard !isShutDown else {
+            started.close()
+            return .stopped
+        }
+        peerListener = started
+        peerListenerFailure = nil
+        configuration.logger.info("Listening for paired Macs", metadata: [
+            "address": "\(settings.address ?? "*")",
+            "port": "\(started.port)",
+        ])
+        return .listening(started)
+    }
+
+    /// Forgets a listener for paired Macs that stopped accepting connections.
+    ///
+    /// - Parameter stopped: The listener whose connections ended.
+    private func peerListenerStopped(_ stopped: PeerListener) {
+        guard !isShutDown, peerListener === stopped else {
+            return
+        }
+        stopped.close()
+        peerListener = nil
+        configuration.logger.error("The listener for paired Macs stopped")
+    }
+
+    /// Greets a paired Mac and serves its requests as the owner of its key.
+    ///
+    /// - Parameter peer: A connection whose handshake proved a trusted key.
+    private func acceptPeer(_ peer: PeerListener.Peer) {
+        guard !isShutDown else {
+            peer.channel.close()
+            return
+        }
+        try? peer.channel.send(HostGreeting(version: PeerSecurity.protocolVersion, role: .host))
+        configuration.logger.info("A paired Mac connected", metadata: [
+            "key": "\(peer.fingerprint)",
+            "address": "\(peer.channel.peer)",
+        ])
+        accept(peer.channel, owner: .client(peer.fingerprint))
+    }
+
+    /// The port on which the daemon listens for paired Macs, or `nil` while it does not listen.
+    var peerPort: UInt16? {
+        peerListener?.port
+    }
+
     /// Reads a client's requests until it disconnects.
     ///
     /// - Parameters:
@@ -403,6 +527,9 @@ public actor PoolDaemon {
                 break
             }
             handle(request, from: client, owner: owner)
+            // Reading on only after the replies left keeps a client that stops reading from
+            // queueing replies without end.
+            await channel.delivered()
         }
         channel.close()
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {

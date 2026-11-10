@@ -52,6 +52,28 @@ The pool builds a self-signed certificate that carries the key in TLS each time 
 The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and
 not the certificate's names or dates.
 
+### Connections between Macs
+
+With ``PoolDaemon/Configuration/peers`` set, the daemon also listens on TCP for paired Macs. Both
+sides present their key in a TLS 1.3 handshake with the application protocol `macpool/1`. Each
+side checks only the key in the first certificate that the other side sends, and the system's
+trust evaluation never runs. Session resumption and session tickets are off, so every connection
+runs a full handshake.
+
+The host checks a client's key against ``PeerSettings/trustedKeys`` during every handshake. A
+TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
+sends a `hello` line with the protocol version and its role first, and the client sends requests
+only after that line. Both sides then exchange the same lines as on the Unix socket.
+
+The daemon loads the key when it starts listening. A key that cannot be loaded or a port that
+another process holds leaves the local socket serving. The daemon logs the failure and tries
+again after ``PeerSettings/retryInterval``.
+
+A channel queues at most 4 MiB for a peer that does not read and closes the connection beyond
+that. The daemon reads a client's next request only after the replies to the previous one left.
+Network does not pass the end of one direction through TLS, so
+``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
@@ -124,6 +146,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``PoolDaemon``
 - ``PoolPolicy``
 - ``PoolDirectory``
+- ``PeerSettings``
 - ``LaunchAgent``
 
 ### Clients

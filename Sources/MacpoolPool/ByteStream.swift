@@ -23,6 +23,11 @@ public final class ByteStream: Sendable {
     /// The bytes that arrived before the handoff, which the next receive returns first.
     private let leftover: Mutex<Data>
 
+    /// Whether the connection runs TLS.
+    ///
+    /// Network cannot end only one direction of a TLS connection.
+    private let carriesTLS: Bool
+
     /// Takes over a connection from a channel.
     ///
     /// - Parameters:
@@ -33,6 +38,9 @@ public final class ByteStream: Sendable {
         self.connection = connection
         self.peer = peer
         self.leftover = Mutex(leftover)
+        carriesTLS = connection.parameters.defaultProtocolStack.applicationProtocols.contains {
+            $0 is NWProtocolTLS.Options
+        }
     }
 
     /// Cancels the connection, so a stream that its owner dropped still ends the peer's reads.
@@ -75,11 +83,19 @@ public final class ByteStream: Sendable {
         }
     }
 
-    /// Ends the sending direction after the bytes sent so far and keeps receiving.
+    /// Ends the sending direction after the bytes sent so far.
     ///
-    /// - Parameter timeout: The longest wait for the bytes sent so far to leave.
+    /// Over TCP and Unix sockets the stream keeps receiving. Network does not pass the end of one
+    /// direction through TLS, so over TLS the call closes the connection once the bytes left, and
+    /// receives return `nil` from then on.
+    ///
+    /// - Parameter timeout: The longest wait for the bytes sent so far to leave. Over TLS, bytes
+    ///   that are still waiting after it are lost.
     public func finishSending(within timeout: Duration = .seconds(2)) async {
         await connection.sendEnd(within: timeout)
+        if carriesTLS {
+            connection.cancel()
+        }
     }
 
     /// Closes the connection and ends a pending receive or send.

@@ -53,6 +53,14 @@ struct MacIdentityTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: trust) == ["identity.pem"])
     }
 
+    /// Names a key with the hexadecimal digits of its digest.
+    @Test func namesTheKeyByItsDigest() {
+        let digest = MacIdentity.keyDigest(of: P256.Signing.PrivateKey().publicKey)
+        let fingerprint = KeyFingerprint(digest: digest)
+        #expect(fingerprint.rawValue == digest.map { String(format: "%02x", $0) }.joined())
+        #expect(KeyFingerprint(fingerprint.rawValue) == fingerprint)
+    }
+
     /// Carries the key in a signed certificate that Security pairs with the key.
     @Test func certificateCarriesTheKey() throws {
         let root = try ShortDirectory()
