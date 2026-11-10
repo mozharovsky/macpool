@@ -14,6 +14,10 @@ The daemon and its clients exchange one JSON message per line over a Unix socket
 directory. ``PoolRequest`` and ``PoolReply`` define the messages, and ``PoolClient`` opens the
 connection. The socket's directory admits only the owning user.
 
+A channel runs the same way over any stream connection, such as TCP. A request can also switch its
+connection to raw bytes. ``MessageChannel/takeStream()`` then hands the connection over as a
+``ByteStream``, which first returns the bytes that arrived after the last line.
+
 Network truncates a socket path with characters outside ASCII, and a socket address holds at most
 103 bytes of path. The pool reaches such a socket through a symbolic link to its directory in the
 user's temporary directory, so the socket file keeps its full name in the data directory. A client
@@ -122,6 +126,7 @@ starts the daemon at login and again after it exits.
 ### Connections
 
 - ``MessageChannel``
+- ``ByteStream``
 - ``SocketListener``
 
 ### Errors
