@@ -213,8 +213,8 @@ struct SupervisorRecoveryTests {
         await daemon.shutdown()
     }
 
-    /// Withholds each signal from a process that the launcher does not identify and logs the
-    /// reason once per signal.
+    /// Withholds each signal from a process that the launcher does not identify, logs the reason
+    /// once per signal, and reports the supervisor as running without a SIGKILL.
     @Test func logsWhyASignalIsWithheld() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
@@ -232,6 +232,11 @@ struct SupervisorRecoveryTests {
         #expect(entries.map { $0.metadata["signal"] } == ["terminate", "kill"])
         #expect(entries.map { $0.metadata["reason"] } == [mismatch.description, mismatch.description])
         #expect(entries.allSatisfy { $0.metadata["pid"] == "10001" })
+        // No SIGKILL went out, so the log does not claim that the supervisor survived one.
+        #expect(await eventually {
+            !pool.logs.entries("A supervisor does not exit, and the daemon withheld SIGKILL").isEmpty
+        })
+        #expect(pool.logs.entries("A supervisor survives SIGKILL").isEmpty)
         #expect(pool.launcher.signals().isEmpty)
         #expect(pool.launcher.isRunning(id))
         await daemon.shutdown()
