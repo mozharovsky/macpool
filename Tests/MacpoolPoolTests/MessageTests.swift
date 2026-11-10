@@ -119,6 +119,56 @@ struct MessageTests {
         server.close()
     }
 
+    /// Waits for queued messages until the peer reads them.
+    @Test func waitsUntilQueuedMessagesLeave() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        // The socket's buffers hold far less than the four messages.
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        #expect(await !finishes(within: .milliseconds(500)) { await server.delivered() })
+        for _ in 0 ..< 4 {
+            #expect(try await client.receive(String.self) == text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        client.close()
+        server.close()
+    }
+
+    /// Closes the connection instead of queueing more than 4 MiB for a peer that stops reading.
+    @Test func closesWhenThePeerStopsReading() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let text = String(repeating: "a", count: 512 << 10)
+        let count = MessageChannel.maximumQueuedBytes / text.utf8.count + 2
+        for _ in 0 ..< count {
+            try server.send(text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        var received = 0
+        while try await client.receive(String.self) != nil {
+            received += 1
+        }
+        #expect(received < count)
+        client.close()
+        server.close()
+    }
+
     /// Fails at once for a missing socket and for a path that no socket can have.
     @Test func refusesMissingAndOverlongSockets() async throws {
         let directory = try ShortDirectory()

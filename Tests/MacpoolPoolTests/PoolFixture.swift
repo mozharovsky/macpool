@@ -599,6 +599,28 @@ func eventually(within timeout: Duration = .seconds(10), _ condition: () async -
     return await condition()
 }
 
+/// Runs an operation and reports whether it finished in time.
+///
+/// If the operation runs longer, it keeps running in its own task after the call returns.
+///
+/// - Parameters:
+///   - timeout: The longest wait.
+///   - operation: The work to run in its own task.
+/// - Returns: Whether the operation finished within the timeout.
+func finishes(within timeout: Duration, _ operation: @escaping @Sendable () async -> Void) async -> Bool {
+    await withCheckedContinuation { continuation in
+        let once = ResumeOnce(continuation)
+        Task {
+            await operation()
+            once.resume(returning: true)
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            once.resume(returning: false)
+        }
+    }
+}
+
 /// A log message with its metadata.
 struct LogEntry: Sendable {
     /// The message.
