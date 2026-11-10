@@ -36,6 +36,22 @@ the bundle behind that name. It cannot share a host directory with its guest or 
 priority above the default of 0. Requests of equal priority wait in the order they arrive. The
 local user gets ahead of a paired client's waiting request by asking for a higher priority.
 
+### Mac identity
+
+Each Mac has one P-256 key, which serves it as a host and as a client of other Macs. The key lives
+in PKCS#8 PEM in `trust/identity.pem` of the data directory, and only its owner may read the file
+or enter the directory. The pool creates the key when it first needs it. It refuses a key file
+that other users can reach and never replaces an unusable one, because paired Macs know the Mac by
+its key.
+
+Permission bits alone do not keep other users out. The pool also refuses the key and the `trust`
+directory on a volume that ignores ownership and when either has an access control list. The
+`trust` directory is excluded from backups, which Time Machine honors.
+
+The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.
+The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and
+not the certificate's names or dates.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
