@@ -174,6 +174,8 @@ retries the write every second and stops the VM and deletes the clone after a wr
 - Two daemons with different data directories each count two slots of their own, so together they
   can try to run more VMs than macOS allows.
 - Under launchd the daemon's own log, `logs/daemon.log`, grows without rotation.
+- The first start of this build's daemon rewrites `state.json` in format version 2, which records
+  lease owners. A build from before that version then refuses to start on the file.
 
 ## Development
 

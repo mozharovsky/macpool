@@ -41,7 +41,7 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// A socket or connection failed.
     ///
     /// - Parameters:
-    ///   - path: The socket involved.
+    ///   - path: The socket path or network endpoint involved.
     ///   - reason: The network framework's description of the failure.
     case connection(path: String, reason: String)
 

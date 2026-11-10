@@ -104,7 +104,10 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
     /// The longest boot timeout that a lease accepts, in seconds, which is one day.
     public static let maximumBootTimeout = 24 * 3600
 
-    /// The absolute path of the stopped bundle that the daemon clones for the lease.
+    /// The stopped bundle that the daemon clones for the lease.
+    ///
+    /// A client on the daemon's socket sends the bundle's absolute path. A paired client sends a
+    /// name that the host offers, and the daemon replaces it with that bundle's path.
     public var source: String
 
     /// The lease's time to live in seconds, from 1 to ``maximumTimeToLive``.
@@ -180,7 +183,7 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
         self.detached = detached
     }
 
-    /// Checks the ranges of the terms.
+    /// Checks the ranges of the terms with the source as a path.
     ///
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a path is not absolute or a duration
     ///   is out of range.

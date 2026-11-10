@@ -24,6 +24,11 @@ import MacpoolVM
 /// A lease ends on release, on expiry, when its attached client disconnects, or when its VM stops
 /// and the restart policy does not boot it again. The daemon then stops the VM, waits until the
 /// supervisor exits, deletes the clone, and grants the slot to the next request.
+///
+/// Each lease has a ``LeaseOwner``. A client on the socket acts for the local user and may act on
+/// every lease. A paired client from another Mac sees and changes only its own leases. It names a
+/// source by one of the names in ``Configuration/offeredSources``. It cannot share a host
+/// directory or ask for a priority above the default of 0.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -35,6 +40,13 @@ public actor PoolDaemon {
 
         /// The launcher that starts and signals supervisor processes.
         public var launcher: any SupervisorLauncher
+
+        /// The source bundles that paired clients may lease, keyed by the name that a client
+        /// sends as its source.
+        ///
+        /// Each value is the bundle's absolute path. An empty dictionary leaves paired clients
+        /// without sources.
+        public var offeredSources: [String: String]
 
         /// The source of the current time for expiries, restarts, and stop deadlines.
         public var now: @Sendable () -> Date
@@ -73,6 +85,8 @@ public actor PoolDaemon {
         ///   - directory: The data directory.
         ///   - policy: The limits and timings.
         ///   - launcher: The launcher that starts and signals supervisor processes.
+        ///   - offeredSources: The absolute paths of the source bundles that paired clients may
+        ///     lease, keyed by the name that a client sends.
         ///   - now: The source of the current time.
         ///   - tickInterval: The interval between checks of expiries and restart times, or `nil`.
         ///   - supervisorConnectTimeout: The longest wait for a new supervisor's socket.
@@ -87,6 +101,7 @@ public actor PoolDaemon {
             directory: PoolDirectory,
             policy: PoolPolicy = PoolPolicy(),
             launcher: any SupervisorLauncher,
+            offeredSources: [String: String] = [:],
             now: @escaping @Sendable () -> Date = { Date() },
             tickInterval: Duration? = .seconds(1),
             supervisorConnectTimeout: Duration = .seconds(30),
@@ -100,6 +115,7 @@ public actor PoolDaemon {
             self.directory = directory
             self.policy = policy
             self.launcher = launcher
+            self.offeredSources = offeredSources
             self.now = now
             self.tickInterval = tickInterval
             self.supervisorConnectTimeout = supervisorConnectTimeout
@@ -214,16 +230,18 @@ public actor PoolDaemon {
     ///
     /// A malformed state file moves aside with an `.invalid-` suffix and the time, and the daemon
     /// starts without leases. ``start()`` then stops the supervisors and deletes the clones that
-    /// belong to no lease. A state file in another build's format, or one that cannot be opened,
-    /// stops the daemon instead and keeps every lease for a daemon that can read it.
+    /// belong to no lease. A state file in a format version that this build does not read, or one
+    /// that cannot be opened, stops the daemon instead and keeps every lease for a daemon that can
+    /// read it. A version 1 file from an earlier build loads with the local user as every lease's
+    /// owner.
     ///
     /// - Parameter configuration: The settings and collaborators.
     /// - Throws: ``PoolError/daemonRunning(path:)`` when another daemon serves the directory,
     ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range,
     ///   ``PoolError/insecureDirectory(path:reason:)`` when another user could control the
-    ///   directory, ``PoolError/unsupportedStateVersion(path:version:)`` when another build wrote
-    ///   the state file, or another ``PoolError`` when the directory or the state file cannot be
-    ///   used.
+    ///   directory, ``PoolError/unsupportedStateVersion(path:version:)`` when the state file has a
+    ///   format version that this build does not read, or another ``PoolError`` when the directory
+    ///   or the state file cannot be used.
     public init(configuration: Configuration) throws(PoolError) {
         guard (1 ... PoolPolicy.maximumSlots).contains(configuration.policy.slots) else {
             throw .invalidRequest(reason: "the daemon takes 1 to \(PoolPolicy.maximumSlots) slots")
@@ -266,7 +284,7 @@ public actor PoolDaemon {
         ])
         loops.append(Task { [weak self] in
             for await channel in listener.connections {
-                await self?.accept(channel)
+                await self?.accept(channel, owner: .local)
             }
         })
         if let interval = configuration.tickInterval {
@@ -340,17 +358,19 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, and queue.
+    /// - Returns: The slots, leases, and queue, as the local user sees them.
     public func summary() -> PoolSummary {
-        ledger.summary()
+        ledger.summary(for: .local)
     }
 
     // MARK: Clients
 
     /// Registers a new client and serves its requests.
     ///
-    /// - Parameter channel: The client's connection.
-    private func accept(_ channel: MessageChannel) {
+    /// - Parameters:
+    ///   - channel: The client's connection.
+    ///   - owner: Who the client acts for, which the caller established for the connection.
+    func accept(_ channel: MessageChannel, owner: LeaseOwner) {
         guard !isShutDown else {
             channel.close()
             return
@@ -358,15 +378,16 @@ public actor PoolDaemon {
         let client = ClientID(value: nextClient)
         nextClient += 1
         clients[client] = channel
-        Task { await self.serve(client, on: channel) }
+        Task { await self.serve(client, owner: owner, on: channel) }
     }
 
     /// Reads a client's requests until it disconnects.
     ///
     /// - Parameters:
     ///   - client: The client.
+    ///   - owner: Who the client acts for.
     ///   - channel: The client's connection.
-    private func serve(_ client: ClientID, on channel: MessageChannel) async {
+    private func serve(_ client: ClientID, owner: LeaseOwner, on channel: MessageChannel) async {
         while true {
             let request: PoolRequest?
             do {
@@ -381,7 +402,7 @@ public actor PoolDaemon {
             guard let request, !isShutDown else {
                 break
             }
-            handle(request, from: client)
+            handle(request, from: client, owner: owner)
         }
         channel.close()
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
@@ -395,25 +416,28 @@ public actor PoolDaemon {
     /// - Parameters:
     ///   - request: The request.
     ///   - client: The client that sent it.
-    private func handle(_ request: PoolRequest, from client: ClientID) {
+    ///   - owner: Who the client acts for.
+    private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) {
         do throws(PoolError) {
             switch request {
             case let .lease(terms):
-                try terms.validate()
-                try checkSource(of: terms)
-                configuration.logger.info("Queued a lease request", metadata: ["source": "\(terms.source)"])
-                perform(ledger.request(terms, from: client, now: configuration.now()))
+                let admitted = try admit(terms, from: owner)
+                configuration.logger.info("Queued a lease request", metadata: [
+                    "source": "\(admitted.source)",
+                    "owner": "\(owner)",
+                ])
+                perform(ledger.request(admitted, from: client, owner: owner, now: configuration.now()))
             case let .attach(id):
-                try perform(ledger.attach(id, client: client))
+                try perform(ledger.attach(id, client: client, owner: owner))
             case let .release(id):
-                try perform(ledger.release(id, reason: "released by a client"))
+                try perform(ledger.release(id, owner: owner, reason: "released by a client"))
                 reply(.released(id), to: client)
             case let .renew(id):
-                let summary = try ledger.renew(id, now: configuration.now())
+                let summary = try ledger.renew(id, owner: owner, now: configuration.now())
                 perform([])
                 reply(.renewed(summary), to: client)
             case .status:
-                reply(.status(ledger.summary()), to: client)
+                reply(.status(ledger.summary(for: owner)), to: client)
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -427,6 +451,40 @@ public actor PoolDaemon {
     ///   - client: The receiving client.
     private func reply(_ reply: PoolReply, to client: ClientID) {
         try? clients[client]?.send(reply)
+    }
+
+    /// Applies an owner's limits to a lease request and checks that it can serve a lease.
+    ///
+    /// A paired client's source is a name from ``Configuration/offeredSources``, which becomes
+    /// the bundle's path. A paired client may not share a host directory, because the guest
+    /// would reach the host's files through it. Its priority may not exceed the default of 0.
+    /// Requests of equal priority wait in arrival order, so the local user gets ahead of a paired
+    /// client only with a higher priority.
+    ///
+    /// - Parameters:
+    ///   - terms: The requested terms.
+    ///   - owner: Who requests the lease.
+    /// - Returns: The terms with the source's path.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
+    ///   the host does not offer, asks for a shared directory, or asks for a priority above 0,
+    ///   or the errors of ``LeaseTerms/validate()`` and ``checkSource(of:)``.
+    private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> LeaseTerms {
+        var terms = terms
+        if case .client = owner {
+            guard terms.sharedDirectory == nil else {
+                throw .invalidRequest(reason: "a paired client cannot share a host directory")
+            }
+            guard terms.priority <= 0 else {
+                throw .invalidRequest(reason: "a paired client cannot ask for a priority above 0")
+            }
+            guard let path = configuration.offeredSources[terms.source] else {
+                throw .invalidRequest(reason: "the host offers no source named \(terms.source)")
+            }
+            terms.source = path
+        }
+        try terms.validate()
+        try checkSource(of: terms)
+        return terms
     }
 
     /// Checks that a request's source and shared directory can serve a lease.
@@ -518,6 +576,7 @@ public actor PoolDaemon {
             case .starting:
                 logger.info("Booting a lease", metadata: [
                     "lease": "\(id)",
+                    "owner": "\(record.owner)",
                     "source": "\(record.terms.source)",
                     "restarts": "\(record.restarts)",
                 ])
