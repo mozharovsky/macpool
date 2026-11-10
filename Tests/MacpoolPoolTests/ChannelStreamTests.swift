@@ -37,10 +37,10 @@ struct ChannelStreamTests {
         let server = try #require(await connections.next())
 
         // The line and the first raw bytes leave in one send, so they usually arrive together.
-        let clientStream = client.takeStream()
+        let clientStream = try client.takeStream()
         try await clientStream.send(Data("{\"request\":\"status\"}\nhello".utf8))
         #expect(try await server.receive(PoolRequest.self) == .status)
-        let serverStream = server.takeStream()
+        let serverStream = try server.takeStream()
         #expect(await serverStream.read(count: 5) == Data("hello".utf8))
 
         let payload = Data((0 ..< 300_000).map { UInt8(truncatingIfNeeded: $0) })
@@ -64,17 +64,95 @@ struct ChannelStreamTests {
         var connections = listener.connections.makeAsyncIterator()
         let server = try #require(await connections.next())
 
-        let serverStream = server.takeStream()
+        let serverStream = try server.takeStream()
         #expect(try await server.receive(PoolRequest.self) == nil)
         try server.send(PoolReply.queued(position: 1))
         server.close()
         await server.finish()
         try await serverStream.send(Data("bytes\n".utf8))
         // The reply went nowhere and the connection stayed open, so only the raw bytes arrive.
-        let clientStream = client.takeStream()
+        let clientStream = try client.takeStream()
         #expect(await clientStream.read(count: 6) == Data("bytes\n".utf8))
         clientStream.close()
         serverStream.close()
+    }
+
+    /// Refuses to hand a connection to a second stream.
+    @Test func handsTheConnectionToOneStream() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let serverStream = try server.takeStream()
+        #expect(throws: PoolError.connection(path: "test client", reason: "a byte stream already owns it")) {
+            try server.takeStream()
+        }
+        try await serverStream.send(Data("one".utf8))
+        let clientStream = try client.takeStream()
+        #expect(await clientStream.read(count: 3) == Data("one".utf8))
+        clientStream.close()
+        serverStream.close()
+    }
+
+    /// Ends a stream's own pending receive and send when the stream closes.
+    @Test func closeEndsPendingReceiveAndSend() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let stream = try server.takeStream()
+        let receiving = Task { await stream.receive() }
+        // The client reads nothing, so Network stops taking bytes long before this many.
+        let sending = Task { try await stream.send(Data(count: 64 << 20)) }
+        try await Task.sleep(for: .milliseconds(200))
+        stream.close()
+        #expect(await receiving.value == nil)
+        await #expect(throws: PoolError.self) {
+            try await sending.value
+        }
+        client.close()
+    }
+
+    /// Ends the peer's reads when a stream goes away without a close.
+    @Test func droppedStreamEndsItsConnection() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        _ = try server.takeStream()
+        let clientStream = try client.takeStream()
+        // The time limit cannot end a waiting receive, so a late close bounds the wait.
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(10))
+            clientStream.close()
+        }
+        #expect(await clientStream.receive() == nil)
+        watchdog.cancel()
+        #expect(await (try? watchdog.value) == nil, "the peer saw the end only when the watchdog closed")
+        clientStream.close()
+    }
+
+    /// Returns the complete lines and then `nil` when the connection breaks inside a line.
+    @Test func endsAtABreakInsideALine() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let clientStream = try client.takeStream()
+        try await clientStream.send(Data("{\"request\":\"status\"}\n{\"request\":\"sta".utf8))
+        await clientStream.finishSending()
+        #expect(try await server.receive(PoolRequest.self) == .status)
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        clientStream.close()
+        server.close()
     }
 
     /// Fails at once when nothing listens on a TCP port.

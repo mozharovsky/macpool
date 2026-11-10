@@ -8,6 +8,11 @@ import Synchronization
 /// a time receives and one task at a time sends. ``send(_:)`` returns once Network has taken the
 /// bytes, so a loop that receives from one stream and sends to another moves data no faster than
 /// the slower side accepts it.
+///
+/// The owner ends the connection with ``close()``, after ``finishSending(within:)`` when the
+/// peer should get every byte. A stream that goes away without ``close()`` cancels its connection
+/// when it is deinitialized. The peer then still sees the end, at a moment that the owner does not
+/// choose, and bytes that have not left yet may be lost.
 public final class ByteStream: Sendable {
     /// The underlying connection.
     private let connection: NWConnection
@@ -30,7 +35,14 @@ public final class ByteStream: Sendable {
         self.leftover = Mutex(leftover)
     }
 
+    /// Cancels the connection, so a stream that its owner dropped still ends the peer's reads.
+    deinit {
+        connection.cancel()
+    }
+
     /// Receives the next bytes.
+    ///
+    /// The wait ignores task cancellation, so the owner calls ``close()`` to end it early.
     ///
     /// - Returns: The bytes that arrived before the handoff, then up to 64 KiB per call, or `nil`
     ///   once the peer ended its sending direction, the connection failed, or it was closed.
@@ -46,6 +58,9 @@ public final class ByteStream: Sendable {
     }
 
     /// Sends bytes and waits until Network has taken them.
+    ///
+    /// The wait lasts as long as the peer reads nothing and Network's buffer is full. It ignores
+    /// task cancellation, so the owner calls ``close()`` to end it early.
     ///
     /// - Parameter data: The bytes.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection failed or was closed.
@@ -67,7 +82,10 @@ public final class ByteStream: Sendable {
         await connection.sendEnd(within: timeout)
     }
 
-    /// Closes the connection and ends a pending receive.
+    /// Closes the connection and ends a pending receive or send.
+    ///
+    /// Bytes that have not left yet may be lost. Call ``finishSending(within:)`` first to deliver
+    /// them.
     public func close() {
         connection.cancel()
     }

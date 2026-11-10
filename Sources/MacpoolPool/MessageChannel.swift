@@ -182,7 +182,8 @@ public final class MessageChannel: Sendable {
 
     /// Receives the next message.
     ///
-    /// Only one task may wait at a time.
+    /// One task at a time may wait. The wait ignores task cancellation, so the owner calls
+    /// ``close()`` to end it early.
     ///
     /// - Parameter type: The message type.
     /// - Returns: The message, or `nil` once the connection has ended or went to a ``ByteStream``.
@@ -217,15 +218,23 @@ public final class MessageChannel: Sendable {
     /// Ends the line framing and hands the connection over as a byte stream.
     ///
     /// The stream first returns the bytes that arrived after the last line that ``receive(_:)``
-    /// returned. Call this once, while no receive waits. The channel then drops sends, its
-    /// receives return `nil`, and its ``close()`` and ``finish(within:)`` leave the connection to
-    /// the stream.
+    /// returned. Call this while no receive waits. The channel then drops sends, its receives
+    /// return `nil`, and its ``close()`` and ``finish(within:)`` leave the connection to the
+    /// stream.
     ///
     /// - Returns: The stream that now owns the connection.
-    public func takeStream() -> ByteStream {
-        let leftover = state.withLock { state in
+    /// - Throws: ``PoolError/connection(path:reason:)`` when an earlier call already handed the
+    ///   connection to a stream.
+    public func takeStream() throws(PoolError) -> ByteStream {
+        let leftover: Data? = state.withLock { state in
+            guard !state.isStreaming else {
+                return nil
+            }
             state.isStreaming = true
             return state.buffer.takeAll()
+        }
+        guard let leftover else {
+            throw .connection(path: peer, reason: "a byte stream already owns it")
         }
         return ByteStream(connection: connection, peer: peer, leftover: leftover)
     }
