@@ -68,6 +68,13 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// - Parameter path: The bundle directory.
     case credentialRotationInProgress(path: String)
 
+    /// A command could not run in a guest, or its output exceeded the collected size.
+    ///
+    /// If the command runs and exits with a failure status, the result reports it instead.
+    ///
+    /// - Parameter reason: Why `ssh` could not run the command.
+    case guestCommand(reason: String)
+
     /// A one-line description for logs and command output.
     public var description: String {
         switch self {
@@ -91,6 +98,8 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "rotating the guest credentials failed while \(step): \(reason)"
         case let .credentialRotationInProgress(path):
             "another macpool run is replacing the guest credentials of \(path), so wait until it prints ready"
+        case let .guestCommand(reason):
+            "running a command in the guest failed: \(reason)"
         }
     }
 

@@ -92,6 +92,10 @@ gives sudo the account's password on standard input, because the SSH session has
 starts the shutdown. `run` then reports `measure stop=guest`, and a forced stop reports
 `measure stop=forced`.
 
+Swift code runs commands in a running guest through `GuestSession` from MacpoolVM. It logs in as
+the bundle's account and accepts only the host key that `known_hosts` pins. A root command goes
+through sudo. Sudo reads the password from the first line of standard input.
+
 Every command prints `measure key=value` lines with its timings and sizes.
 
 ## Leases

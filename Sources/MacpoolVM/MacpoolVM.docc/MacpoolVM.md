@@ -34,6 +34,10 @@ macOS 27 guests accept provisioning options on their first boot after an install
 Login, and skips Setup Assistant. The host then finds the guest's address in its DHCP leases with
 ``DHCPLeases`` and waits for SSH with ``SSHProbe``.
 
+A ``GuestSession`` runs commands in a ready guest over SSH. It logs in as the bundle's account,
+accepts only the pinned host key, and runs a root command through `sudo` with the password on
+standard input.
+
 ### Requirements
 
 The library needs a Mac with Apple silicon and macOS 27. The process that creates a VM needs the
@@ -69,6 +73,8 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 - ``DHCPLease``
 - ``MACAddress``
 - ``SSHProbe``
+- ``GuestSession``
+- ``GuestCommandResult``
 - ``CredentialRotation``
 - ``HostKey``
 

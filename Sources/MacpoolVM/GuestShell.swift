@@ -3,21 +3,23 @@ import Subprocess
 import System
 
 /// The result of one command in a guest.
-struct GuestCommandResult: Sendable, Equatable {
+///
+/// `ssh` exits with the remote command's status, or with status 255 when it fails itself.
+public struct GuestCommandResult: Sendable, Equatable {
     /// Whether `ssh` and the remote command exited with status zero.
-    let succeeded: Bool
+    public let succeeded: Bool
 
     /// The exit status of `ssh`, such as `exited(255)`.
-    let status: String
+    public let status: String
 
     /// The remote command's standard output.
-    let output: String
+    public let output: String
 
     /// The standard error of `ssh` and the remote command.
-    let errorOutput: String
+    public let errorOutput: String
 
-    /// The exit status and the end of the error output.
-    var failureSummary: String {
+    /// The exit status and the last 400 characters of the error output.
+    public var failureSummary: String {
         let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "ssh \(status) without output" : "ssh \(status): \(trimmed.suffix(400))"
     }
@@ -50,7 +52,7 @@ protocol GuestCommandRunner: Sendable {
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
     /// - Returns: The command's outputs and whether it succeeded.
-    /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when the command cannot start.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the command cannot start.
     func run(
         _ command: String,
         input: String,
@@ -59,6 +61,9 @@ protocol GuestCommandRunner: Sendable {
         knownHosts: URL,
         trustsFirstKey: Bool,
     ) async throws(MacpoolError) -> GuestCommandResult
+
+    /// Removes the runner's private directory and the `known_hosts` files in it.
+    func removeDirectory()
 }
 
 /// An SSH client for one guest that logs in with the password of a stored account file.
@@ -140,8 +145,8 @@ struct GuestShell: GuestCommandRunner {
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
     /// - Returns: The command's outputs and whether it succeeded.
-    /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when `ssh` cannot start or
-    ///   its output exceeds ``outputLimit``.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or its output
+    ///   exceeds ``outputLimit``.
     func run(
         _ command: String,
         input: String,
@@ -190,7 +195,7 @@ struct GuestShell: GuestCommandRunner {
                 errorOutput: result.standardError,
             )
         } catch {
-            throw .credentialRotation(step: "running ssh", reason: "\(error)")
+            throw .guestCommand(reason: "\(error)")
         }
     }
 
