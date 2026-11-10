@@ -55,8 +55,10 @@ Scripts/ssh.sh .cache/vms/clone1 'ls "/Volumes/My Shared Files"'
 
 `fetch` finds the newest restore image that the host supports and downloads it with `--download`.
 `create` makes a bundle and installs macOS into it. When the install fails or Control-C interrupts
-it, `create` removes the bundle. `clone` copies a stopped bundle with APFS in milliseconds and gives
-the copy a new machine identifier and MAC address.
+it, `create` removes the bundle. The sparse disk takes 128 GB by default and uses host space only
+as the guest writes. The guest cannot use a larger disk later. Xcode with an iOS simulator runtime
+does not fit in 64 GB. `clone` copies a stopped bundle with APFS in milliseconds and gives the copy
+a new machine identifier and MAC address.
 
 A clone starts with its source's guest password and SSH host keys. Its first `run` replaces both
 and then prints `ready`, so use a clone only after `ready`. The new password goes to the clone's

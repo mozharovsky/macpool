@@ -49,7 +49,7 @@ struct CommandLineTests {
         let create = try #require(
             try Macpool.parseAsRoot(["create", "--ipsw", "i.ipsw", "--bundle", "b"]) as? CreateCommand,
         )
-        #expect(create.diskGigabytes == 64)
+        #expect(create.diskGigabytes == 128)
         #expect(create.cpus == 8)
         #expect(create.memoryGigabytes == 16)
         #expect(create.logging.logLevel == .warning)
