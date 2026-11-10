@@ -135,12 +135,34 @@ struct SupervisorLauncherTests {
         let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
         let id = try #require(LeaseID("0a1b2c3d"))
         await #expect(throws: SupervisorMismatch.noProcess) {
-            try await launcher.identify(processID: 0, of: id, in: directory)
+            try await launcher.identify(processID: 0, startTime: .absent, of: id, in: directory)
         }
         launcher.send(.kill, to: 0, of: id, in: directory)
         // The test's own process runs, but not as a supervisor.
         await #expect(throws: SupervisorMismatch.otherArguments) {
-            try await launcher.identify(processID: getpid(), of: id, in: directory)
+            try await launcher.identify(processID: getpid(), startTime: .absent, of: id, in: directory)
+        }
+    }
+
+    /// Checks a recorded start time before the arguments and withholds a match for another start
+    /// time or a malformed record.
+    @Test func comparesRecordedStartTime() async throws {
+        let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/opt/macpool"))
+        let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
+        let id = try #require(LeaseID("0a1b2c3d"))
+        let started = try ProcessStartTime.read(processID: getpid())
+        func identify(_ startTime: RecordedStartTime) async throws(SupervisorMismatch) {
+            try await launcher.identify(processID: getpid(), startTime: startTime, of: id, in: directory)
+        }
+        // The test process has the recorded start time but runs no supervisor.
+        await #expect(throws: SupervisorMismatch.otherArguments) {
+            try await identify(.recorded(started))
+        }
+        await #expect(throws: SupervisorMismatch.startTimeDiffers(recorded: started + 1, actual: started)) {
+            try await identify(.recorded(started + 1))
+        }
+        await #expect(throws: SupervisorMismatch.malformedStartTime) {
+            try await identify(.malformed)
         }
     }
 }

@@ -134,7 +134,7 @@ struct PoolCommandTests {
         let directory = PoolDirectory(root: parent)
         try directory.prepare()
         let id = try #require(LeaseID("0a1b2c3d"))
-        let lock = try SupervisorLock(of: id, in: directory, processID: 4242)
+        let lock = try SupervisorLock(of: id, in: directory, processID: 4242, startTime: 1)
         try directory.writeExitRecord(.requested, for: id)
         let command = try #require(
             try Macpool.parseAsRoot([
@@ -145,7 +145,7 @@ struct PoolCommandTests {
             try await command.run()
         }
         #expect(directory.readExitRecord(for: id) == .requested)
-        #expect(SupervisorLock.holder(of: id, in: directory) == 4242)
+        #expect(SupervisorLock.holder(of: id, in: directory)?.processID == 4242)
         withExtendedLifetime(lock) {}
     }
 }

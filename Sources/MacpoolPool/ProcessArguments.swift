@@ -24,6 +24,22 @@ public enum SupervisorMismatch: Error, Sendable, Equatable, CustomStringConverti
     /// The arguments do not run `supervise` for the lease in the data directory.
     case otherArguments
 
+    /// The kernel did not return the process's start time.
+    ///
+    /// - Parameter errno: The error number that `proc_pidinfo` set.
+    case unreadableStartTime(errno: Int32)
+
+    /// The supervisor lock holds a start time line that is not a whole number or not terminated.
+    case malformedStartTime
+
+    /// The process started at another time than the supervisor recorded, so its identifier was
+    /// reused.
+    ///
+    /// - Parameters:
+    ///   - recorded: The start time from the supervisor lock, in microseconds since 1970.
+    ///   - actual: The running process's start time, in microseconds since 1970.
+    case startTimeDiffers(recorded: UInt64, actual: UInt64)
+
     /// A description for logs.
     public var description: String {
         switch self {
@@ -37,6 +53,12 @@ public enum SupervisorMismatch: Error, Sendable, Equatable, CustomStringConverti
             "an argument is not valid UTF-8"
         case .otherArguments:
             "the arguments name another lease, directory, or command"
+        case let .unreadableStartTime(code):
+            "proc_pidinfo cannot read the start time: \(String(cString: strerror(code))) (errno \(code))"
+        case .malformedStartTime:
+            "the supervisor lock's start time line is malformed"
+        case let .startTimeDiffers(recorded, actual):
+            "the process started at \(actual) instead of the recorded \(recorded) microseconds"
         }
     }
 }
