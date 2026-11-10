@@ -6,9 +6,11 @@
 # Functional Source License fail, and so does a missing or unrecognized license, which needs a
 # person to read it.
 #
-# A package's NOTICE file names the licenses of code that the package embeds, such as the
-# BoringSSL sources that swift-crypto compiles into the binary. Each `LICENSE (NAME):` entry in it
-# must name an accepted license, and a NOTICE that mentions a rejected license fails.
+# NOTICE files name the licenses of code that a package embeds in free text, which the script
+# does not parse. Scripts/license-review.txt records the digest of every NOTICE file that a person
+# read, and the script fails on any NOTICE file without a matching record. The same list records
+# the BoringSSL revision that swift-crypto compiles into the binary, which no NOTICE names, and
+# the script fails when the revision changes.
 #
 # Usage: Scripts/check-licenses.sh
 set -eu
@@ -16,6 +18,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/Scripts/toolchain.sh"
 cd "$root"
 xcrun swift package resolve >/dev/null
+review="$root/Scripts/license-review.txt"
 
 # Prints the license family of a license file.
 classify() {
@@ -34,17 +37,6 @@ classify() {
     else
         echo unknown
     fi
-}
-
-# Prints the license family of a name in a NOTICE entry such as "LICENSE (MIT):".
-classify_name() {
-    case $1 in
-        "Apache License 2.0" | "Apache License, Version 2.0" | Apache-2.0) echo Apache-2.0 ;;
-        MIT | "MIT License") echo MIT ;;
-        BSD | BSD-*) echo BSD ;;
-        ISC | "ISC License") echo ISC ;;
-        *) echo unknown ;;
-    esac
 }
 
 # Checks the license file in a directory and records a failure.
@@ -67,31 +59,52 @@ check() {
     esac
 }
 
-# Checks the licenses that the NOTICE file in a directory names and records a failure.
-check_notice() {
-    name=$1
-    directory=$2
-    file=$(find "$directory" -maxdepth 1 -type f -iname 'NOTICE*' | sort | sed -n 1p)
-    [ -n "$file" ] || return 0
-    if grep -qiE 'GNU (AFFERO |LESSER |LIBRARY )?GENERAL PUBLIC LICENSE|Functional Source License|FSL-1\.[0-9]' "$file"; then
-        echo "$name: $file names a license that is not accepted" >&2
-        failed=1
-        return
-    fi
-    entries=$(sed -n 's/^[[:space:]]*\* LICENSE (\(.*\)):[[:space:]]*$/\1/p' "$file" | sort -u)
+# Prints the field after the kind and path of a line in the review list, or nothing without a line.
+recorded() {
+    awk -v kind="$1" -v path="$2" '$1 == kind && $2 == path { print $3 }' "$review"
+}
+
+# Checks every NOTICE file of the resolved packages and binary artifacts against the review list.
+check_notices() {
+    # Paths relative to .build match the review list.
+    notices=$(cd .build && find checkouts artifacts -type f -iname 'NOTICE*' -not -path '*/.git/*' 2>/dev/null | sort)
     # A here-document keeps the loop in this shell, so a failure it records survives the loop.
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        case $(classify_name "$entry") in
-            unknown)
-                echo "$name: $entry license in $file is not accepted" >&2
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        digest=$(shasum -a 256 ".build/$path" | cut -d ' ' -f 1)
+        case $(recorded notice "$path") in
+            "$digest") echo "$path: reviewed" ;;
+            "")
+                echo "$path: not in Scripts/license-review.txt. Read it and record digest $digest." >&2
                 failed=1
                 ;;
-            *) echo "$name: NOTICE names $entry" ;;
+            *)
+                echo "$path: changed since its review. Read it and record digest $digest." >&2
+                failed=1
+                ;;
         esac
     done <<EOF
-$entries
+$notices
 EOF
+    while read -r kind path value licenses; do
+        case $kind in
+            notice)
+                if [ ! -f ".build/$path" ]; then
+                    echo "$path: recorded in Scripts/license-review.txt but missing. Remove its line." >&2
+                    failed=1
+                fi
+                ;;
+            boringssl)
+                revision=$(sed -n 's/.* at revision \([0-9a-f]*\).*/\1/p' ".build/$path" 2>/dev/null || true)
+                if [ "$revision" = "$value" ]; then
+                    echo "BoringSSL $revision: $licenses"
+                else
+                    echo "$path: BoringSSL revision ${revision:-unreadable} is not the reviewed $value." >&2
+                    failed=1
+                fi
+                ;;
+        esac
+    done <"$review"
 }
 
 failed=0
@@ -101,12 +114,11 @@ while [ "$index" -lt "$count" ]; do
     location=$(plutil -extract "pins.$index.location" raw -o - Package.resolved)
     name=$(basename "$location" .git)
     check "$name" ".build/checkouts/$name"
-    check_notice "$name" ".build/checkouts/$name"
     index=$((index + 1))
 done
 for bundle in .build/artifacts/*/*/*.artifactbundle .build/artifacts/*/*/*.xcframework; do
     [ -e "$bundle" ] || continue
     check "$(basename "$bundle")" "$bundle"
-    check_notice "$(basename "$bundle")" "$bundle"
 done
+check_notices
 exit "$failed"

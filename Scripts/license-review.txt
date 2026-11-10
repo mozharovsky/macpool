@@ -1,0 +1,20 @@
+# Files that a person read for licenses that Scripts/check-licenses.sh cannot classify.
+#
+# NOTICE files name the licenses of code that a package embeds, in free text. Each `notice` line
+# records one NOTICE file of a resolved package, under .build, with the SHA-256 digest of the
+# reviewed text and the licenses that the text names.
+#
+# swift-crypto compiles BoringSSL into the binary, and no NOTICE file names it. The `boringssl`
+# line records the revision from swift-crypto's hash.txt and the license of that revision.
+#
+# The check fails on a NOTICE file without a line, on a different digest, on a line whose file is
+# gone, and on another BoringSSL revision. Read the new text or revision, confirm that its
+# licenses are accepted, and update the line.
+#
+# notice PATH SHA256 LICENSES
+notice checkouts/swift-asn1/NOTICE.txt 11dd3b3b783e6ec26098dd38ebc962986ea109b85447e28e62867b83bd0f8c5b Apache-2.0
+notice checkouts/swift-certificates/NOTICE.txt 57d7797703d906b63c2be50d891cf70bdec307ae6f77a881638c33343f3dd195 Apache-2.0 ISC MIT
+notice checkouts/swift-crypto/NOTICE.txt b3ddc2ae068e76b3beb71be03c0400f90090f9469aa491bf7b1ac42320af37b8 Apache-2.0
+notice checkouts/swift-log/NOTICE.txt 879b241d49b407215a0ad8e1c6a71c358d7b29591b090cf379d37a5f50cff918 Apache-2.0
+# boringssl PATH REVISION LICENSES
+boringssl checkouts/swift-crypto/Sources/CCryptoBoringSSL/hash.txt 0226f30467f540a3f62ef48d453f93927da199b6 Apache-2.0
