@@ -126,6 +126,12 @@ dependency has one role.
   and starts the daemon's supervisor processes.
 - swift-log carries the library's VM lifecycle and event diagnostics. The command line chooses
   their level and writes them to standard error.
+- swift-certificates builds the self-signed X.509 certificates that carry a Mac's P-256 key in
+  TLS, because the SDK parses certificates but cannot build them. Network, Security, and CryptoKit
+  still run TLS, hold the keys, and sign.
+- swift-asn1 serializes those certificates to DER.
+- swift-crypto arrives with swift-certificates. macpool does not import it, and `Package.resolved`
+  pins its version.
 - swift-docc-plugin builds the documentation.
 - SwiftFormat formats the code as a command plugin.
 - SwiftLint lints the code as a command plugin through its plugin package.
