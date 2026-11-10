@@ -334,13 +334,16 @@ struct PoolDaemonTests {
         // The lease stays attached to the first connection until the daemon notices its end.
         let busy = PoolReply.failure(PoolError.leaseAttached(id: lease.id.rawValue).description)
         var reply = busy
-        while reply == busy {
+        var attempts = 0
+        while reply == busy, attempts < 250 {
+            attempts += 1
             try second.send(PoolRequest.attach(lease.id))
             reply = try await next(second)
             if reply == busy {
                 try await Task.sleep(for: .milliseconds(20))
             }
         }
+        try #require(reply != busy, "the lease stayed attached after \(attempts) attempts: \(reply)")
         #expect(reply == .ready(lease))
         try second.send(PoolRequest.release(lease.id))
         #expect(try await next(second) == .ended(lease.id, reason: "released by a client"))
