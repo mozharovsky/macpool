@@ -201,11 +201,12 @@ struct MacIdentity: Sendable {
     /// already exists.
     ///
     /// The key reaches the disk under a temporary name first. A hard link then gives it the final
-    /// name, which fails when another process created the file first and keeps that file.
+    /// name, which fails when another process created the file first and keeps that file. The
+    /// name reaches the disk before the call returns.
     ///
     /// - Parameter file: The key file.
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the key cannot be written,
-    ///   flushed, or named.
+    ///   flushed, or named, or when its directory cannot be opened or flushed.
     private static func createKey(at file: URL) throws(PoolError) {
         let path = file.path(percentEncoded: false)
         let temporary = file.deletingLastPathComponent()
@@ -222,14 +223,37 @@ struct MacIdentity: Sendable {
         } catch {
             throw .fileSystem("writing this Mac's key", temporary, error)
         }
-        // The full flush puts the key on the disk before the link names it, so a power loss leaves
-        // no key file or a complete one. A volume without full flushes gets fsync, which reaches
-        // only the drive's cache.
-        guard fcntl(descriptor, F_FULLFSYNC) == 0 || fsync(descriptor) == 0 else {
+        // The key reaches the disk before the link names it, and the name before the call returns.
+        // A power loss then leaves no key file or a complete one and keeps a key that a caller
+        // received.
+        guard flush(descriptor) else {
             throw .systemCall("flushing this Mac's key", temporary)
         }
         guard link(temporaryPath, path) == 0 || errno == EEXIST else {
             throw .systemCall("naming this Mac's key", file)
         }
+        let directory = file.deletingLastPathComponent()
+        let directoryDescriptor = open(
+            directory.pathWithoutTrailingSlash,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+        )
+        guard directoryDescriptor >= 0 else {
+            throw .systemCall("opening", directory)
+        }
+        defer { close(directoryDescriptor) }
+        guard flush(directoryDescriptor) else {
+            throw .systemCall("flushing the name of this Mac's key in", directory)
+        }
+    }
+
+    /// Puts a file's contents or a directory's entries on the disk.
+    ///
+    /// A full flush also empties the drive's cache. A volume without full flushes gets `fsync`,
+    /// which reaches only that cache.
+    ///
+    /// - Parameter descriptor: An open descriptor of the file or directory.
+    /// - Returns: Whether a flush succeeded. After a failure, `errno` describes the last attempt.
+    private static func flush(_ descriptor: Int32) -> Bool {
+        fcntl(descriptor, F_FULLFSYNC) == 0 || fsync(descriptor) == 0
     }
 }
