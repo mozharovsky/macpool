@@ -50,8 +50,6 @@ let package = Package(
                 "MacpoolVM",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Subprocess", package: "swift-subprocess"),
-                .product(name: "SwiftASN1", package: "swift-asn1"),
-                .product(name: "X509", package: "swift-certificates"),
             ],
             swiftSettings: strictSwiftSettings,
         ),

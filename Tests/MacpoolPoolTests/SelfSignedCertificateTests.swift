@@ -29,11 +29,11 @@ struct SelfSignedCertificateTests {
             },
             issuerPrivateKey: Certificate.PrivateKey(key),
         )
-        #expect(certificate.publicKey.isValidSignature(certificate.signature, for: certificate))
-
         var serializer = DER.Serializer()
         try serializer.serialize(certificate)
         let parsed = try #require(SecCertificateCreateWithData(nil, Data(serializer.serializedBytes) as CFData))
+        let decoded = try Certificate(parsed)
+        #expect(decoded.publicKey.isValidSignature(decoded.signature, for: decoded))
         let publicKey = try #require(SecCertificateCopyKey(parsed))
         #expect(SecKeyCopyExternalRepresentation(publicKey, nil) as Data? == key.publicKey.x963Representation)
 
