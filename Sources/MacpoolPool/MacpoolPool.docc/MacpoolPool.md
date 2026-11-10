@@ -32,6 +32,10 @@ answer, ignores a stop, or reports another protocol version gets a stop command,
 and then `SIGKILL` as a ``SupervisorSignal``. A lease that was ending then deletes its clone, and
 for any other lease the run counts as a failure under the restart policy.
 
+A signal goes only to a process whose arguments, as the kernel holds them, run `supervise` for the
+lease in the data directory. When the check fails, the daemon withholds the signal and logs the
+``SupervisorMismatch``.
+
 ### Lease lifetime
 
 A lease's time to live starts when its VM is first ready, and a renewal sets the expiry to the time
@@ -81,6 +85,7 @@ starts the daemon at login and again after it exits.
 - ``SupervisorLauncher``
 - ``SupervisorLaunch``
 - ``SupervisorSignal``
+- ``SupervisorMismatch``
 - ``SupervisorLock``
 - ``ProcessSupervisorLauncher``
 - ``SupervisorServer``
