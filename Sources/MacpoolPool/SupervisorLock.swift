@@ -30,7 +30,7 @@ public import Foundation
 /// back to the process identifier in the pool state.
 public final class SupervisorLock: Sendable {
     /// The open lock file that carries the `flock`.
-    private let descriptor: Int32
+    let descriptor: Int32
 
     /// The wait between attempts to take a lock that is briefly held by a check.
     private static let retryInterval: useconds_t = 50000
@@ -123,8 +123,12 @@ public final class SupervisorLock: Sendable {
         return SupervisorLockRecord(contents: buffer.prefix(max(count, 0)))
     }
 
-    /// Releases the lock by closing the lock file.
+    /// Releases the lock and closes the lock file.
     deinit {
+        // A child that this process spawns shares the open lock file until it execs, even though
+        // the descriptor closes on exec. Closing alone would leave the lock held for that time,
+        // so a lock taken right after this one could fail.
+        flock(descriptor, LOCK_UN)
         close(descriptor)
     }
 }
