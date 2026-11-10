@@ -60,7 +60,8 @@ side checks only the key in the first certificate that the other side sends, and
 trust evaluation never runs. Session resumption and session tickets are off, so every connection
 runs a full handshake.
 
-The host checks a client's key against ``PeerSettings/trustedKeys`` during every handshake. A
+The host checks a client's key against ``PeerSettings/trustedKeys`` during every handshake. A key
+that leaves the set opens no new connection, and connections that are already open stay open. A
 TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
 first sends a `hello` line. The line names the host's role and the protocol version that ALPN
 chose. The client sends requests only after that line. Both sides then exchange the same lines as
@@ -71,7 +72,8 @@ another process holds leaves the local socket serving. The daemon logs the failu
 again after ``PeerSettings/retryInterval``.
 
 A channel queues at most 4 MiB for a peer that does not read and closes the connection beyond
-that. The daemon reads a client's next request only after the replies to the previous one left.
+that. After the daemon handles a request, it reads the next one only once the messages that it
+sent to the client so far left.
 Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left.
 

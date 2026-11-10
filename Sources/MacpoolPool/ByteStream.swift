@@ -90,7 +90,8 @@ public final class ByteStream: Sendable {
     /// receives return `nil` from then on.
     ///
     /// - Parameter timeout: The longest wait for the bytes sent so far to leave. Over TLS, bytes
-    ///   that are still waiting after it are lost.
+    ///   that are still waiting after it are lost, and the peer still sees a normal end of the
+    ///   stream.
     public func finishSending(within timeout: Duration = .seconds(2)) async {
         await connection.sendEnd(within: timeout)
         if carriesTLS {

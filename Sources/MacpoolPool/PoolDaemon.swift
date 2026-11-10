@@ -36,8 +36,9 @@ import MacpoolVM
 /// TLS handshake, receives a greeting with the protocol version, and then exchanges the same
 /// lines as a local client.
 ///
-/// The daemon reads a client's next request only after the replies to the previous one left. A
-/// client that stops reading therefore stalls only its own connection.
+/// After the daemon handles a request, it waits until the messages that it sent to the client so
+/// far left, and only then reads the next request. Lease events sent later do not extend the
+/// wait. A client that stops reading therefore stalls only its own connection.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
