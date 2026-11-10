@@ -32,6 +32,22 @@ struct SupervisorLockTests {
         withExtendedLifetime(next) {}
     }
 
+    /// Releases the lock while another descriptor still shares the open lock file.
+    ///
+    /// A process that this process spawns holds such a descriptor until it execs.
+    @Test func releasesLockThatAnotherDescriptorShares() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try directory.prepare()
+        let id = try #require(LeaseID("0a1b2c3d"))
+
+        var lock: SupervisorLock? = try SupervisorLock(of: id, in: directory, processID: 4242, startTime: 7)
+        let copy = try #require(lock.map { dup($0.descriptor) })
+        defer { close(copy) }
+        lock = nil
+        #expect(SupervisorLock.holder(of: id, in: directory) == nil)
+    }
+
     /// Records the calling process's identifier and its start time from the kernel.
     @Test func recordsOwnStartTime() throws {
         let root = try ShortDirectory()

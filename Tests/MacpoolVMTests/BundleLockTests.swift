@@ -19,6 +19,19 @@ struct BundleLockTests {
         _ = try BundleLock(bundle: bundle)
     }
 
+    /// Releases the lock while another descriptor still shares the open lock file.
+    ///
+    /// A process that this process spawns holds such a descriptor until it execs.
+    @Test func releasesLockThatAnotherDescriptorShares() throws {
+        let directory = try TemporaryDirectory()
+        let bundle = VMBundle(root: directory.url)
+        var lock: BundleLock? = try BundleLock(bundle: bundle)
+        let copy = try #require(lock.map { dup($0.descriptor) })
+        defer { close(copy) }
+        lock = nil
+        #expect(!BundleLock.isHeld(on: bundle))
+    }
+
     /// Treats a bundle without a lock file as unlocked.
     @Test func reportsMissingLockAsFree() throws {
         let directory = try TemporaryDirectory()

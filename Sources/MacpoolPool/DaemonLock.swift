@@ -7,7 +7,7 @@ import Foundation
 /// once. The descriptor closes on exec, so supervisors that the daemon starts do not inherit it.
 final class DaemonLock: Sendable {
     /// The open lock file that carries the `flock`.
-    private let descriptor: Int32
+    let descriptor: Int32
 
     /// Takes the lock without waiting.
     ///
@@ -32,8 +32,12 @@ final class DaemonLock: Sendable {
         self.descriptor = descriptor
     }
 
-    /// Releases the lock by closing the lock file.
+    /// Releases the lock and closes the lock file.
     deinit {
+        // A child that this process spawns shares the open lock file until it execs, even though
+        // the descriptor closes on exec. Closing alone would leave the lock held for that time,
+        // so a lock taken right after this one could fail.
+        flock(descriptor, LOCK_UN)
         close(descriptor)
     }
 }
