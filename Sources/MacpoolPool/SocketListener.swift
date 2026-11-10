@@ -23,17 +23,36 @@ public final class SocketListener: Sendable {
     /// A file left at the path by an earlier process is removed first. Callers make sure that no
     /// other live process listens there, for example through a lock.
     ///
+    /// A path that Network would truncate, or that is too long for a socket address, goes through
+    /// a symbolic link to its directory in the user's temporary directory. The socket file
+    /// therefore always gets its full name. A file that an earlier build left under a truncated
+    /// name stays where it is.
+    ///
     /// - Parameter socket: The socket file to create.
-    /// - Throws: ``PoolError/socketPathTooLong(path:)`` for a path that no socket can have, or
-    ///   ``PoolError/connection(path:reason:)`` when the listener cannot start.
-    public init(socket: URL) async throws(PoolError) {
+    /// - Throws: ``PoolError/socketPathTooLong(path:length:)`` for a path that no socket can
+    ///   reach, ``PoolError/connection(path:reason:)`` when the listener cannot start, or another
+    ///   ``PoolError`` when the link cannot be made.
+    public convenience init(socket: URL) async throws(PoolError) {
+        try await self.init(socket: socket, aliasDirectory: SocketPath.userTemporaryDirectory)
+    }
+
+    /// Starts listening like ``init(socket:)`` with the alias in a given directory.
+    ///
+    /// - Parameters:
+    ///   - socket: The socket file to create.
+    ///   - aliasDirectory: The directory for an alias of the socket's directory, which must admit
+    ///     only the user. `nil` allows no alias.
+    /// - Throws: ``PoolError/socketPathTooLong(path:length:)`` for a path that no socket can
+    ///   reach, ``PoolError/connection(path:reason:)`` when the listener cannot start, or another
+    ///   ``PoolError`` when the alias cannot be made.
+    init(socket: URL, aliasDirectory: URL?) async throws(PoolError) {
         let path = socket.path(percentEncoded: false)
-        try SocketPath.check(path)
+        let endpoint = try SocketPath.endpoint(for: socket, aliasDirectory: aliasDirectory)
         guard unlink(path) == 0 || errno == ENOENT else {
             throw .systemCall("removing the stale socket", socket)
         }
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .unix(path: path)
+        parameters.requiredLocalEndpoint = .unix(path: endpoint)
         let listener: NWListener
         do {
             listener = try NWListener(using: parameters)

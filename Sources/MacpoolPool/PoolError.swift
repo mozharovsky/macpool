@@ -28,10 +28,15 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: The system's description of the failure.
     case daemonUnreachable(path: String, reason: String)
 
-    /// A Unix socket path is longer than the system accepts.
+    /// A Unix socket path does not fit in a socket address, directly or through an alias.
     ///
-    /// - Parameter path: The socket path, whose UTF-8 form must stay below 104 bytes.
-    case socketPathTooLong(path: String)
+    /// The pool reaches a long or non-ASCII path through a short alias in the user's temporary
+    /// directory, so this happens only when the alias path does not fit either.
+    ///
+    /// - Parameters:
+    ///   - path: The socket path in the data directory.
+    ///   - length: The path's length in UTF-8 bytes.
+    case socketPathTooLong(path: String, length: Int)
 
     /// A socket or connection failed.
     ///
@@ -118,8 +123,9 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "another macpool daemon already serves \(path)"
         case let .daemonUnreachable(path, reason):
             "no macpool daemon answers on \(path) (\(reason)), so start one with macpool daemon"
-        case let .socketPathTooLong(path):
-            "the socket path \(path) is too long for a Unix socket, so choose a shorter --data-dir"
+        case let .socketPathTooLong(path, length):
+            "the socket path \(path) has \(length) bytes, and no alias fits the "
+                + "\(SocketPath.capacity - 1) bytes of a Unix socket address, so choose a shorter --data-dir"
         case let .connection(path, reason):
             "the connection on \(path) failed: \(reason)"
         case let .malformedMessage(reason):

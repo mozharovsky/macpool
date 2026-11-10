@@ -37,18 +37,70 @@ public final class MessageChannel: Sendable {
 
     /// Connects to a listening socket and waits until the connection is ready.
     ///
+    /// A path that Network would truncate, or that is too long for a socket address, goes through
+    /// a symbolic link to its directory in the user's temporary directory. When that connection
+    /// fails and earlier builds listened on the truncated name, the call tries that name too. A
+    /// supervisor that an earlier build started listens there, and the daemon would otherwise
+    /// count it as unresponsive and end its VM.
+    ///
     /// - Parameters:
     ///   - socket: The socket file.
-    ///   - timeout: The longest wait for the connection.
+    ///   - timeout: The longest wait for each connection attempt.
     /// - Returns: A ready channel.
-    /// - Throws: ``PoolError/socketPathTooLong(path:)`` for a path that no socket can have, or
-    ///   ``PoolError/connection(path:reason:)`` when the socket is missing, refuses the
-    ///   connection, or does not answer in time.
+    /// - Throws: ``PoolError/socketPathTooLong(path:length:)`` for a path that no socket can
+    ///   reach, ``PoolError/connection(path:reason:)`` when the socket is missing, refuses the
+    ///   connection, or does not answer in time, or another ``PoolError`` when the link cannot be
+    ///   made.
     public static func connect(to socket: URL, timeout: Duration = .seconds(5)) async throws(PoolError)
         -> MessageChannel {
+        try await connect(to: socket, timeout: timeout, aliasDirectory: SocketPath.userTemporaryDirectory)
+    }
+
+    /// Connects like ``connect(to:timeout:)`` with the alias in a given directory.
+    ///
+    /// - Parameters:
+    ///   - socket: The socket file.
+    ///   - timeout: The longest wait for each connection attempt.
+    ///   - aliasDirectory: The directory for an alias of the socket's directory, which must admit
+    ///     only the user. `nil` allows no alias.
+    /// - Returns: A ready channel.
+    /// - Throws: ``PoolError/socketPathTooLong(path:length:)`` for a path that no socket can
+    ///   reach, ``PoolError/connection(path:reason:)`` when the socket is missing, refuses the
+    ///   connection, or does not answer in time, or another ``PoolError`` when the alias cannot be
+    ///   made.
+    static func connect(
+        to socket: URL,
+        timeout: Duration,
+        aliasDirectory: URL?,
+    ) async throws(PoolError) -> MessageChannel {
         let path = socket.path(percentEncoded: false)
-        try SocketPath.check(path)
-        let connection = NWConnection(to: .unix(path: path), using: .tcp)
+        let endpoint = try SocketPath.endpoint(for: socket, aliasDirectory: aliasDirectory)
+        do {
+            return try await open(endpoint, path: path, timeout: timeout)
+        } catch {
+            guard SocketPath.hasTruncatedName(path) else {
+                throw error
+            }
+            // Network truncates the path the same way that it did for the earlier build.
+            guard let channel = try? await open(path, path: path, timeout: timeout) else {
+                throw error
+            }
+            return channel
+        }
+    }
+
+    /// Opens one connection to a path that Network receives as it is.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The path to hand to Network.
+    ///   - path: The socket's path in the data directory, for error messages.
+    ///   - timeout: The longest wait for the connection.
+    /// - Returns: A ready channel.
+    /// - Throws: ``PoolError/connection(path:reason:)`` when the socket is missing, refuses the
+    ///   connection, or does not answer in time.
+    private static func open(_ endpoint: String, path: String, timeout: Duration) async throws(PoolError)
+        -> MessageChannel {
+        let connection = NWConnection(to: .unix(path: endpoint), using: .tcp)
         let failure: String? = await withCheckedContinuation { continuation in
             let once = ResumeOnce(continuation)
             // A Unix socket that is missing or refuses connections leaves the connection waiting
@@ -215,22 +267,6 @@ enum MessageCoding {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
-    }
-}
-
-/// Checks of Unix socket paths.
-enum SocketPath {
-    /// The size of the path field in a Unix socket address, including the terminating zero byte.
-    static let capacity = 104
-
-    /// Rejects a path that does not fit in a Unix socket address.
-    ///
-    /// - Parameter path: The socket path.
-    /// - Throws: ``PoolError/socketPathTooLong(path:)`` when the UTF-8 path has 104 bytes or more.
-    static func check(_ path: String) throws(PoolError) {
-        guard path.utf8.count < capacity else {
-            throw .socketPathTooLong(path: path)
-        }
     }
 }
 

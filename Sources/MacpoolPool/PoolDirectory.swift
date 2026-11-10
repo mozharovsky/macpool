@@ -151,8 +151,9 @@ public struct PoolDirectory: Sendable, Hashable {
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be
     ///   created or its permissions cannot be set, ``PoolError/insecureDirectory(path:reason:)``
     ///   when a directory is a symbolic link, belongs to another user, or is writable by others, or
-    ///   ``PoolError/socketPathTooLong(path:)`` when the sockets would not fit in a Unix socket
-    ///   address.
+    ///   ``PoolError/socketPathTooLong(path:length:)`` when the sockets would not fit in a Unix
+    ///   socket address even through an alias. A long or non-ASCII run directory gets its alias, a
+    ///   symbolic link in the user's temporary directory, here.
     public func prepare() throws(PoolError) {
         for directory in [root, runDirectory, leasesDirectory, logsDirectory] {
             do {
@@ -172,8 +173,10 @@ public struct PoolDirectory: Sendable, Hashable {
             try Self.checkOwnership(of: directory, forbidden: 0o022)
         }
         try Self.checkOwnership(of: runDirectory, forbidden: 0o077)
-        try SocketPath.check(daemonSocket.path(percentEncoded: false))
-        try SocketPath.check(supervisorSocket(for: LeaseID.random()).path(percentEncoded: false))
+        // A supervisor's socket has the longest name in the run directory.
+        let aliasDirectory = SocketPath.userTemporaryDirectory
+        _ = try SocketPath.endpoint(for: daemonSocket, aliasDirectory: aliasDirectory)
+        _ = try SocketPath.endpoint(for: supervisorSocket(for: LeaseID.random()), aliasDirectory: aliasDirectory)
     }
 
     /// Checks that a directory is a real directory of the current user without forbidden
@@ -185,7 +188,7 @@ public struct PoolDirectory: Sendable, Hashable {
     ///     the group and others.
     /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the check fails, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when the directory cannot be inspected.
-    private static func checkOwnership(of directory: URL, forbidden: mode_t) throws(PoolError) {
+    static func checkOwnership(of directory: URL, forbidden: mode_t) throws(PoolError) {
         var path = directory.path(percentEncoded: false)
         // A trailing slash would make lstat follow a symbolic link.
         while path.count > 1, path.hasSuffix("/") {
