@@ -75,7 +75,9 @@ A channel queues at most 4 MiB for a peer that does not read and closes the conn
 that. After the daemon handles a request, it reads the next one only once the messages that it
 sent to the client so far left.
 Network does not pass the end of one direction through TLS, so
-``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left.
+``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout
+ends first, it closes the connection anyway. The bytes that were still waiting are lost, and the
+peer still sees a normal end of the stream.
 
 ### Supervisors
 

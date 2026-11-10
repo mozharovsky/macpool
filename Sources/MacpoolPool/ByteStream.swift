@@ -86,8 +86,8 @@ public final class ByteStream: Sendable {
     /// Ends the sending direction after the bytes sent so far.
     ///
     /// Over TCP and Unix sockets the stream keeps receiving. Network does not pass the end of one
-    /// direction through TLS, so over TLS the call closes the connection once the bytes left, and
-    /// receives return `nil` from then on.
+    /// direction through TLS. Over TLS the call therefore closes the connection after the wait,
+    /// and receives return `nil` from then on.
     ///
     /// - Parameter timeout: The longest wait for the bytes sent so far to leave. Over TLS, bytes
     ///   that are still waiting after it are lost, and the peer still sees a normal end of the
