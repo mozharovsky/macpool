@@ -44,8 +44,10 @@ public struct PeerSettings: Sendable {
 /// A TCP listener that admits only Macs whose key the daemon trusts.
 ///
 /// Every connection runs a TLS 1.3 handshake with ``PeerSecurity`` settings. A client with
-/// another key fails the handshake and never reaches ``connections``. A connection whose
-/// handshake does not finish in time ends, so a silent peer holds no socket for long.
+/// another key fails the handshake and never reaches ``connections``. If ALPN chose no protocol
+/// version that this build speaks, the listener closes the connection after the handshake. A
+/// connection whose handshake does not finish in time ends, so a silent peer holds no socket for
+/// long.
 ///
 /// ``connections`` ends when ``close()`` runs or the listener fails after it was ready.
 final class PeerListener: Sendable {
@@ -56,6 +58,9 @@ final class PeerListener: Sendable {
 
         /// The fingerprint of the key that the Mac proved.
         let fingerprint: KeyFingerprint
+
+        /// The protocol version that ALPN chose.
+        let version: Int
     }
 
     /// The underlying listener.
@@ -157,12 +162,15 @@ final class PeerListener: Sendable {
                 guard outcome.settle() else {
                     return
                 }
-                guard let fingerprint = PeerSecurity.peerFingerprint(of: connection) else {
+                // Network finishes the handshake with a client that offers no ALPN at all.
+                guard let fingerprint = PeerSecurity.peerFingerprint(of: connection),
+                      let version = PeerSecurity.negotiatedVersion(of: connection) else {
                     connection.cancel()
                     return
                 }
                 let channel = MessageChannel(connection: connection, peer: peer, start: false)
-                if case .terminated = continuation.yield(Peer(channel: channel, fingerprint: fingerprint)) {
+                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version)
+                if case .terminated = continuation.yield(admitted) {
                     channel.close()
                 }
             case .failed, .waiting:

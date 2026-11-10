@@ -62,8 +62,9 @@ runs a full handshake.
 
 The host checks a client's key against ``PeerSettings/trustedKeys`` during every handshake. A
 TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
-sends a `hello` line with the protocol version and its role first, and the client sends requests
-only after that line. Both sides then exchange the same lines as on the Unix socket.
+first sends a `hello` line. The line names the host's role and the protocol version that ALPN
+chose. The client sends requests only after that line. Both sides then exchange the same lines as
+on the Unix socket.
 
 The daemon loads the key when it starts listening. A key that cannot be loaded or a port that
 another process holds leaves the local socket serving. The daemon logs the failure and tries

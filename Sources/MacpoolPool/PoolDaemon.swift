@@ -492,7 +492,7 @@ public actor PoolDaemon {
             peer.channel.close()
             return
         }
-        try? peer.channel.send(HostGreeting(version: PeerSecurity.protocolVersion, role: .host))
+        try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
         configuration.logger.info("A paired Mac connected", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",

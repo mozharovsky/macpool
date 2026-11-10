@@ -15,8 +15,11 @@ enum PeerSecurity {
     /// The ALPN name of protocol version 1.
     static let protocolName = "macpool/1"
 
-    /// The protocol version that a host names in its greeting.
+    /// The version number of ``protocolName``.
     static let protocolVersion = 1
+
+    /// The protocol versions that this build speaks, keyed by their ALPN names.
+    static let versions = [protocolName: protocolVersion]
 
     /// Creates the parameters of a TCP connection with mutual TLS.
     ///
@@ -75,6 +78,21 @@ enum PeerSecurity {
             leaf.keep(sec_certificate_copy_ref(certificate).takeRetainedValue())
         }
         return leaf.first.flatMap(MacIdentity.keyDigest(of:)).map(KeyFingerprint.init(digest:))
+    }
+
+    /// Finds the protocol version that ALPN chose for a ready connection.
+    ///
+    /// - Parameter connection: A connection whose handshake finished.
+    /// - Returns: The version, or `nil` when the connection carries no TLS metadata, ALPN chose no
+    ///   protocol, or this build does not speak the chosen one.
+    static func negotiatedVersion(of connection: NWConnection) -> Int? {
+        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
+              let name = sec_protocol_metadata_copy_negotiated_protocol(metadata.securityProtocolMetadata)
+        else {
+            return nil
+        }
+        defer { free(UnsafeMutablePointer(mutating: name)) }
+        return versions[String(cString: name)]
     }
 
     /// Names the key that the peer of a ready connection proved.

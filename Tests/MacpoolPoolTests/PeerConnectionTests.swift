@@ -87,7 +87,7 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
-    /// Refuses a client that offers only a protocol version that the host does not speak.
+    /// Refuses a client that offers no protocol version that the host speaks.
     @Test func refusesAnotherProtocolVersion() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
@@ -95,9 +95,12 @@ struct PeerConnectionTests {
         let endpoint = try await loopback(listeningPort(of: daemon))
         let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
-        #expect(await refusal { () async throws(PoolError) in
-            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey, protocols: ["macpool/2"])
-        } != nil)
+        // Without ALPN the handshake succeeds, so the host refuses after it.
+        for protocols in [["macpool/2"], []] {
+            #expect(await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey, protocols: protocols)
+            } != nil, "\(protocols)")
+        }
         #expect(fixture.logs.entries("A paired Mac connected").isEmpty)
         // A client that also offers version 1 gets it.
         let channel = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey, protocols: [
