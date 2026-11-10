@@ -191,7 +191,8 @@ public struct VMBundle: Sendable, Hashable {
 
     /// Reads the Ed25519 keys that ``knownHostsFile`` pins and does not revoke.
     ///
-    /// - Returns: The pinned keys, or `nil` when the file does not exist.
+    /// - Returns: The pinned keys, or `nil` when the file does not exist. If the file pins no
+    ///   Ed25519 key, or revokes every key it pins, the array is empty.
     /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file exists and
     ///   cannot be read, or ``MacpoolError/invalidBundle(path:reason:)`` when it is not UTF-8.
     func pinnedHostKeys() throws(MacpoolError) -> [HostKey]? {
