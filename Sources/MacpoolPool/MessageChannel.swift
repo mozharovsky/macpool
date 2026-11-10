@@ -187,11 +187,11 @@ public final class MessageChannel: Sendable {
             guard state.user == .channel else {
                 return false
             }
-            guard state.queuedBytes + data.count <= Self.maximumQueuedBytes else {
+            guard state.sentBytes - state.leftBytes + data.count <= Self.maximumQueuedBytes else {
                 state.user = .ending
                 return true
             }
-            state.queuedBytes += data.count
+            state.sentBytes += data.count
             connection.send(content: data, completion: .contentProcessed { _ in self.left(data.count) })
             return false
         }
@@ -201,19 +201,19 @@ public final class MessageChannel: Sendable {
         }
     }
 
-    /// Waits until the messages sent so far left for the peer.
+    /// Waits until the messages sent before the call left for the peer.
     ///
     /// A message has left once Network passed it to the system's socket. For a peer that stops
-    /// reading, that happens only after the peer read earlier bytes. The wait also ends when the
-    /// channel closes its connection, and it returns at once after the connection went to a
-    /// ``ByteStream``.
+    /// reading, that happens only after the peer read earlier bytes. Messages sent during the
+    /// wait do not extend it. The wait also ends when the channel closes its connection, and it
+    /// returns at once after the connection went to a ``ByteStream``.
     public func delivered() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let waits = state.withLock { state in
-                guard state.user == .channel, state.queuedBytes > 0 else {
+                guard state.user == .channel, state.leftBytes < state.sentBytes else {
                     return false
                 }
-                state.waiters.append(continuation)
+                state.waiters.append(DeliveryWaiter(target: state.sentBytes, continuation: continuation))
                 return true
             }
             if !waits {
@@ -222,20 +222,22 @@ public final class MessageChannel: Sendable {
         }
     }
 
-    /// Counts bytes that left and wakes the tasks in ``delivered()`` once nothing waits.
+    /// Counts bytes that left and wakes each task in ``delivered()`` once its messages left.
+    ///
+    /// Network completes sends in the order of the calls, so the count of bytes that left also
+    /// tells which messages left.
     ///
     /// - Parameter count: The number of bytes that left.
     private func left(_ count: Int) {
-        let waiters = state.withLock { state in
-            state.queuedBytes -= count
-            guard state.queuedBytes == 0 else {
-                return [CheckedContinuation<Void, Never>]()
-            }
-            defer { state.waiters = [] }
-            return state.waiters
+        let reached = state.withLock { state in
+            state.leftBytes += count
+            let left = state.leftBytes
+            let reached = state.waiters.filter { $0.target <= left }
+            state.waiters.removeAll { $0.target <= left }
+            return reached
         }
-        for waiter in waiters {
-            waiter.resume()
+        for waiter in reached {
+            waiter.continuation.resume()
         }
     }
 
@@ -246,7 +248,7 @@ public final class MessageChannel: Sendable {
             return state.waiters
         }
         for waiter in waiters {
-            waiter.resume()
+            waiter.continuation.resume()
         }
     }
 
@@ -374,11 +376,23 @@ private struct ChannelState {
     /// Who uses the connection, which changes only under the channel's lock.
     var user = ConnectionUser.channel
 
-    /// The bytes that were queued and have not left yet.
-    var queuedBytes = 0
+    /// The count of bytes that the channel queued since it opened.
+    var sentBytes = 0
+
+    /// The count of queued bytes that left.
+    var leftBytes = 0
 
     /// The tasks in ``MessageChannel/delivered()``.
-    var waiters: [CheckedContinuation<Void, Never>] = []
+    var waiters: [DeliveryWaiter] = []
+}
+
+/// A task in ``MessageChannel/delivered()`` and the messages that it waits for.
+private struct DeliveryWaiter {
+    /// The value of `sentBytes` when the wait began. The wait ends once this many bytes left.
+    let target: Int
+
+    /// Resumes the task.
+    let continuation: CheckedContinuation<Void, Never>
 }
 
 /// Who uses a channel's connection.

@@ -156,6 +156,34 @@ struct MessageTests {
         server.close()
     }
 
+    /// Waits only for the messages sent before the wait began.
+    @Test func waitsOnlyForEarlierMessages() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        let earlier = Task { await server.delivered() }
+        #expect(await !finishes(within: .milliseconds(300)) { await earlier.value })
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        for _ in 0 ..< 4 {
+            #expect(try await client.receive(String.self) == text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await earlier.value })
+        #expect(await !finishes(within: .milliseconds(300)) { await server.delivered() })
+        client.close()
+        server.close()
+    }
+
     /// Closes the connection instead of queueing more than 4 MiB for a peer that stops reading,
     /// and drops the requests that arrived before.
     @Test func closesWhenThePeerStopsReading() async throws {
