@@ -132,8 +132,9 @@ struct MessageTests {
             }
         }
         let long = directory.url.appending(path: String(repeating: "x", count: 120))
-        await #expect(throws: PoolError.socketPathTooLong(path: long.path(percentEncoded: false))) {
-            try await MessageChannel.connect(to: long)
+        let path = long.path(percentEncoded: false)
+        await #expect(throws: PoolError.socketPathTooLong(path: path, length: path.utf8.count)) {
+            try await MessageChannel.connect(to: long, timeout: .seconds(5), aliasDirectory: nil)
         }
     }
 

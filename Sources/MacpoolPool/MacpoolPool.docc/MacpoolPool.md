@@ -14,6 +14,12 @@ The daemon and its clients exchange one JSON message per line over a Unix socket
 directory. ``PoolRequest`` and ``PoolReply`` define the messages, and ``PoolClient`` opens the
 connection. The socket's directory admits only the owning user.
 
+Network truncates a socket path with characters outside ASCII, and a socket address holds at most
+103 bytes of path. The pool reaches such a socket through a symbolic link to its directory in the
+user's temporary directory, so the socket file keeps its full name in the data directory. A client
+also tries the truncated name that earlier builds listened on, which keeps their supervisors
+reachable after an upgrade.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a

@@ -5,7 +5,8 @@ public enum PoolClient {
     /// - Parameter directory: The daemon's data directory.
     /// - Returns: A ready connection.
     /// - Throws: ``PoolError/daemonUnreachable(path:reason:)`` when no daemon listens, or
-    ///   ``PoolError/socketPathTooLong(path:)`` for a data directory whose socket cannot exist.
+    ///   ``PoolError/socketPathTooLong(path:length:)`` for a data directory whose socket cannot
+    ///   exist.
     public static func connect(to directory: PoolDirectory) async throws(PoolError) -> MessageChannel {
         do {
             return try await MessageChannel.connect(to: directory.daemonSocket)
