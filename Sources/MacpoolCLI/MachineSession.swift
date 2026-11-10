@@ -60,7 +60,7 @@ struct MachineSession {
     let target: VMBundle
 
     /// A host directory to share with the guest, or `nil`.
-    let sharedDirectory: URL?
+    let sharedDirectory: SharedDirectory?
 
     /// Whether to provision the guest with the account stored in the bundle.
     let provision: Bool

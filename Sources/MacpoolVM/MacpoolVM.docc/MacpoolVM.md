@@ -59,6 +59,7 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 
 - ``VirtualMachine``
 - ``MachineDevices``
+- ``SharedDirectory``
 - ``MachineState``
 - ``MachineEvent``
 - ``GuestProvisioning``

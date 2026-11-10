@@ -10,7 +10,7 @@ import Foundation
 /// crash. The lock file itself stays in the bundle, and an APFS clone copies it unlocked.
 public final class BundleLock: Sendable {
     /// The open lock file that carries the `flock`.
-    private let descriptor: Int32
+    let descriptor: Int32
 
     /// Takes the lock of a bundle without waiting.
     ///
@@ -57,8 +57,12 @@ public final class BundleLock: Sendable {
         }
     }
 
-    /// Releases the lock by closing the lock file.
+    /// Releases the lock and closes the lock file.
     deinit {
+        // A child that this process spawns shares the open lock file until it execs, even though
+        // the descriptor closes on exec. Closing alone would leave the lock held for that time,
+        // so a lock taken right after this one could fail.
+        flock(descriptor, LOCK_UN)
         close(descriptor)
     }
 }

@@ -782,6 +782,7 @@ public actor PoolDaemon {
                 lease: id,
                 directory: directory,
                 sharedDirectory: terms.sharedDirectory,
+                sharedDirectoryIsReadOnly: terms.sharedDirectoryIsReadOnly,
                 bootTimeout: terms.bootTimeout,
             ))
         } catch {

@@ -31,8 +31,12 @@ struct CreateCommand: AsyncParsableCommand {
     var bundle: String
 
     /// The logical size of the sparse disk image in gigabytes.
+    ///
+    /// The guest cannot grow its startup container later, because the recovery container follows
+    /// it on the disk. The default leaves room for Xcode and an iOS simulator runtime. Together
+    /// they do not fit beside macOS in 64 GB.
     @Option(name: .customLong("disk-gb"), help: "The logical size of the sparse disk image, in gigabytes.")
-    var diskGigabytes: UInt64 = 64
+    var diskGigabytes: UInt64 = 128
 
     /// The number of virtual CPUs.
     @Option(help: "The number of virtual CPUs.")
