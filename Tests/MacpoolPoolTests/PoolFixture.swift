@@ -225,6 +225,8 @@ final class FakeLauncher: SupervisorLauncher {
         var signals: [ReceivedSignal] = []
         /// The number of process checks that the daemon started.
         var identifications = 0
+        /// The start times that the daemon passed to the process checks, in order.
+        var startTimes: [RecordedStartTime] = []
     }
 
     /// The launcher's state.
@@ -240,7 +242,8 @@ final class FakeLauncher: SupervisorLauncher {
     /// Takes the lease's locks and serves its socket, at once or after the planned delay.
     ///
     /// - Parameter launch: What to boot.
-    /// - Returns: The fake process identifier, which is 10000 plus the launch's number.
+    /// - Returns: The fake process identifier, which is 10000 plus the launch's number. The lock
+    ///   records ``startTime(of:)`` of that identifier.
     /// - Throws: ``PoolError`` when another supervisor of the lease holds its lock or the socket
     ///   cannot listen.
     func launch(_ launch: SupervisorLaunch) async throws(PoolError) -> Int32 {
@@ -251,7 +254,13 @@ final class FakeLauncher: SupervisorLauncher {
             return (state.total, state.plans.isEmpty ? FakeBehavior() : state.plans.removeFirst())
         }
         let processID = Int32(10000 + number)
-        let lock = try SupervisorLock(of: id, in: directory, processID: processID, timeout: 1)
+        let lock = try SupervisorLock(
+            of: id,
+            in: directory,
+            processID: processID,
+            startTime: Self.startTime(of: processID),
+            timeout: 1,
+        )
         let cloneLock: BundleLock
         do {
             cloneLock = try BundleLock(bundle: directory.bundle(for: id))
@@ -289,18 +298,40 @@ final class FakeLauncher: SupervisorLauncher {
     ///
     /// - Parameters:
     ///   - processID: The identifier that the daemon read.
+    ///   - startTime: The start time that the daemon read, which ``startTimes()`` records.
     ///   - id: The lease.
     ///   - directory: The data directory.
     /// - Throws: The supervisor's planned ``FakeBehavior/mismatch``.
-    func identify(processID _: Int32, of id: LeaseID, in _: PoolDirectory) async throws(SupervisorMismatch) {
+    func identify(
+        processID _: Int32,
+        startTime: RecordedStartTime,
+        of id: LeaseID,
+        in _: PoolDirectory,
+    ) async throws(SupervisorMismatch) {
         let behavior = state.withLock { state in
             state.identifications += 1
+            state.startTimes.append(startTime)
             return state.supervisors[id]?.behavior ?? FakeBehavior()
         }
         try? await Task.sleep(for: behavior.identifyDelay)
         if let mismatch = behavior.mismatch {
             throw mismatch
         }
+    }
+
+    /// The start time that a fake supervisor records in its lock.
+    ///
+    /// - Parameter processID: The fake process identifier.
+    /// - Returns: A start time in microseconds that differs for each identifier.
+    static func startTime(of processID: Int32) -> UInt64 {
+        1_800_000_000_000_000 + UInt64(processID)
+    }
+
+    /// Lists the start times that the daemon passed to the process checks.
+    ///
+    /// - Returns: The start times in order.
+    func startTimes() -> [RecordedStartTime] {
+        state.withLock { $0.startTimes }
     }
 
     /// Counts the process checks that the daemon started.

@@ -33,8 +33,25 @@ and then `SIGKILL` as a ``SupervisorSignal``. A lease that was ending then delet
 for any other lease the run counts as a failure under the restart policy.
 
 A signal goes only to a process whose arguments, as the kernel holds them, run `supervise` for the
-lease in the data directory. When the check fails, the daemon withholds the signal and logs the
-``SupervisorMismatch``.
+lease in the data directory. When the lock records a start time, the process must also have
+started at that microsecond, so a reused process identifier never matches. When a check fails,
+the daemon withholds the signal and logs the ``SupervisorMismatch``.
+
+### Supervisor lock record
+
+The supervisor writes a ``SupervisorLockRecord`` into its lock file right after it takes the lock
+and before it opens its socket. The record is UTF-8 text in two lines, each ending in a line feed.
+The first line is the process identifier in decimal. The second is the process's start time in
+decimal microseconds since 1970, as `proc_pidinfo` reports it.
+
+A record with only the first line comes from a build before the start time. The daemon reads its
+start time as absent and identifies that supervisor by its arguments alone, so leases survive an
+upgrade. A second line that is not a whole number or lacks its line feed is malformed, and the
+daemon sends that supervisor no signal.
+
+A build before the start time cannot read the two-line record. It falls back to the process
+identifier that the pool state stores for the lease. A later format keeps the two lines and adds
+any new line after them, which this build ignores.
 
 ### Lease lifetime
 
@@ -87,6 +104,8 @@ starts the daemon at login and again after it exits.
 - ``SupervisorSignal``
 - ``SupervisorMismatch``
 - ``SupervisorLock``
+- ``SupervisorLockRecord``
+- ``RecordedStartTime``
 - ``ProcessSupervisorLauncher``
 - ``SupervisorServer``
 - ``SupervisorStatus``

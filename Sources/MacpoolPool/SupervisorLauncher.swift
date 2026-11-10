@@ -46,13 +46,19 @@ public protocol SupervisorLauncher: Sendable {
     ///
     /// - Parameters:
     ///   - processID: The identifier that the supervisor recorded in its lock.
+    ///   - startTime: The start time that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
     /// - Throws: A ``SupervisorMismatch`` that tells why the process does not count as the lease's
     ///   supervisor. An identifier of 0 or less never matches.
-    func identify(processID: Int32, of id: LeaseID, in directory: PoolDirectory) async throws(SupervisorMismatch)
+    func identify(
+        processID: Int32,
+        startTime: RecordedStartTime,
+        of id: LeaseID,
+        in directory: PoolDirectory,
+    ) async throws(SupervisorMismatch)
 
-    /// Sends a signal to a process that ``identify(processID:of:in:)`` recognized.
+    /// Sends a signal to a process that ``identify(processID:startTime:of:in:)`` recognized.
     ///
     /// The call does not suspend. The daemon checks its own state and sends the signal in one
     /// step, so a lease that ends in between cannot receive a signal meant for an earlier state.
@@ -161,7 +167,11 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
         return try started.get()
     }
 
-    /// Checks a process's arguments as the kernel holds them.
+    /// Checks a process's start time and arguments as the kernel holds them.
+    ///
+    /// A recorded start time must equal the process's start time to the microsecond. That keeps a
+    /// reused process identifier from matching even when the new process has the same arguments.
+    /// A record from a build before the start time has none, and the arguments decide alone.
     ///
     /// The process's arguments after the first must hold `supervise`, `--data-dir`, the data
     /// directory, `--lease`, and the lease's identifier as consecutive whole arguments. The
@@ -170,18 +180,33 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
     ///
     /// - Parameters:
     ///   - processID: The identifier that the supervisor recorded in its lock.
+    ///   - startTime: The start time that the supervisor recorded in its lock.
     ///   - id: The lease.
     ///   - directory: The data directory.
     /// - Throws: ``SupervisorMismatch/noProcess`` for an identifier of 0 or less,
+    ///   ``SupervisorMismatch/malformedStartTime`` for a malformed record,
+    ///   ``SupervisorMismatch/startTimeDiffers(recorded:actual:)`` for another start time,
     ///   ``SupervisorMismatch/otherArguments`` when the arguments do not match, and the errors of
-    ///   reading the arguments.
+    ///   reading the start time and the arguments.
     public func identify(
         processID: Int32,
+        startTime: RecordedStartTime,
         of id: LeaseID,
         in directory: PoolDirectory,
     ) async throws(SupervisorMismatch) {
         guard processID > 0 else {
             throw .noProcess
+        }
+        switch startTime {
+        case .absent:
+            break
+        case .malformed:
+            throw .malformedStartTime
+        case let .recorded(recorded):
+            let actual = try ProcessStartTime.read(processID: processID)
+            guard actual == recorded else {
+                throw .startTimeDiffers(recorded: recorded, actual: actual)
+            }
         }
         let arguments = try ProcessArguments.read(processID: processID)
         guard Self.isSupervisor(arguments, of: id, in: directory) else {

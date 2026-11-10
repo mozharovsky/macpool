@@ -929,11 +929,19 @@ public actor PoolDaemon {
                 return .deferred
             }
             // The lock records the process that holds it, which covers a supervisor whose launch
-            // the daemon could not store.
-            let recorded = SupervisorLock.holder(of: id, in: directory) ?? 0
+            // the daemon could not store. The state's identifier has no start time, so its
+            // arguments alone identify it unless the lock holds a malformed record.
+            let record = SupervisorLock.holder(of: id, in: directory)
+            let recorded = record?.processID ?? 0
             let processID = recorded > 0 ? recorded : ledger.leases[id]?.supervisorProcessID ?? 0
+            let startTime = record?.startTime ?? .absent
             do {
-                try await configuration.launcher.identify(processID: processID, of: id, in: directory)
+                try await configuration.launcher.identify(
+                    processID: processID,
+                    startTime: startTime,
+                    of: id,
+                    in: directory,
+                )
                 // The check of the process suspends, so the lease may have ended meanwhile.
                 guard !isStopDeferred(id) else {
                     return .deferred

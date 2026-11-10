@@ -238,6 +238,47 @@ struct SupervisorRecoveryTests {
         await pool.launcher.crash(id)
     }
 
+    /// Passes the start time from the supervisor's lock to each process check.
+    @Test func checksRecordedStartTime() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        pool.launcher.plan(FakeBehavior(ignoresStop: true, ignoresTerminate: true))
+        let granted = try await pool.readyLease(pool.terms())
+        let id = granted.lease.id
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        let started = RecordedStartTime.recorded(FakeLauncher.startTime(of: 10001))
+        #expect(pool.launcher.startTimes() == [started, started])
+        #expect(pool.launcher.signals().map(\.signal) == [.terminate, .kill])
+        await daemon.shutdown()
+    }
+
+    /// Passes a malformed start time from the supervisor's lock to the process check instead of
+    /// reading the record as one from an earlier build.
+    @Test func reportsMalformedStartTime() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        pool.launcher.plan(FakeBehavior(ignoresStop: true, mismatch: .malformedStartTime))
+        let granted = try await pool.readyLease(pool.terms())
+        let id = granted.lease.id
+        try Data("10001\nsoon\n".utf8).write(to: pool.directory.supervisorLock(for: id))
+        #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        let withheld = "A process is not the lease's supervisor"
+        #expect(await eventually { pool.logs.entries(withheld).count >= 2 })
+        #expect(pool.launcher.startTimes() == [.malformed, .malformed])
+        #expect(pool.logs.entries(withheld).map { $0.metadata["reason"] } == [
+            SupervisorMismatch.malformedStartTime.description,
+            SupervisorMismatch.malformedStartTime.description,
+        ])
+        #expect(pool.launcher.signals().isEmpty)
+        await daemon.shutdown()
+        await pool.launcher.crash(id)
+    }
+
     /// Signals a supervisor that keeps its lock after its run ended, and then deletes the clone.
     @Test func discardEndsLingeringSupervisor() async throws {
         let pool = try PoolFixture()
