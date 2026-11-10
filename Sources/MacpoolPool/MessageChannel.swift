@@ -9,11 +9,17 @@ import Synchronization
 /// never wait. One task at a time reads with ``receive(_:)``, which returns `nil` once the peer
 /// closes the connection or the connection fails. ``close()`` ends a pending receive.
 ///
+/// If the peer stops reading, the queue still has a bound. ``delivered()`` waits until the queued
+/// messages left. If a send would queue more than 4 MiB, it closes the connection instead.
+///
 /// A request can switch its connection to raw bytes. ``takeStream()`` then hands the connection
 /// over as a ``ByteStream`` with the bytes that arrived after the last line.
 public final class MessageChannel: Sendable {
     /// The longest line that a channel accepts, in bytes.
     static let maximumLineLength = 1 << 20
+
+    /// The most bytes that may wait to leave before a send closes the connection.
+    static let maximumQueuedBytes = 4 << 20
 
     /// The underlying connection.
     private let connection: NWConnection
@@ -163,6 +169,8 @@ public final class MessageChannel: Sendable {
     ///
     /// The call does not wait for the peer. A message sent after ``close()`` or
     /// ``finish(within:)`` began, or after the connection went to a ``ByteStream``, is dropped.
+    /// If the message would bring the bytes that wait to leave above 4 MiB, the call drops it and
+    /// closes the connection. A peer that far behind has stopped reading.
     ///
     /// - Parameter message: The message to send.
     /// - Throws: ``PoolError/malformedMessage(reason:)`` when the message cannot be encoded.
@@ -175,33 +183,96 @@ public final class MessageChannel: Sendable {
         }
         // Queueing under the lock keeps a line from following the bytes of a stream that took
         // the connection in between.
-        state.withLock { state in
+        let overflows = state.withLock { state in
             guard state.user == .channel else {
-                return
+                return false
             }
-            connection.send(content: data, completion: .contentProcessed { _ in })
+            guard state.sentBytes - state.leftBytes + data.count <= Self.maximumQueuedBytes else {
+                state.user = .ending
+                return true
+            }
+            state.sentBytes += data.count
+            connection.send(content: data, completion: .contentProcessed { _ in self.left(data.count) })
+            return false
+        }
+        if overflows {
+            connection.cancel()
+            releaseWaiters()
+        }
+    }
+
+    /// Waits until the messages sent before the call left for the peer.
+    ///
+    /// A message has left once Network passed it to the system's socket. For a peer that stops
+    /// reading, that happens only after the peer read earlier bytes. Messages sent during the
+    /// wait do not extend it. The wait also ends when the channel closes its connection, and it
+    /// returns at once after the connection went to a ``ByteStream``.
+    public func delivered() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let waits = state.withLock { state in
+                guard state.user == .channel, state.leftBytes < state.sentBytes else {
+                    return false
+                }
+                state.waiters.append(DeliveryWaiter(target: state.sentBytes, continuation: continuation))
+                return true
+            }
+            if !waits {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Counts bytes that left and wakes each task in ``delivered()`` once its messages left.
+    ///
+    /// Network completes sends in the order of the calls, so the count of bytes that left also
+    /// tells which messages left.
+    ///
+    /// - Parameter count: The number of bytes that left.
+    private func left(_ count: Int) {
+        let reached = state.withLock { state in
+            state.leftBytes += count
+            let left = state.leftBytes
+            let reached = state.waiters.filter { $0.target <= left }
+            state.waiters.removeAll { $0.target <= left }
+            return reached
+        }
+        for waiter in reached {
+            waiter.continuation.resume()
+        }
+    }
+
+    /// Wakes the tasks in ``delivered()`` after the channel stopped using its connection.
+    private func releaseWaiters() {
+        let waiters = state.withLock { state in
+            defer { state.waiters = [] }
+            return state.waiters
+        }
+        for waiter in waiters {
+            waiter.continuation.resume()
         }
     }
 
     /// Receives the next message.
     ///
     /// One task at a time may wait. The wait ignores task cancellation, so the owner calls
-    /// ``close()`` to end it early.
+    /// ``close()`` to end it early. Once the channel begins to close its connection, lines that
+    /// arrived earlier are dropped.
     ///
     /// - Parameter type: The message type.
-    /// - Returns: The message, or `nil` once the connection has ended or went to a ``ByteStream``.
+    /// - Returns: The message, or `nil` once the connection has ended, the channel began to close
+    ///   it, or it went to a ``ByteStream``.
     /// - Throws: ``PoolError/malformedMessage(reason:)`` when a line is not a valid message or is
     ///   longer than 1 MiB.
     public func receive<Message: Decodable>(_ type: Message.Type) async throws(PoolError) -> Message? {
         while true {
             let scan = try state.withLock { state throws(PoolError) -> LineScan in
-                guard state.user != .stream else {
-                    return .streaming
+                guard state.user == .channel else {
+                    return .unavailable
                 }
                 return try state.buffer.takeLine().map(LineScan.line) ?? .incomplete
             }
             switch scan {
-            case .streaming:
+            case .unavailable:
                 return nil
             case let .line(line):
                 do {
@@ -260,6 +331,7 @@ public final class MessageChannel: Sendable {
         if ownsConnection {
             connection.cancel()
         }
+        releaseWaiters()
     }
 
     /// Delivers the queued messages, signals the end of the stream, and closes the connection.
@@ -282,13 +354,14 @@ public final class MessageChannel: Sendable {
         }
         await connection.sendEnd(within: timeout)
         connection.cancel()
+        releaseWaiters()
     }
 }
 
 /// What a channel finds when it looks for the next line.
 private enum LineScan {
-    /// The connection went to a ``ByteStream``.
-    case streaming
+    /// The channel began to close the connection, or the connection went to a ``ByteStream``.
+    case unavailable
     /// No line is complete yet.
     case incomplete
     /// A complete line without its line break.
@@ -302,13 +375,31 @@ private struct ChannelState {
 
     /// Who uses the connection, which changes only under the channel's lock.
     var user = ConnectionUser.channel
+
+    /// The count of bytes that the channel queued since it opened.
+    var sentBytes = 0
+
+    /// The count of queued bytes that left.
+    var leftBytes = 0
+
+    /// The tasks in ``MessageChannel/delivered()``.
+    var waiters: [DeliveryWaiter] = []
+}
+
+/// A task in ``MessageChannel/delivered()`` and the messages that it waits for.
+private struct DeliveryWaiter {
+    /// The value of `sentBytes` when the wait began. The wait ends once this many bytes left.
+    let target: Int
+
+    /// Resumes the task.
+    let continuation: CheckedContinuation<Void, Never>
 }
 
 /// Who uses a channel's connection.
 private enum ConnectionUser {
     /// The channel sends and receives lines.
     case channel
-    /// A close or finish began, and no stream may take the connection.
+    /// The channel began to close the connection, and no stream may take it.
     case ending
     /// A ``ByteStream`` owns the connection.
     case stream

@@ -448,6 +448,78 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     }
 }
 
+/// What the daemon on the other end of a connection between Macs is.
+enum PeerRole: String, Codable, Sendable {
+    /// A daemon that leases its VMs to paired Macs.
+    case host
+}
+
+/// The line that a host sends first on a connection from another Mac, before any request.
+///
+/// A client in TLS 1.3 finishes its handshake before the host checks the client's key, so a
+/// refused client also sees a ready connection. The greeting tells the client that the host
+/// admitted it. The line has the form of a reply of the kind `hello`. ``PoolReply`` does not
+/// decode this kind.
+struct HostGreeting: Codable, Sendable, Equatable {
+    /// The version of the application protocol that ALPN chose.
+    var version: Int
+
+    /// What the daemon is.
+    var role: PeerRole
+
+    /// The JSON keys of a greeting.
+    private enum CodingKeys: String, CodingKey {
+        /// The kind of message. A greeting always has `hello`.
+        case reply
+        /// The protocol version.
+        case version
+        /// The daemon's role.
+        case role
+    }
+
+    /// The kind of message under the `reply` key.
+    private static let kind = "hello"
+
+    /// Creates a greeting.
+    ///
+    /// - Parameters:
+    ///   - version: The protocol version.
+    ///   - role: What the daemon is.
+    init(version: Int, role: PeerRole) {
+        self.version = version
+        self.role = role
+    }
+
+    /// Decodes a greeting.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError` when the line is another kind of message or a field is missing.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .reply)
+        guard kind == Self.kind else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .reply,
+                in: container,
+                debugDescription: "expected a greeting, not \(kind)",
+            )
+        }
+        version = try container.decode(Int.self, forKey: .version)
+        role = try container.decode(PeerRole.self, forKey: .role)
+    }
+
+    /// Encodes the greeting.
+    ///
+    /// - Parameter encoder: The encoder to write to.
+    /// - Throws: An error when the encoder rejects a value.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.kind, forKey: .reply)
+        try container.encode(version, forKey: .version)
+        try container.encode(role, forKey: .role)
+    }
+}
+
 /// A reply from the daemon to a client.
 ///
 /// Each reply is one JSON object on its own line, with the kind under the `reply` key.

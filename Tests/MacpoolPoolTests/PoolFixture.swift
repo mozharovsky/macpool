@@ -54,9 +54,14 @@ final class PoolFixture {
     /// - Parameters:
     ///   - slots: The number of slots.
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
+    ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
     /// - Returns: The daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
-    func daemon(slots: Int = 2, offeredSources: [String: String] = [:]) throws(PoolError) -> PoolDaemon {
+    func daemon(
+        slots: Int = 2,
+        offeredSources: [String: String] = [:],
+        peers: PeerSettings? = nil,
+    ) throws(PoolError) -> PoolDaemon {
         let clock = clock
         let logs = logs
         return try PoolDaemon(configuration: PoolDaemon.Configuration(
@@ -64,6 +69,7 @@ final class PoolFixture {
             policy: PoolPolicy(slots: slots),
             launcher: launcher,
             offeredSources: offeredSources,
+            peers: peers,
             now: { clock.now },
             tickInterval: nil,
             supervisorConnectTimeout: .seconds(10),
@@ -79,10 +85,15 @@ final class PoolFixture {
     /// - Parameters:
     ///   - slots: The number of slots.
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
+    ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
     /// - Returns: The listening daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory or listen.
-    func start(slots: Int = 2, offeredSources: [String: String] = [:]) async throws(PoolError) -> PoolDaemon {
-        let daemon = try daemon(slots: slots, offeredSources: offeredSources)
+    func start(
+        slots: Int = 2,
+        offeredSources: [String: String] = [:],
+        peers: PeerSettings? = nil,
+    ) async throws(PoolError) -> PoolDaemon {
+        let daemon = try daemon(slots: slots, offeredSources: offeredSources, peers: peers)
         try await daemon.start()
         return daemon
     }
@@ -597,6 +608,28 @@ func eventually(within timeout: Duration = .seconds(10), _ condition: () async -
         try? await Task.sleep(for: .milliseconds(20))
     }
     return await condition()
+}
+
+/// Runs an operation and reports whether it finished in time.
+///
+/// If the operation runs longer, it keeps running in its own task after the call returns.
+///
+/// - Parameters:
+///   - timeout: The longest wait.
+///   - operation: The work to run in its own task.
+/// - Returns: Whether the operation finished within the timeout.
+func finishes(within timeout: Duration, _ operation: @escaping @Sendable () async -> Void) async -> Bool {
+    await withCheckedContinuation { continuation in
+        let once = ResumeOnce(continuation)
+        Task {
+            await operation()
+            once.resume(returning: true)
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            once.resume(returning: false)
+        }
+    }
 }
 
 /// A log message with its metadata.

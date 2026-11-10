@@ -107,6 +107,18 @@ struct MessageTests {
         }
     }
 
+    /// Writes the greeting as a reply line and refuses any other reply in its place.
+    @Test func encodesTheHostGreeting() throws {
+        let greeting = HostGreeting(version: 1, role: .host)
+        let text = try String(decoding: MessageCoding.encoder.encode(greeting), as: UTF8.self)
+        #expect(text == #"{"reply":"hello","role":"host","version":1}"#)
+        #expect(try MessageCoding.decoder.decode(HostGreeting.self, from: Data(text.utf8)) == greeting)
+        let status = try MessageCoding.encoder.encode(PoolReply.status(PoolSummary(slots: 1, leases: [], queue: [])))
+        #expect(throws: DecodingError.self) {
+            try MessageCoding.decoder.decode(HostGreeting.self, from: status)
+        }
+    }
+
     /// Rejects terms with relative paths or durations out of range.
     @Test func validatesTerms() {
         #expect(throws: Never.self) {
@@ -146,6 +158,90 @@ struct MessageTests {
 
         await client.finish()
         #expect(try await server.receive(PoolRequest.self) == nil)
+        server.close()
+    }
+
+    /// Waits for queued messages until the peer reads them.
+    @Test func waitsUntilQueuedMessagesLeave() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        // The socket's buffers hold far less than the four messages.
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        #expect(await !finishes(within: .milliseconds(500)) { await server.delivered() })
+        for _ in 0 ..< 4 {
+            #expect(try await client.receive(String.self) == text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        client.close()
+        server.close()
+    }
+
+    /// Waits only for the messages sent before the wait began.
+    @Test func waitsOnlyForEarlierMessages() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        let earlier = Task { await server.delivered() }
+        #expect(await !finishes(within: .milliseconds(300)) { await earlier.value })
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        for _ in 0 ..< 4 {
+            #expect(try await client.receive(String.self) == text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await earlier.value })
+        #expect(await !finishes(within: .milliseconds(300)) { await server.delivered() })
+        client.close()
+        server.close()
+    }
+
+    /// Closes the connection instead of queueing more than 4 MiB for a peer that stops reading,
+    /// and drops the requests that arrived before.
+    @Test func closesWhenThePeerStopsReading() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+        // One write carries both lines, so the second waits in the server's buffer.
+        let requests = try client.takeStream()
+        try await requests.send(Data("{\"request\":\"status\"}\n{\"request\":\"status\"}\n".utf8))
+        #expect(try await server.receive(PoolRequest.self) == .status)
+
+        let text = String(repeating: "a", count: 512 << 10)
+        let count = MessageChannel.maximumQueuedBytes / text.utf8.count + 2
+        for _ in 0 ..< count {
+            try server.send(text)
+        }
+        #expect(await finishes(within: .seconds(10)) { await server.delivered() })
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        var received = 0
+        while let chunk = await requests.receive() {
+            received += chunk.count { $0 == UInt8(ascii: "\n") }
+        }
+        #expect(received < count)
+        requests.close()
         server.close()
     }
 
