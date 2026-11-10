@@ -95,7 +95,10 @@ struct VirtualMachineRunTests {
 
         let run = try await Subprocess.run(
             .path(FilePath(VirtualMachineTestEnvironment.binaryPath)),
-            arguments: ["run", "--bundle", clone.path(percentEncoded: false), "--wait-ssh", "--timeout", "300"],
+            // The hold outlasts the test's time limit. The stop request below ends it.
+            arguments: [
+                "run", "--bundle", clone.path(percentEncoded: false), "--wait-ssh", "--timeout", "300", "--hold", "600",
+            ],
             input: .none,
             output: .sequence,
             error: .currentStandardError,
