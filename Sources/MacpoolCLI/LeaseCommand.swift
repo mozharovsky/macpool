@@ -56,9 +56,8 @@ struct LeaseCommand: AsyncParsableCommand {
     )
     var restart = RestartPolicy.onFailure
 
-    /// A host directory to share with the guest.
-    @Option(help: "A host directory to share with the guest through VirtioFS.")
-    var share: String?
+    /// The options that share a host directory with the guest.
+    @OptionGroup var sharing: ShareOptions
 
     /// The longest wait for each boot, in seconds.
     @Option(
@@ -113,7 +112,8 @@ struct LeaseCommand: AsyncParsableCommand {
             timeToLive: timeToLive,
             priority: priority,
             restartPolicy: restart,
-            sharedDirectory: share.map { URL(filePath: $0).absoluteURL.path(percentEncoded: false) },
+            sharedDirectory: sharing.absolutePath,
+            sharedDirectoryIsReadOnly: sharing.readOnly,
             bootTimeout: bootTimeout,
             detached: detach,
         )

@@ -126,6 +126,11 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
     /// The absolute path of a host directory that the guest mounts, or `nil` for none.
     public var sharedDirectory: String?
 
+    /// Whether the guest can only read the shared directory.
+    ///
+    /// The value matters only with a ``sharedDirectory``.
+    public var sharedDirectoryIsReadOnly: Bool
+
     /// The longest wait for each boot's address, SSH server, and credential rotation, in seconds,
     /// from 1 to ``maximumBootTimeout``.
     public var bootTimeout: Int
@@ -147,8 +152,14 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
         case priority
         /// The `restart` key.
         case restartPolicy = "restart"
-        /// The `shared_directory` key.
+        /// The `shared_directory` key. It holds the path of a writable share.
         case sharedDirectory = "shared_directory"
+        /// The `read_only_shared_directory` key. It holds the path of a read-only share.
+        ///
+        /// If a daemon from before read-only shares receives this key, it ignores the key and
+        /// boots the guest without a share. A flag beside `shared_directory` would instead make
+        /// that daemon share the directory writable.
+        case readOnlySharedDirectory = "read_only_shared_directory"
         /// The `boot_timeout_seconds` key.
         case bootTimeout = "boot_timeout_seconds"
         /// The `detached` key.
@@ -163,6 +174,7 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
     ///   - priority: The queue priority, where higher values go first.
     ///   - restartPolicy: When the daemon boots the VM again.
     ///   - sharedDirectory: The absolute path of a host directory to share, or `nil`.
+    ///   - sharedDirectoryIsReadOnly: Whether the guest can only read the shared directory.
     ///   - bootTimeout: The longest wait for each boot, in seconds.
     ///   - detached: Whether the lease outlives the client's connection once it is ready.
     public init(
@@ -171,6 +183,7 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
         priority: Int = 0,
         restartPolicy: RestartPolicy = .onFailure,
         sharedDirectory: String? = nil,
+        sharedDirectoryIsReadOnly: Bool = false,
         bootTimeout: Int = 900,
         detached: Bool = false,
     ) {
@@ -179,17 +192,65 @@ public struct LeaseTerms: Codable, Sendable, Equatable {
         self.priority = priority
         self.restartPolicy = restartPolicy
         self.sharedDirectory = sharedDirectory
+        self.sharedDirectoryIsReadOnly = sharedDirectoryIsReadOnly
         self.bootTimeout = bootTimeout
         self.detached = detached
     }
 
+    /// Decodes terms and reads the shared directory from whichever of its two keys is present.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError` when a value is missing or malformed, or when both shared
+    ///   directory keys are present.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decode(String.self, forKey: .source)
+        timeToLive = try container.decode(Int.self, forKey: .timeToLive)
+        priority = try container.decode(Int.self, forKey: .priority)
+        restartPolicy = try container.decode(RestartPolicy.self, forKey: .restartPolicy)
+        bootTimeout = try container.decode(Int.self, forKey: .bootTimeout)
+        detached = try container.decode(Bool.self, forKey: .detached)
+        let writable = try container.decodeIfPresent(String.self, forKey: .sharedDirectory)
+        let readOnly = try container.decodeIfPresent(String.self, forKey: .readOnlySharedDirectory)
+        guard writable == nil || readOnly == nil else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .readOnlySharedDirectory,
+                in: container,
+                debugDescription: "The terms name both a writable and a read-only shared directory.",
+            )
+        }
+        sharedDirectory = readOnly ?? writable
+        sharedDirectoryIsReadOnly = readOnly != nil
+    }
+
+    /// Encodes the terms with the shared directory under the key for its access.
+    ///
+    /// - Parameter encoder: The encoder to write to.
+    /// - Throws: `EncodingError` when the encoder rejects a value.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(source, forKey: .source)
+        try container.encode(timeToLive, forKey: .timeToLive)
+        try container.encode(priority, forKey: .priority)
+        try container.encode(restartPolicy, forKey: .restartPolicy)
+        try container.encode(bootTimeout, forKey: .bootTimeout)
+        try container.encode(detached, forKey: .detached)
+        try container.encodeIfPresent(
+            sharedDirectory,
+            forKey: sharedDirectoryIsReadOnly ? .readOnlySharedDirectory : .sharedDirectory,
+        )
+    }
+
     /// Checks the ranges of the terms with the source as a path.
     ///
-    /// - Throws: ``PoolError/invalidRequest(reason:)`` when a path is not absolute or a duration
-    ///   is out of range.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when a path is not absolute, the shared
+    ///   directory is read-only without a path, or a duration is out of range.
     public func validate() throws(PoolError) {
         guard source.hasPrefix("/") else {
             throw .invalidRequest(reason: "the source \(source) is not an absolute path")
+        }
+        guard sharedDirectory != nil || !sharedDirectoryIsReadOnly else {
+            throw .invalidRequest(reason: "a read-only share needs a shared directory")
         }
         if let sharedDirectory, !sharedDirectory.hasPrefix("/") {
             throw .invalidRequest(reason: "the shared directory \(sharedDirectory) is not an absolute path")

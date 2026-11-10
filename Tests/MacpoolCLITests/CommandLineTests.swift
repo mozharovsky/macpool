@@ -1,6 +1,8 @@
 import ArgumentParser
+import Foundation
 import Logging
 @testable import MacpoolCLI
+import MacpoolVM
 import Testing
 
 /// Tests of argument parsing, defaults, and output formatting.
@@ -13,13 +15,26 @@ struct CommandLineTests {
         ])
         let run = try #require(command as? RunCommand)
         #expect(run.bundle == ".cache/vms/clone")
-        #expect(run.share == "/tmp/share")
+        #expect(run.sharing.share == "/tmp/share")
+        #expect(!run.sharing.readOnly)
         #expect(run.provision)
         #expect(run.waitSSH)
         #expect(run.timeout == 120)
         #expect(run.hold == 60)
         #expect(run.logging.logLevel == .debug)
         #expect(run.logging.makeLogger(label: "test").logLevel == .debug)
+    }
+
+    /// Parses a read-only share and rejects the flag without a directory.
+    @Test func parsesReadOnlyShare() throws {
+        let run = try #require(
+            try Macpool.parseAsRoot(["run", "--bundle", "b", "--share", "/tmp/share", "--share-read-only"])
+                as? RunCommand,
+        )
+        #expect(run.sharing.sharedDirectory == SharedDirectory(url: URL(filePath: "/tmp/share"), isReadOnly: true))
+        #expect(throws: (any Error).self) {
+            try Macpool.parseAsRoot(["run", "--bundle", "b", "--share-read-only"])
+        }
     }
 
     /// Applies the documented defaults to `run`, `create`, and `fetch`.
@@ -30,6 +45,7 @@ struct CommandLineTests {
         #expect(!run.provision)
         #expect(!run.waitSSH)
         #expect(run.logging.logLevel == .warning)
+        #expect(run.sharing.sharedDirectory == nil)
         let create = try #require(
             try Macpool.parseAsRoot(["create", "--ipsw", "i.ipsw", "--bundle", "b"]) as? CreateCommand,
         )

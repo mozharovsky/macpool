@@ -74,7 +74,8 @@ while a `run` holds the bundle and its DHCP lease is current.
 `run` boots a bundle headless with NAT networking and prints `ready` once the guest has an address
 and, with `--wait-ssh`, answers on SSH. It holds the VM for `--hold` seconds. Creating the bundle's
 `stop-request` file ends the hold early. `--share` mounts a host directory in the guest at
-`/Volumes/My Shared Files`.
+`/Volumes/My Shared Files`. With `--share-read-only`, the guest can only read it. `lease` accepts
+both options.
 
 Measurements and the address go to standard output. Diagnostics go to standard error, and
 `--log-level info` on `create` or `run` shows each lifecycle step.

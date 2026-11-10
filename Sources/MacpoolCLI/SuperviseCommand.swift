@@ -33,9 +33,8 @@ struct SuperviseCommand: AsyncParsableCommand {
     @Option(help: "The lease whose clone to boot.")
     var lease: String
 
-    /// A host directory to share with the guest.
-    @Option(help: "A host directory to share with the guest through VirtioFS.")
-    var share: String?
+    /// The options that share a host directory with the guest.
+    @OptionGroup var sharing: ShareOptions
 
     /// The longest wait for the guest's address, SSH server, and credential rotation, in seconds.
     @Option(name: .customLong("boot-timeout"), help: "The longest wait for the guest to become ready, in seconds.")
@@ -77,7 +76,7 @@ struct SuperviseCommand: AsyncParsableCommand {
         defer { signals.cancel() }
         let session = MachineSession(
             target: directory.bundle(for: id),
-            sharedDirectory: share.map { URL(filePath: $0).absoluteURL },
+            sharedDirectory: sharing.sharedDirectory,
             provision: false,
             waitSSH: true,
             timeout: bootTimeout,

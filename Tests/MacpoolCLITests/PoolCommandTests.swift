@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 @testable import MacpoolCLI
 @testable import MacpoolPool
+import MacpoolVM
 import Testing
 
 /// Tests of the pool commands' arguments and output.
@@ -24,6 +25,25 @@ struct PoolCommandTests {
             bootTimeout: 300,
             detached: false,
         ))
+    }
+
+    /// Passes a read-only share to the lease and rejects the flag without a directory.
+    @Test func parsesReadOnlyLeaseShare() throws {
+        let lease = try #require(
+            try Macpool.parseAsRoot(["lease", "--from", "/vms/base", "--share", "/share", "--share-read-only"])
+                as? LeaseCommand,
+        )
+        #expect(lease.terms.sharedDirectory == "/share")
+        #expect(lease.terms.sharedDirectoryIsReadOnly)
+        #expect(throws: (any Error).self) {
+            try Macpool.parseAsRoot(["lease", "--from", "/vms/base", "--share-read-only"])
+        }
+        let supervise = try #require(
+            try Macpool.parseAsRoot([
+                "supervise", "--data-dir", "/pool", "--lease", "0a1b2c3d", "--share", "/share", "--share-read-only",
+            ]) as? SuperviseCommand,
+        )
+        #expect(supervise.sharing.sharedDirectory == SharedDirectory(url: URL(filePath: "/share"), isReadOnly: true))
     }
 
     /// Applies the documented defaults to `lease` and resolves relative paths.
@@ -74,7 +94,7 @@ struct PoolCommandTests {
             try Macpool.parseAsRoot(["supervise", "--data-dir", "/pool", "--lease", "0a1b2c3d"]) as? SuperviseCommand,
         )
         #expect(supervise.bootTimeout == 900)
-        #expect(supervise.share == nil)
+        #expect(supervise.sharing.sharedDirectory == nil)
     }
 
     /// Parses only lease identifiers.

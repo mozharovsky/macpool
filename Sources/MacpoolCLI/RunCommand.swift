@@ -23,9 +23,8 @@ struct RunCommand: AsyncParsableCommand {
     @Option(help: "The bundle to boot.")
     var bundle: String
 
-    /// A host directory to share with the guest.
-    @Option(help: "A host directory to share with the guest through VirtioFS.")
-    var share: String?
+    /// The options that share a host directory with the guest.
+    @OptionGroup var sharing: ShareOptions
 
     /// Whether to provision the guest with the account stored in the bundle.
     @Flag(help: "Provisions the guest on its first boot with the account stored in the bundle.")
@@ -90,7 +89,7 @@ struct RunCommand: AsyncParsableCommand {
         let stopRequest = target.stopRequest.path(percentEncoded: false)
         let session = MachineSession(
             target: target,
-            sharedDirectory: share.map { URL(filePath: $0).absoluteURL },
+            sharedDirectory: sharing.sharedDirectory,
             provision: provision,
             waitSSH: waitSSH,
             timeout: timeout,
