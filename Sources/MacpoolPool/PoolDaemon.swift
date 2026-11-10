@@ -123,13 +123,16 @@ public actor PoolDaemon {
     }
 
     /// How a supervisor ended while the daemon waited for it.
-    private enum SupervisorEnding {
+    private enum SupervisorEnding: Equatable {
         /// The supervisor exited on its own, and its exit record tells how the run ended.
         case exited
         /// The daemon had to stop the supervisor by command or signal.
         case endedByDaemon
-        /// The supervisor still holds its lock after `SIGKILL`.
-        case stuck
+        /// The supervisor still holds its lock after the last step.
+        ///
+        /// - Parameter killSent: Whether the daemon sent `SIGKILL`. It withholds the signal from a
+        ///   process that the launcher does not identify.
+        case stuck(killSent: Bool)
         /// The supervisor still runs, because its lease ended and the state file does not record
         /// that yet.
         case deferred
@@ -137,6 +140,19 @@ public actor PoolDaemon {
         /// Whether the supervisor no longer holds its lock.
         var hasEnded: Bool {
             self == .exited || self == .endedByDaemon
+        }
+
+        /// The message that the daemon logs for a supervisor that does not end, or `nil` when it
+        /// ended or keeps running by design.
+        var stuckMessage: Logger.Message? {
+            switch self {
+            case .stuck(killSent: true):
+                "A supervisor survives SIGKILL"
+            case .stuck(killSent: false):
+                "A supervisor does not exit, and the daemon withheld SIGKILL"
+            case .exited, .endedByDaemon, .deferred:
+                nil
+            }
         }
     }
 
@@ -549,7 +565,7 @@ public actor PoolDaemon {
         guard !isShutDown else {
             return
         }
-        guard earlier != .stuck else {
+        if case .stuck = earlier {
             connecting.remove(id)
             configuration.logger.error("An earlier supervisor of a lease does not exit", metadata: ["lease": "\(id)"])
             return
@@ -749,10 +765,10 @@ public actor PoolDaemon {
             outcome = configuration.directory.readExitRecord(for: id) ?? .lost
         case .endedByDaemon:
             outcome = .failed(reason)
-        case .stuck:
-            configuration.logger.error("A supervisor survives SIGKILL", metadata: ["lease": "\(id)"])
-            return
-        case .deferred:
+        case .stuck, .deferred:
+            if let message = ending.stuckMessage {
+                configuration.logger.error(message, metadata: ["lease": "\(id)"])
+            }
             return
         }
         perform(ledger.machineExited(id, outcome, now: configuration.now()))
@@ -883,8 +899,8 @@ public actor PoolDaemon {
     /// - Parameter id: The lease.
     private func terminateUnresponsive(_ id: LeaseID) async {
         configuration.logger.warning("A supervisor ignores its stop", metadata: ["lease": "\(id)"])
-        if await endSupervisor(id, waitingFirst: .zero) == .stuck {
-            configuration.logger.error("A supervisor survives SIGKILL", metadata: ["lease": "\(id)"])
+        if let message = await endSupervisor(id, waitingFirst: .zero).stuckMessage {
+            configuration.logger.error(message, metadata: ["lease": "\(id)"])
         }
         terminating.remove(id)
     }
@@ -924,6 +940,7 @@ public actor PoolDaemon {
                 return .endedByDaemon
             }
         }
+        var killSent = false
         for signal in [SupervisorSignal.terminate, .kill] {
             guard !isStopDeferred(id) else {
                 return .deferred
@@ -952,6 +969,7 @@ public actor PoolDaemon {
                     "signal": "\(signal)",
                 ])
                 configuration.launcher.send(signal, to: processID, of: id, in: directory)
+                killSent = signal == .kill
             } catch {
                 configuration.logger.warning("A process is not the lease's supervisor", metadata: [
                     "lease": "\(id)",
@@ -964,7 +982,7 @@ public actor PoolDaemon {
                 return .endedByDaemon
             }
         }
-        return .stuck
+        return .stuck(killSent: killSent)
     }
 
     /// Waits until no process holds a lease's supervisor lock.
