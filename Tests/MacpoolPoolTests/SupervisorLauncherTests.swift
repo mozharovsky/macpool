@@ -29,6 +29,21 @@ struct SupervisorLauncherTests {
         #expect(!ProcessSupervisorLauncher.isSupervisor(["sleep", "600"], of: id, in: directory))
     }
 
+    /// Passes the shared directory and its read-only flag to the supervisor.
+    @Test func passesReadOnlyShare() throws {
+        let directory = PoolDirectory(root: URL(filePath: "/Users/me/pool", directoryHint: .isDirectory))
+        let launcher = ProcessSupervisorLauncher(executable: URL(filePath: "/opt/macpool"))
+        var launch = try SupervisorLaunch(
+            lease: #require(LeaseID("0a1b2c3d")),
+            directory: directory,
+            sharedDirectory: "/share",
+            bootTimeout: 60,
+        )
+        #expect(Array(launcher.arguments(for: launch).suffix(2)) == ["--share", "/share"])
+        launch.sharedDirectoryIsReadOnly = true
+        #expect(Array(launcher.arguments(for: launch).suffix(3)) == ["--share", "/share", "--share-read-only"])
+    }
+
     /// Gives a directory the same root through a trailing slash and through a symbolic link.
     @Test func resolvesSpellingsOfOneDirectory() throws {
         let scratch = try ShortDirectory()

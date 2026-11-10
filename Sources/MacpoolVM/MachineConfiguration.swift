@@ -78,16 +78,7 @@ enum MachineConfiguration {
         configuration.pointingDevices = [VZMacTrackpadConfiguration()]
 
         if let directory = devices.sharedDirectory {
-            let share = VZSingleDirectoryShare(directory: VZSharedDirectory(
-                url: directory.absoluteURL,
-                readOnly: false,
-            ))
-            // The automount tag makes a macOS guest mount the share without any setup inside it.
-            let device = VZVirtioFileSystemDeviceConfiguration(
-                tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag,
-            )
-            device.share = share
-            configuration.directorySharingDevices = [device]
+            configuration.directorySharingDevices = [sharingDevice(for: directory)]
         }
 
         do {
@@ -96,5 +87,21 @@ enum MachineConfiguration {
             throw .framework("validating the configuration", error)
         }
         return configuration
+    }
+
+    /// Builds the VirtioFS device that shares a host directory with a macOS guest.
+    ///
+    /// - Parameter directory: The host directory and whether the guest can only read it.
+    /// - Returns: A device with the macOS automount tag.
+    static func sharingDevice(for directory: SharedDirectory) -> VZVirtioFileSystemDeviceConfiguration {
+        // The automount tag makes a macOS guest mount the share without any setup inside it.
+        let device = VZVirtioFileSystemDeviceConfiguration(
+            tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag,
+        )
+        device.share = VZSingleDirectoryShare(directory: VZSharedDirectory(
+            url: directory.url.absoluteURL,
+            readOnly: directory.isReadOnly,
+        ))
+        return device
     }
 }

@@ -13,6 +13,9 @@ public struct SupervisorLaunch: Sendable, Equatable {
     /// The absolute path of a host directory to share with the guest, or `nil`.
     public var sharedDirectory: String?
 
+    /// Whether the guest can only read the shared directory.
+    public var sharedDirectoryIsReadOnly = false
+
     /// The longest wait for the guest's address, SSH, and credential rotation, in seconds.
     public var bootTimeout: Int
 }
@@ -110,6 +113,9 @@ public struct ProcessSupervisorLauncher: SupervisorLauncher {
         ]
         if let sharedDirectory = launch.sharedDirectory {
             arguments += ["--share", sharedDirectory]
+            if launch.sharedDirectoryIsReadOnly {
+                arguments.append("--share-read-only")
+            }
         }
         return arguments
     }

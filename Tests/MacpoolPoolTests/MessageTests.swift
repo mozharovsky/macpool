@@ -66,6 +66,35 @@ struct MessageTests {
         }
     }
 
+    /// Writes a read-only share under its own key. A daemon that does not know the key then
+    /// boots the guest without a share.
+    @Test func encodesReadOnlyShareUnderItsOwnKey() throws {
+        let terms = LeaseTerms(
+            source: "/vms/base",
+            timeToLive: 60,
+            sharedDirectory: "/share",
+            sharedDirectoryIsReadOnly: true,
+        )
+        let text = try String(decoding: MessageCoding.encoder.encode(terms), as: UTF8.self)
+        #expect(text.contains(#""read_only_shared_directory":"/share""#), "\(text)")
+        #expect(!text.contains(#""shared_directory""#), "\(text)")
+        #expect(try MessageCoding.decoder.decode(LeaseTerms.self, from: Data(text.utf8)) == terms)
+
+        let writable = LeaseTerms(source: "/vms/base", timeToLive: 60, sharedDirectory: "/share")
+        let writableText = try String(decoding: MessageCoding.encoder.encode(writable), as: UTF8.self)
+        #expect(writableText.contains(#""shared_directory":"/share""#), "\(writableText)")
+        #expect(!writableText.contains("read_only"), "\(writableText)")
+        #expect(try MessageCoding.decoder.decode(LeaseTerms.self, from: Data(writableText.utf8)) == writable)
+
+        let both = writableText.replacingOccurrences(
+            of: #""shared_directory""#,
+            with: #""read_only_shared_directory":"/other","shared_directory""#,
+        )
+        #expect(throws: DecodingError.self) {
+            try MessageCoding.decoder.decode(LeaseTerms.self, from: Data(both.utf8))
+        }
+    }
+
     /// Writes the supervisor protocol version into every status and requires it when reading.
     @Test func carriesSupervisorProtocolVersion() throws {
         let status = SupervisorStatus(phase: .ready, address: "192.168.64.2")
@@ -89,6 +118,7 @@ struct MessageTests {
             LeaseTerms(source: "/vms/base", timeToLive: 0),
             LeaseTerms(source: "/vms/base", timeToLive: LeaseTerms.maximumTimeToLive + 1),
             LeaseTerms(source: "/vms/base", timeToLive: 60, bootTimeout: 0),
+            LeaseTerms(source: "/vms/base", timeToLive: 60, sharedDirectoryIsReadOnly: true),
         ]
         for terms in invalid {
             #expect(throws: PoolError.self) {

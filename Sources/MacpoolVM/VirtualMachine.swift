@@ -2,16 +2,37 @@ public import Foundation
 public import Logging
 import Virtualization
 
+/// A host directory that a macOS guest mounts automatically under `/Volumes/My Shared Files`.
+public struct SharedDirectory: Sendable, Equatable {
+    /// The host directory that the guest sees.
+    public var url: URL
+
+    /// Whether the guest can only read the directory.
+    ///
+    /// If the share is read-only, the framework rejects every write from the guest. The host's
+    /// files then stay unchanged.
+    public var isReadOnly: Bool
+
+    /// Creates a shared directory.
+    ///
+    /// - Parameters:
+    ///   - url: The host directory.
+    ///   - isReadOnly: Whether the guest can only read the directory.
+    public init(url: URL, isReadOnly: Bool = false) {
+        self.url = url
+        self.isReadOnly = isReadOnly
+    }
+}
+
 /// Devices that a VM receives beyond its fixed set.
 public struct MachineDevices: Sendable, Equatable {
-    /// A host directory that a macOS guest mounts automatically under
-    /// `/Volumes/My Shared Files`.
-    public var sharedDirectory: URL?
+    /// A host directory that the guest mounts, or `nil` for none.
+    public var sharedDirectory: SharedDirectory?
 
     /// Creates a device selection.
     ///
     /// - Parameter sharedDirectory: A host directory to share with the guest through VirtioFS.
-    public init(sharedDirectory: URL? = nil) {
+    public init(sharedDirectory: SharedDirectory? = nil) {
         self.sharedDirectory = sharedDirectory
     }
 }
@@ -153,7 +174,8 @@ public actor VirtualMachine {
             "cpus": "\(settings.cpuCount)",
             "memory_bytes": "\(settings.memoryByteCount)",
             "mac_address": "\(settings.macAddress)",
-            "shared_directory": "\(devices.sharedDirectory?.path(percentEncoded: false) ?? "none")",
+            "shared_directory": "\(devices.sharedDirectory?.url.path(percentEncoded: false) ?? "none")",
+            "shared_directory_read_only": "\(devices.sharedDirectory?.isReadOnly ?? false)",
         ])
     }
 

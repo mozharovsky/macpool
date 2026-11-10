@@ -94,6 +94,7 @@ names.
 - ``HostTools``
 - ``Report``
 - ``LoggingOptions``
+- ``ShareOptions``
 - ``LogLevel``
 - ``MachineSession``
 - ``PoolOptions``
