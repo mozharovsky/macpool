@@ -131,7 +131,7 @@ dependency has one role.
   still run TLS, hold the keys, and sign.
 - swift-asn1 serializes those certificates to DER.
 - swift-crypto arrives with swift-certificates. macpool does not import it, and `Package.resolved`
-  pins its version.
+  pins its version. Its BoringSSL code enters the release binary.
 - swift-docc-plugin builds the documentation.
 - SwiftFormat formats the code as a command plugin.
 - SwiftLint lints the code as a command plugin through its plugin package.
@@ -139,9 +139,9 @@ dependency has one role.
 A dependency outside this set arrives in its own pull request. The description states why the set
 cannot meet the need and records the new dependency's role here.
 
-`Scripts/check-licenses.sh` reads the license of every resolved package and binary artifact. MIT,
-BSD, and Apache 2.0 pass. GPL, LGPL, AGPL, the Functional Source License, and unrecognized
-licenses fail.
+`Scripts/check-licenses.sh` reads the license of every resolved package and binary artifact, and
+the licenses that a package's NOTICE file names for the code it embeds. MIT, BSD, ISC, and Apache
+2.0 pass. GPL, LGPL, AGPL, the Functional Source License, and unrecognized licenses fail.
 
 ## Clean room
 
