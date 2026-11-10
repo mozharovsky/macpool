@@ -23,7 +23,8 @@ struct PoolStore {
     /// - Returns: The state, or an empty state when the file does not exist.
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the file exists and cannot
     ///   be read, ``PoolError/unsupportedStateVersion(path:version:)`` when it has another format
-    ///   version, or ``PoolError/invalidState(path:reason:)`` when it is malformed.
+    ///   version, or ``PoolError/invalidState(path:reason:)`` when it is malformed or lists a lease
+    ///   more than once.
     func load() throws(PoolError) -> PoolState {
         let data: Data
         do {
@@ -43,11 +44,18 @@ struct PoolStore {
         guard header.version == PoolState.currentVersion else {
             throw .unsupportedStateVersion(path: path, version: header.version)
         }
+        let state: PoolState
         do {
-            return try MessageCoding.decoder.decode(PoolState.self, from: data)
+            state = try MessageCoding.decoder.decode(PoolState.self, from: data)
         } catch {
             throw .invalidState(path: path, reason: "\(error)")
         }
+        // The daemon writes each lease once, so a repeated lease means the file was damaged.
+        var seen: Set<LeaseID> = []
+        for lease in state.leases where !seen.insert(lease.id).inserted {
+            throw .invalidState(path: path, reason: "it lists lease \(lease.id) more than once")
+        }
+        return state
     }
 
     /// Replaces the stored state.

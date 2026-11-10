@@ -318,6 +318,21 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
+    /// Moves a state file that lists one lease twice aside and starts without leases.
+    @Test func setsAsideRepeatedLeases() async throws {
+        let pool = try PoolFixture()
+        try pool.directory.prepare()
+        let record = try PoolStoreTests.record()
+        let store = PoolStore(file: pool.directory.stateFile)
+        try store.save(PoolState(version: PoolState.currentVersion, leases: [record, record]))
+
+        let daemon = try await pool.start()
+        #expect(await daemon.summary().leases.isEmpty)
+        let names = try FileManager.default.contentsOfDirectory(atPath: pool.directory.root.path(percentEncoded: false))
+        #expect(names.contains { $0.hasPrefix("state.json.invalid-") }, "\(names)")
+        await daemon.shutdown()
+    }
+
     /// Refuses to start on another build's state file and leaves the file and the clones alone.
     @Test func keepsStateOfAnotherBuild() throws {
         let pool = try PoolFixture()

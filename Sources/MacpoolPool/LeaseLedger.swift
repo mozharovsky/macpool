@@ -257,7 +257,8 @@ struct LeaseLedger {
     /// - Parameters:
     ///   - policy: The limits and timings.
     ///   - directory: The data directory.
-    ///   - state: The stored leases, which ``recover(now:)`` resumes.
+    ///   - state: The stored leases, which ``recover(now:)`` resumes. Each lease appears once, as in
+    ///     a state that ``PoolStore/load()`` returns.
     init(policy: PoolPolicy, directory: PoolDirectory, state: PoolState = .empty) {
         self.policy = policy
         self.directory = directory
