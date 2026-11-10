@@ -4,8 +4,11 @@ import Synchronization
 
 /// How the daemon listens for paired Macs.
 public struct PeerSettings: Sendable {
-    /// The local address to listen on, such as `127.0.0.1`, or `nil` for every address.
-    public var address: String?
+    /// The local address to listen on, such as `127.0.0.1`.
+    ///
+    /// The listener binds only to this address. It has no default, so a caller never opens every
+    /// interface by accident.
+    public var address: String
 
     /// The TCP port, or 0 for a free port that the system picks.
     public var port: UInt16
@@ -13,8 +16,10 @@ public struct PeerSettings: Sendable {
     /// Returns the fingerprints of the keys that may connect.
     ///
     /// The listener calls it during every handshake, so a key that leaves the set opens no new
-    /// connection. An empty set admits nobody. The call runs on the handshake's queue and should
-    /// return quickly.
+    /// connection. Connections that are already open stay open. An empty set admits nobody.
+    ///
+    /// If the keys cannot be read, the closure must return an empty set. The listener makes every
+    /// call on one serial queue, so a slow call delays every handshake.
     public var trustedKeys: @Sendable () -> Set<KeyFingerprint>
 
     /// The wait before the daemon tries to listen again after this Mac's key or the port failed,
@@ -24,12 +29,12 @@ public struct PeerSettings: Sendable {
     /// Creates listener settings.
     ///
     /// - Parameters:
-    ///   - address: The local address to listen on, or `nil` for every address.
+    ///   - address: The local address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - trustedKeys: Returns the fingerprints of the keys that may connect.
     ///   - retryInterval: The wait before another attempt to listen.
     public init(
-        address: String? = nil,
+        address: String,
         port: UInt16,
         trustedKeys: @escaping @Sendable () -> Set<KeyFingerprint>,
         retryInterval: Duration = .seconds(10),
@@ -96,15 +101,11 @@ final class PeerListener: Sendable {
             trustedKeys().contains(key)
         }
         let port = NWEndpoint.Port(rawValue: settings.port) ?? .any
-        let place = "\(settings.address ?? "*"):\(settings.port)"
+        let place = "\(settings.address):\(settings.port)"
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(settings.address), port: port)
         let listener: NWListener
         do {
-            if let address = settings.address {
-                parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(address), port: port)
-                listener = try NWListener(using: parameters)
-            } else {
-                listener = try NWListener(using: parameters, on: port)
-            }
+            listener = try NWListener(using: parameters)
         } catch {
             throw .connection(path: place, reason: "\(error)")
         }

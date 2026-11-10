@@ -466,7 +466,7 @@ public actor PoolDaemon {
         peerListener = started
         peerListenerFailure = nil
         configuration.logger.info("Listening for paired Macs", metadata: [
-            "address": "\(settings.address ?? "*")",
+            "address": "\(settings.address)",
             "port": "\(started.port)",
         ])
         return .listening(started)
