@@ -76,6 +76,29 @@ struct MacIdentityTests {
         #expect(bytes == identity.privateKey.x963Representation)
     }
 
+    /// Pairs a certificate only with its own key in Security.
+    @Test func pairsCertificateOnlyWithItsKey() throws {
+        let key = P256.Signing.PrivateKey()
+        let name = try DistinguishedName { CommonName("macpool") }
+        let certificate = try Certificate(
+            version: .v3,
+            serialNumber: Certificate.SerialNumber(),
+            publicKey: Certificate.PublicKey(key.publicKey),
+            notValidBefore: Date(),
+            notValidAfter: Date().addingTimeInterval(3600),
+            issuer: name,
+            subject: name,
+            signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: Certificate.Extensions {},
+            issuerPrivateKey: Certificate.PrivateKey(key),
+        )
+        var serializer = DER.Serializer()
+        try serializer.serialize(certificate)
+        let parsed = try #require(SecCertificateCreateWithData(nil, Data(serializer.serializedBytes) as CFData))
+        #expect(try SecIdentityCreate(nil, parsed, Self.securityKey(for: key)) != nil)
+        #expect(try SecIdentityCreate(nil, parsed, Self.securityKey(for: P256.Signing.PrivateKey())) == nil)
+    }
+
     /// Names no key in a peer certificate whose key is not a P-256 key.
     @Test func namesOnlyP256Keys() throws {
         let key = P384.Signing.PrivateKey()
@@ -252,6 +275,19 @@ struct MacIdentityTests {
             error: .string(limit: 1 << 16),
         )
         try #require(result.terminationStatus.isSuccess, "chmod \(arguments) failed: \(result.standardError)")
+    }
+
+    /// Converts a CryptoKit private key into a Security key that lives only in memory.
+    ///
+    /// - Parameter key: The private key.
+    /// - Returns: The same key as a Security key.
+    /// - Throws: An error when Security rejects the key.
+    static func securityKey(for key: P256.Signing.PrivateKey) throws -> SecKey {
+        let attributes = [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+        ] as CFDictionary
+        return try #require(SecKeyCreateWithData(key.x963Representation as CFData, attributes, nil))
     }
 }
 
