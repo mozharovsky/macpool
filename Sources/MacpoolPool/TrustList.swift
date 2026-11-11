@@ -116,6 +116,9 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
     }
 
     /// Adds a record, or replaces the record with the same key.
+    ///
+    /// - Parameter record: The record to store. If the list has a record with the same key, the
+    ///   new record takes its place in the order.
     mutating func insert(_ record: Record) {
         if let index = records.firstIndex(where: { $0.key == record.key }) {
             records[index] = record

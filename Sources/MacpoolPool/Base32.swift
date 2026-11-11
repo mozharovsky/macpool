@@ -8,6 +8,7 @@ enum Base32 {
 
     /// Encodes bytes, five bits per character.
     ///
+    /// - Parameter bytes: The data, encoded from the most significant bit of the first byte.
     /// - Returns: The text. If the bit count is not a multiple of five, the last character
     ///   carries zero bits after the data.
     static func encode(_ bytes: some Sequence<UInt8>) -> String {
