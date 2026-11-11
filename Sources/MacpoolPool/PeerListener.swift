@@ -234,12 +234,12 @@ final class PeerListener: Sendable {
             }
         }
         connection.start(queue: DispatchQueue(label: "macpool.peer.connection"))
-        Task {
+        outcome.arm(Task {
             try? await Task.sleep(for: timeout)
             if outcome.settle() {
                 connection.cancel()
             }
-        }
+        })
     }
 
     /// Stops listening and ends ``connections``.
@@ -288,10 +288,20 @@ private final class HandshakeCount: Sendable {
 
 /// Whether a connection's handshake finished or ran out of time, whichever came first.
 ///
-/// The handshake leaves its ``HandshakeCount`` when the outcome settles.
+/// The handshake leaves its ``HandshakeCount`` when the outcome settles. Settling also cancels
+/// the timer, because the timer holds the connection until it ends.
 private final class HandshakeOutcome: Sendable {
-    /// Whether the outcome is settled.
-    private let isSettled = Mutex(false)
+    /// The state that the lock guards.
+    private struct State {
+        /// Whether the outcome is settled.
+        var isSettled = false
+
+        /// The task that ends the handshake when it runs out of time.
+        var timer: Task<Void, Never>?
+    }
+
+    /// The outcome's state.
+    private let state = Mutex(State())
 
     /// The count that includes this handshake until the outcome settles.
     private let handshakes: HandshakeCount
@@ -303,17 +313,37 @@ private final class HandshakeOutcome: Sendable {
         self.handshakes = handshakes
     }
 
-    /// Settles the outcome unless an earlier call did.
+    /// Keeps the timer of the handshake, or cancels it when the outcome is already settled.
+    ///
+    /// - Parameter timer: The task that ends the handshake when it runs out of time.
+    func arm(_ timer: Task<Void, Never>) {
+        let isSettled = state.withLock { state in
+            if !state.isSettled {
+                state.timer = timer
+            }
+            return state.isSettled
+        }
+        if isSettled {
+            timer.cancel()
+        }
+    }
+
+    /// Settles the outcome unless an earlier call did, and cancels the timer.
     ///
     /// - Returns: Whether this call settled it.
     func settle() -> Bool {
-        let settled = isSettled.withLock { settled in
-            defer { settled = true }
-            return !settled
+        let settled = state.withLock { state -> (isFirst: Bool, timer: Task<Void, Never>?) in
+            guard !state.isSettled else {
+                return (false, nil)
+            }
+            state.isSettled = true
+            defer { state.timer = nil }
+            return (true, state.timer)
         }
-        if settled {
+        settled.timer?.cancel()
+        if settled.isFirst {
             handshakes.end()
         }
-        return settled
+        return settled.isFirst
     }
 }

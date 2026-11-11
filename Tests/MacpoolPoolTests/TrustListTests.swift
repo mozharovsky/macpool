@@ -131,6 +131,31 @@ struct TrustListTests {
         }
     }
 
+    /// Replaces a symbolic link at the list's path with the list and leaves the link's target
+    /// alone.
+    @Test func replacesALinkInsteadOfItsTarget() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try TrustList<TrustedClient>().save(to: directory)
+        let path = TrustList<TrustedClient>.file(in: directory).path(percentEncoded: false)
+        let target = root.url.appending(path: "target.json").path(percentEncoded: false)
+        try Data("target\n".utf8).write(to: URL(filePath: target))
+        try FileManager.default.removeItem(atPath: path)
+        try FileManager.default.createSymbolicLink(atPath: path, withDestinationPath: target)
+
+        var list = TrustList<TrustedClient>()
+        let record = client("runner")
+        list.insert(record)
+        try list.save(to: directory)
+
+        #expect(try String(contentsOfFile: target, encoding: .utf8) == "target\n")
+        var status = stat()
+        #expect(lstat(path, &status) == 0)
+        #expect(status.st_mode & S_IFMT == S_IFREG)
+        #expect(status.st_mode & 0o777 == 0o600)
+        #expect(try TrustList<TrustedClient>.load(from: directory)[record.key] == record)
+    }
+
     /// Refuses to read or write a list file larger than the limit.
     @Test func limitsTheSizeOfLists() throws {
         let root = try ShortDirectory()

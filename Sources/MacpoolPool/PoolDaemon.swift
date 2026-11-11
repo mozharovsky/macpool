@@ -253,6 +253,17 @@ public actor PoolDaemon {
     /// The connections of Macs that pair.
     private var pairingConnections = 0
 
+    /// Whether the log already has a warning that ``pairingConnectionLimit`` Macs pair.
+    ///
+    /// The daemon logs the limit once until a place frees. Macs that connect again and again
+    /// therefore cannot fill the log.
+    private var hasLoggedPairingLimit = false
+
+    /// The keys of paired Macs that the log already warned about for ``connectionsPerPeer``.
+    ///
+    /// A key leaves the set when one of its connections closes.
+    private var keysAtConnectionLimit: Set<KeyFingerprint> = []
+
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
 
@@ -570,10 +581,12 @@ public actor PoolDaemon {
     private func acceptPairedMac(_ peer: PeerListener.Peer) {
         let owner = LeaseOwner.client(peer.fingerprint)
         guard clients.values.count(where: { $0.owner == owner }) < Self.connectionsPerPeer else {
-            configuration.logger.warning("A paired Mac has too many connections", metadata: [
-                "key": "\(peer.fingerprint)",
-                "address": "\(peer.channel.peer)",
-            ])
+            if keysAtConnectionLimit.insert(peer.fingerprint).inserted {
+                configuration.logger.warning("A paired Mac has too many connections", metadata: [
+                    "key": "\(peer.fingerprint)",
+                    "address": "\(peer.channel.peer)",
+                ])
+            }
             try? peer.channel.send(PoolReply.failure(
                 "this Mac already has \(Self.connectionsPerPeer) connections to the host, the most it may have",
             ))
@@ -596,10 +609,13 @@ public actor PoolDaemon {
     /// - Parameter peer: A connection whose handshake proved a key that the host does not know.
     private func acceptPairingMac(_ peer: PeerListener.Peer) {
         guard pairingConnections < Self.pairingConnectionLimit else {
-            configuration.logger.warning("Too many Macs pair at once", metadata: [
-                "key": "\(peer.fingerprint)",
-                "address": "\(peer.channel.peer)",
-            ])
+            if !hasLoggedPairingLimit {
+                hasLoggedPairingLimit = true
+                configuration.logger.warning("Too many Macs pair at once", metadata: [
+                    "key": "\(peer.fingerprint)",
+                    "address": "\(peer.channel.peer)",
+                ])
+            }
             try? peer.channel.send(PoolReply.failure("other Macs are pairing with the host, so try again shortly"))
             Task { await peer.channel.finish() }
             return
@@ -636,6 +652,7 @@ public actor PoolDaemon {
         }
         await peer.channel.finish()
         pairingConnections -= 1
+        hasLoggedPairingLimit = false
     }
 
     /// Checks a pairing request against the open invitation and records a new paired client.
@@ -757,6 +774,9 @@ public actor PoolDaemon {
         }
         channel.close()
         invitation.close(for: client)
+        if case let .client(key) = owner {
+            keysAtConnectionLimit.remove(key)
+        }
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
