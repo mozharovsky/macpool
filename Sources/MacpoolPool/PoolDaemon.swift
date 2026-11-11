@@ -973,17 +973,31 @@ public actor PoolDaemon {
 
     /// Reports whether any of the texts contains one of ``forbiddenTexts``.
     ///
-    /// The check compares the UTF-8 bytes of canonically decomposed texts. A path therefore
-    /// matches in either Unicode normalization form, and also when a combining mark follows it.
+    /// The check compares the UTF-8 bytes of case-folded, canonically decomposed texts. A path
+    /// therefore matches in any letter case and either Unicode normalization form, and also when
+    /// a combining mark follows it. On the default volume format, a path in another letter case
+    /// names the same file.
     ///
     /// - Parameter texts: The texts of a reply, or the host's name for clients.
     /// - Returns: `true` if a text names a host path.
     private func namesHostPath(_ texts: [String]) -> Bool {
-        let forbidden = forbiddenTexts.map { Array($0.decomposedStringWithCanonicalMapping.utf8) }
+        let forbidden = forbiddenTexts.map(Self.caselessBytes(of:))
         return texts.contains { text in
-            let bytes = Array(text.decomposedStringWithCanonicalMapping.utf8)
+            let bytes = Self.caselessBytes(of: text)
             return forbidden.contains { bytes.contains($0) }
         }
+    }
+
+    /// Returns the UTF-8 bytes of a text after case folding and canonical decomposition.
+    ///
+    /// - Parameter text: The text to convert.
+    /// - Returns: The bytes. Two texts that differ only in letter case or normalization form have
+    ///   the same bytes.
+    private static func caselessBytes(of text: String) -> [UInt8] {
+        // The canonical caseless match of the Unicode standard decomposes a text before and after
+        // case folding.
+        let folded = text.decomposedStringWithCanonicalMapping.folding(options: .caseInsensitive, locale: nil)
+        return Array(folded.decomposedStringWithCanonicalMapping.utf8)
     }
 
     /// The texts that no reply to a paired client may contain.

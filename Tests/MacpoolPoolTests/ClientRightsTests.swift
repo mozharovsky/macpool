@@ -199,10 +199,10 @@ struct ClientRightsTests {
     /// Replaces a reply to a paired client that names a host path with a failure, and logs it.
     /// A source name cannot hold a path. The test therefore passes replies to the check directly.
     ///
-    /// The host offers a source at a decomposed path. The texts hold the precomposed path, alone
-    /// and before a combining mark, as a file URL, and percent-encoded from either form. Two more
-    /// texts are a file URL to another path and a path that starts with `~/`. A status with an
-    /// image in the data directory also gets the failure.
+    /// The host offers a source at a decomposed path. The texts hold the precomposed path, alone,
+    /// before a combining mark, and in capital letters. They also hold it as a file URL and
+    /// percent-encoded from either form. Two more texts are a file URL to another path and a path
+    /// that starts with `~/`. A status with an image in the data directory also gets the failure.
     @Test func replacesRepliesThatNameHostPaths() async throws {
         let pool = try PoolFixture()
         let path = try pool.makeSource(named: "j\u{FC} rgen")
@@ -211,6 +211,7 @@ struct ClientRightsTests {
         let texts = try [
             precomposed,
             precomposed + "\u{301}",
+            precomposed.uppercased(),
             "\(url)",
             url.path(percentEncoded: true),
             #require(precomposed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)),

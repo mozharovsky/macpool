@@ -50,9 +50,10 @@ clone and no guest address. When a VM fails, the client receives a fixed reason,
 log keeps the real one. A refusal contains text from the client's request only if that text is
 the name of an offered source or a lease identifier. Before a reply leaves, the daemon checks it
 for the data directory, the offered sources, the home directory, their percent-encoded forms, file
-URLs, and paths that start with `~/`. If one appears, the client receives a failure, and the host's
-log records the reply. The daemon opens no invitation while the host's name for clients contains
-one of these texts.
+URLs, and paths that start with `~/`. The check ignores letter case and the Unicode normalization
+form. If one of these texts appears, the client receives a failure, and the host's log records the
+reply. The daemon opens no invitation while the host's name for clients contains one of these
+texts.
 
 ### Mac identity
 
