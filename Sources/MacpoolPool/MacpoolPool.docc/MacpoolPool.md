@@ -10,6 +10,10 @@ daemon clones the source into its data directory, boots the clone, and answers o
 ready on SSH. Requests that find no free slot wait in a queue ordered by priority and then by
 arrival.
 
+If the source has an `ImageRecord` and the image is not ready, the daemon refuses the
+request. The daemon also lists the images in its data directory for clients on the same Mac as
+``ImageSummary`` values.
+
 The daemon and its clients exchange one JSON message per line over a Unix socket in the data
 directory. ``PoolRequest`` and ``PoolReply`` define the messages, and ``PoolClient`` opens the
 connection. The socket's directory admits only the owning user.
@@ -248,6 +252,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``LeaseSummary``
 - ``QueuedSummary``
 - ``PoolSummary``
+- ``ImageSummary``
 
 ### Supervisors
 

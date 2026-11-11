@@ -77,12 +77,12 @@ struct RenewCommand: AsyncParsableCommand {
     }
 }
 
-/// Prints the daemon's slots, leases, and queue.
+/// Prints the daemon's slots, leases, queue, and images.
 struct ListCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "Prints the daemon's slots, leases, and queue.",
+        abstract: "Prints the daemon's slots, leases, queue, and images.",
     )
 
     /// The daemon's data directory.
@@ -149,14 +149,17 @@ enum LeaseOutput {
         date.formatted(.iso8601)
     }
 
-    /// Formats the pool as a table with one row per lease and one line per queued request.
+    /// Formats the pool as tables of leases and images, with one line per queued request.
     ///
     /// - Parameter pool: The pool.
     /// - Returns: The lines without line breaks.
     static func table(_ pool: PoolSummary) -> [String] {
-        var lines = ["slots \(pool.slots), leases \(pool.leases.count), queued \(pool.queue.count)"]
+        var lines = [
+            "slots \(pool.slots), leases \(pool.leases.count), queued \(pool.queue.count), images \(pool.images.count)",
+        ]
         if !pool.leases.isEmpty {
-            let rows = [["LEASE", "PHASE", "ADDRESS", "EXPIRES", "RESTARTS", "SOURCE"]] + pool.leases.map { lease in
+            let header = ["LEASE", "PHASE", "ADDRESS", "EXPIRES", "RESTARTS", "SOURCE"]
+            lines += aligned([header] + pool.leases.map { lease in
                 [
                     lease.id.rawValue,
                     lease.phase.rawValue,
@@ -165,23 +168,34 @@ enum LeaseOutput {
                     String(lease.restarts),
                     lease.source,
                 ]
-            }
-            let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
-            for row in rows {
-                let cells = row.indices.map { column in
-                    column == row.count - 1 ? row[column] : row[column].padding(
-                        toLength: widths[column],
-                        withPad: " ",
-                        startingAt: 0,
-                    )
-                }
-                lines.append(cells.joined(separator: "  "))
-            }
+            })
         }
         for request in pool.queue {
             let since = timestamp(request.since)
             lines.append("queued \(request.position): priority \(request.priority), since \(since), \(request.source)")
         }
+        if !pool.images.isEmpty {
+            lines += aligned([["IMAGE", "READY", "BUILDS"]] + pool.images.map { image in
+                let builds = image.builds.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }
+                let detail = image.problem ?? (builds.isEmpty ? "-" : builds.joined(separator: ", "))
+                return [image.name, image.isReady ? "yes" : "no", detail]
+            })
+        }
         return lines
+    }
+
+    /// Pads every column but the last to its widest cell.
+    ///
+    /// - Parameter rows: The rows, each with the same number of cells.
+    /// - Returns: One line per row, with two spaces between columns.
+    private static func aligned(_ rows: [[String]]) -> [String] {
+        let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
+        return rows.map { row in
+            row.indices.map { column in
+                // String.padding(toLength:) counts UTF-16 units and would cut a name with an emoji.
+                column == row.count - 1 ? row[column]
+                    : row[column] + String(repeating: " ", count: widths[column] - row[column].count)
+            }.joined(separator: "  ")
+        }
     }
 }

@@ -165,6 +165,11 @@ public struct VMBundle: Sendable, Hashable {
         root.appending(path: "known_hosts")
     }
 
+    /// The record that marks the bundle as an image. Only images have it.
+    public var imageFile: URL {
+        root.appending(path: "image.json")
+    }
+
     /// The file that carries the bundle's ``BundleLock``.
     public var lockFile: URL {
         root.appending(path: "lock")
@@ -203,6 +208,56 @@ public struct VMBundle: Sendable, Hashable {
             throw .invalidBundle(path: knownHostsFile.filePath, reason: "not UTF-8 text")
         }
         return HostKey.pinnedKeys(inKnownHosts: text)
+    }
+
+    /// Reads the bundle's image record.
+    ///
+    /// - Returns: The record, or `nil` if the bundle has no ``imageFile``.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file exists and
+    ///   cannot be read. ``MacpoolError/invalidBundle(path:reason:)`` when it is malformed, has no
+    ///   format version, or has a version other than ``ImageRecord/formatVersion``.
+    public func imageRecord() throws(MacpoolError) -> ImageRecord? {
+        guard let data = try FileSystem.readIfPresent(imageFile, for: "reading the image record") else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let path = imageFile.filePath
+        let header: ImageFormatHeader
+        do {
+            header = try decoder.decode(ImageFormatHeader.self, from: data)
+        } catch {
+            throw .invalidBundle(path: path, reason: "\(error)")
+        }
+        guard let version = header.version else {
+            throw .invalidBundle(path: path, reason: "the image record has no version")
+        }
+        guard version == ImageRecord.formatVersion else {
+            throw .invalidBundle(path: path, reason: "image record version \(version) is not supported")
+        }
+        do {
+            return try decoder.decode(ImageRecord.self, from: data)
+        } catch {
+            throw .invalidBundle(path: path, reason: "\(error)")
+        }
+    }
+
+    /// Replaces the bundle's image record.
+    ///
+    /// - Parameter record: The record to store.
+    /// - Throws: ``MacpoolError/fileSystem(operation:path:reason:)`` when the file cannot be
+    ///   written.
+    public func writeImageRecord(_ record: ImageRecord) throws(MacpoolError) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        let data: Data
+        do {
+            data = try encoder.encode(record) + Data("\n".utf8)
+        } catch {
+            throw .invalidBundle(path: imageFile.filePath, reason: "\(error)")
+        }
+        try FileSystem.write(data, to: imageFile, for: "writing the image record")
     }
 
     /// Replaces the bundle's settings file.

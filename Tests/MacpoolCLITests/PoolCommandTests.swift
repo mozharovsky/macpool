@@ -136,13 +136,41 @@ struct PoolCommandTests {
             queue: [
                 QueuedSummary(position: 1, source: "/vms/base", priority: 5, since: Date(timeIntervalSince1970: 0)),
             ],
+            images: [
+                ImageSummary(name: "broken", path: "/pool/images/broken", isReady: false, problem: "no record"),
+                ImageSummary(name: "empty", path: "/pool/images/empty", isReady: false),
+                ImageSummary(
+                    name: "xcode-27",
+                    path: "/pool/images/xcode-27",
+                    isReady: true,
+                    builds: ["xcode": "27A266a", "ios_runtime": "24A434"],
+                ),
+            ],
         )
         #expect(LeaseOutput.table(pool) == [
-            "slots 2, leases 2, queued 1",
+            "slots 2, leases 2, queued 1, images 3",
             "LEASE     PHASE     ADDRESS       EXPIRES               RESTARTS  SOURCE",
             "0a1b2c3d  ready     192.168.64.2  2027-01-15T08:00:00Z  0         /vms/base",
             "ffff0000  starting  -             -                     1         /vms/other",
             "queued 1: priority 5, since 1970-01-01T00:00:00Z, /vms/base",
+            "IMAGE     READY  BUILDS",
+            "broken    no     no record",
+            "empty     no     -",
+            "xcode-27  yes    ios_runtime 24A434, xcode 27A266a",
+        ])
+    }
+
+    /// Keeps a name whole when it has characters that take two UTF-16 units.
+    @Test func keepsWideCharactersInTable() {
+        let pool = PoolSummary(slots: 1, leases: [], queue: [], images: [
+            ImageSummary(name: "📦xcode", path: "/pool/images/📦xcode", isReady: true),
+            ImageSummary(name: "a", path: "/pool/images/a", isReady: false),
+        ])
+        #expect(LeaseOutput.table(pool) == [
+            "slots 1, leases 0, queued 0, images 2",
+            "IMAGE   READY  BUILDS",
+            "📦xcode  yes    -",
+            "a       no     -",
         ])
     }
 

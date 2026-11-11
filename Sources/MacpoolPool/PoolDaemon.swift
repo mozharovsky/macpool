@@ -467,9 +467,11 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, and queue, as the local user sees them.
+    /// - Returns: The slots, leases, queue, and images, as the local user sees them.
     public func summary() -> PoolSummary {
-        ledger.summary(for: .local)
+        var summary = ledger.summary(for: .local)
+        summary.images = configuration.directory.images()
+        return summary
     }
 
     // MARK: Clients
@@ -904,7 +906,12 @@ public actor PoolDaemon {
                 perform([])
                 reply(.renewed(summary), to: client)
             case .status:
-                reply(.status(ledger.summary(for: owner)), to: client)
+                var summary = ledger.summary(for: owner)
+                // A paired Mac gets no paths on this Mac's disk.
+                if owner == .local {
+                    summary.images = configuration.directory.images()
+                }
+                reply(.status(summary), to: client)
             case let .invite(address, priorityCeiling):
                 try reply(
                     invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),
@@ -1009,11 +1016,11 @@ public actor PoolDaemon {
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
     ///   the host does not offer, asks for a shared directory or a priority above its ceiling, or
     ///   already has the most requests in the queue. The errors of ``pairedRecord(_:)``,
-    ///   ``LeaseTerms/validate()``, and ``checkSource(of:named:)`` propagate.
+    ///   ``LeaseTerms/validate()``, and ``checkSource(of:offeredName:)`` propagate.
     private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> AdmittedRequest {
         guard case let .client(key) = owner else {
             try terms.validate()
-            try checkSource(of: terms, named: nil)
+            try checkSource(of: terms, offeredName: nil)
             return AdmittedRequest(terms: terms, sourceName: nil)
         }
         guard terms.sharedDirectory == nil else {
@@ -1034,7 +1041,7 @@ public actor PoolDaemon {
         var admitted = terms
         admitted.source = path
         try admitted.validate()
-        try checkSource(of: admitted, named: terms.source)
+        try checkSource(of: admitted, offeredName: terms.source)
         return AdmittedRequest(terms: admitted, sourceName: terms.source)
     }
 
@@ -1071,29 +1078,33 @@ public actor PoolDaemon {
     /// A request that fails these checks would only fail its boots, so it is refused before it
     /// takes a place in the queue.
     ///
-    /// If `name` is set, every error names the source by it and names no host path. The daemon
-    /// then logs the error of settings that cannot be read.
+    /// A source in the data directory's `images` directory needs an image record that marks it
+    /// ready. A source elsewhere may have no record.
+    ///
+    /// If `offeredName` is set, every error names the source by it and names no host path. The
+    /// daemon then logs the error of settings that cannot be read.
     ///
     /// - Parameters:
     ///   - terms: The requested terms with the source's path.
-    ///   - name: The name of the source that a paired client asked for, or `nil` for a local
-    ///     request.
-    /// - Throws: ``PoolError/library(_:)`` for a local request when the source's settings cannot
-    ///   be read, its own credential rotation did not finish, or another process holds it. A
-    ///   paired client's request gets ``PoolError/invalidRequest(reason:)`` for these instead.
-    ///   Every request gets ``PoolError/invalidRequest(reason:)`` when the source never booted,
-    ///   lies on another volume than the data directory, or the shared directory is missing.
-    private func checkSource(of terms: LeaseTerms, named name: String?) throws(PoolError) {
+    ///   - offeredName: The name of the source that a paired client asked for, or `nil` for a
+    ///     local request.
+    /// - Throws: ``PoolError/library(_:)`` for a local request when the source's settings or its
+    ///   image record cannot be read, its own credential rotation did not finish, or another
+    ///   process holds it. A paired client's request gets ``PoolError/invalidRequest(reason:)``
+    ///   for these instead. Every request gets ``PoolError/invalidRequest(reason:)`` when the
+    ///   source never booted, is an image without a record that marks it ready, lies on another
+    ///   volume than the data directory, or the shared directory is missing.
+    private func checkSource(of terms: LeaseTerms, offeredName: String?) throws(PoolError) {
         let source = terms.source
-        let shown = name ?? source
+        let shown = offeredName ?? source
         let bundle = VMBundle(root: URL(filePath: source))
         let settings: BundleSettings
         do {
             settings = try bundle.settings()
         } catch {
-            if let name {
+            if let offeredName {
                 configuration.logger.log(
-                    level: peerLogLevel(of: .unreadableSource(name), full: .warning),
+                    level: peerLogLevel(of: .unreadableSource(offeredName), full: .warning),
                     "An offered source cannot be read",
                     metadata: ["source": "\(source)", "reason": "\(error)"],
                 )
@@ -1102,15 +1113,32 @@ public actor PoolDaemon {
             throw .library(error)
         }
         guard settings.credentialRotation != .started else {
-            throw name == nil
+            throw offeredName == nil
                 ? .library(.credentialRotationIncomplete(path: source))
                 : .invalidRequest(reason: "the source \(shown) did not finish its credential rotation")
         }
         guard settings.hasBooted != false else {
             throw .invalidRequest(reason: "the source \(shown) never booted, so its clones have no guest account")
         }
+        let image: ImageRecord?
+        do {
+            image = try bundle.imageRecord()
+        } catch {
+            guard offeredName == nil else {
+                throw .invalidRequest(
+                    reason: "the image \(shown) has an unreadable image.json, so it cannot be leased",
+                )
+            }
+            throw .library(error)
+        }
+        if image == nil, isInImagesDirectory(bundle) {
+            throw .invalidRequest(reason: "the image \(shown) has no image.json, so it cannot be leased")
+        }
+        if let image, !image.isReady {
+            throw .invalidRequest(reason: "the image \(shown) did not pass its checks, so it cannot be leased")
+        }
         guard !BundleLock.isHeld(on: bundle) else {
-            throw name == nil
+            throw offeredName == nil
                 ? .library(.bundleInUse(path: source))
                 : .invalidRequest(reason: "another process uses the source \(shown)")
         }
@@ -1130,6 +1158,16 @@ public actor PoolDaemon {
                 throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
             }
         }
+    }
+
+    /// Reports whether a bundle lies directly in the data directory's `images` directory.
+    ///
+    /// - Parameter bundle: The bundle.
+    /// - Returns: Whether the bundle's parent directory is `images`, after resolving symbolic links.
+    private func isInImagesDirectory(_ bundle: VMBundle) -> Bool {
+        let parent = bundle.root.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent()
+        let images = configuration.directory.imagesDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        return parent.pathComponents == images.pathComponents
     }
 
     // MARK: Ledger actions
