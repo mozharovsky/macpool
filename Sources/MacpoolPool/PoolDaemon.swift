@@ -871,13 +871,15 @@ public actor PoolDaemon {
             guard let request, !isShutDown else {
                 break
             }
-            let keepsConnection = handle(request, from: client, owner: owner)
+            guard handle(request, from: client, owner: owner) else {
+                // A Mac that stops reading would hold delivered() open, and with it the
+                // connection. finish(within:) bounds the wait for the last reply.
+                await channel.finish()
+                break
+            }
             // Reading on only after the replies left keeps a client that stops reading from
             // queueing replies without end.
             await channel.delivered()
-            guard keepsConnection else {
-                break
-            }
         }
         channel.close()
         if let closed = invitation.close(for: client) {
