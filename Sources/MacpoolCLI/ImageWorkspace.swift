@@ -249,8 +249,8 @@ struct ImageWorkspace {
     /// Copies a file with `copyfile` and stops the copy once a signal arrives.
     ///
     /// A clone ends at once and calls no callback. A data copy calls the status callback after
-    /// each write, and the callback stops the copy once `interrupted` is set. If the copy stops,
-    /// its partial file stays at `destination`.
+    /// each write. The callback stops the copy once `interrupted` is set or a write fails. If the
+    /// copy stops, its partial file stays at `destination`.
     ///
     /// - Parameters:
     ///   - source: The file to copy.
@@ -274,12 +274,9 @@ struct ImageWorkspace {
             throw failure("no copy state")
         }
         defer { copyfile_state_free(state) }
-        let callback: copyfile_callback_t = { _, _, _, _, _, context in
-            guard let context else {
-                return COPYFILE_CONTINUE
-            }
-            let interrupted = Unmanaged<StopFlag>.fromOpaque(context).takeUnretainedValue()
-            return interrupted.isSet ? COPYFILE_QUIT : COPYFILE_CONTINUE
+        let callback: copyfile_callback_t = { _, stage, _, _, _, context in
+            let isInterrupted = context.map { Unmanaged<StopFlag>.fromOpaque($0).takeUnretainedValue().isSet }
+            return ImageWorkspace.copyDecision(stage: stage, isInterrupted: isInterrupted ?? false)
         }
         let status = withExtendedLifetime(interrupted) {
             copyfile_state_set(
@@ -302,6 +299,18 @@ struct ImageWorkspace {
             }
             throw failure(String(cString: strerror(code)))
         }
+    }
+
+    /// Decides whether a copy goes on after one of its steps.
+    ///
+    /// - Parameters:
+    ///   - stage: The `copyfile` stage of the step, such as `COPYFILE_PROGRESS` or `COPYFILE_ERR`.
+    ///   - isInterrupted: Whether a signal set the build's flag.
+    /// - Returns: `COPYFILE_QUIT` after a failed step or a signal, otherwise `COPYFILE_CONTINUE`.
+    static func copyDecision(stage: Int32, isInterrupted: Bool) -> Int32 {
+        // After a failed write, COPYFILE_CONTINUE makes copyfile write again. A full disk then
+        // keeps it retrying forever.
+        stage == COPYFILE_ERR || isInterrupted ? COPYFILE_QUIT : COPYFILE_CONTINUE
     }
 
     /// Records the build's outcome in the clone and moves the clone to ``image``.
