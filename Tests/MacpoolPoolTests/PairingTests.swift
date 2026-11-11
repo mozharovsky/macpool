@@ -316,19 +316,27 @@ struct PairingTests {
     }
 
     /// Sends a Mac that pairs a failure instead of a reply that names a host path. Here the host's
-    /// name for clients is the home directory.
+    /// name for clients is the home directory. The Mac pairs once before and once after the host
+    /// records it.
     @Test func keepsHostPathsFromMacsThatPair() async throws {
         let host = try await PairingHost(name: FileManager.default.homeDirectoryForCurrentUser
             .path(percentEncoded: false))
-        let invitation = try await host.invite()
-        let hidden = PoolError.daemonRefused(
-            message: "the host could not complete the request. The host's log has the reason",
-        )
-        await #expect(throws: hidden) {
-            try await PoolClient.pair(using: invitation.code, name: "runner", directory: host.clientDirectory())
+        let directory = try host.clientDirectory()
+        let first = try await host.invite()
+        let hidden = "the host could not complete the request. The host's log has the reason"
+        await #expect(throws: PoolError.daemonRefused(message: hidden)) {
+            try await PoolClient.pair(using: first.code, name: "runner", directory: directory)
         }
-        #expect(!host.fixture.logs.entries("A reply to a paired Mac named a host path").isEmpty)
-        invitation.channel.close()
+        // The host recorded the Mac. The second request therefore arrives on a paired connection.
+        let second = try await host.invite()
+        let identity = try MacIdentity.loadOrCreate(in: directory)
+        let channel = try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        try channel.send(PoolRequest.pair(secret: Base32.encode(second.code.secret), name: "runner"))
+        #expect(try await next(channel) == .failure(hidden))
+        #expect(host.fixture.logs.entries("A reply to a paired Mac named a host path").count == 2)
+        channel.close()
+        first.channel.close()
+        second.channel.close()
         await host.stop()
     }
 

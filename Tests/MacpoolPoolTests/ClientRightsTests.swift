@@ -197,17 +197,17 @@ struct ClientRightsTests {
     }
 
     /// Replaces a reply to a paired client that names a host path with a failure, and logs it.
-    /// Only a source that the host offers under a name with a host path brings such a reply.
+    /// A source name cannot hold a path. The test therefore passes replies to the check directly.
     ///
-    /// The host offers the path in its decomposed form. The names hold the precomposed path,
-    /// alone and before a combining mark, as a file URL, and percent-encoded from either form.
-    /// Two more names are a file URL to another path and a path that starts with `~/`.
+    /// The host offers a source at a decomposed path. The texts hold the precomposed path, alone
+    /// and before a combining mark, as a file URL, and percent-encoded from either form. Two more
+    /// texts are a file URL to another path and a path that starts with `~/`.
     @Test func replacesRepliesThatNameHostPaths() async throws {
         let pool = try PoolFixture()
         let path = try pool.makeSource(named: "j\u{FC} rgen")
         let precomposed = String(path.dropLast()).precomposedStringWithCanonicalMapping
         let url = URL(filePath: path)
-        let names = try [
+        let texts = try [
             precomposed,
             precomposed + "\u{301}",
             "\(url)",
@@ -216,25 +216,31 @@ struct ClientRightsTests {
             "file:///elsewhere",
             "~/elsewhere",
         ]
-        // Swift compares strings by canonical equivalence. Each name must differ in more than its
-        // normalization form.
-        try #require(Set(names).count == names.count)
-        let offered = Dictionary(uniqueKeysWithValues: names.map { ($0, path.decomposedStringWithCanonicalMapping) })
-        let daemon = try await pool.start(offeredSources: offered)
-        for name in names {
-            let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
-            try remote.send(PoolRequest.lease(LeaseTerms(source: name, timeToLive: 60)))
-            #expect(
-                try await next(remote) ==
-                    .failure("the host could not complete the request. The host's log has the reason"),
-                "\(name)",
-            )
-            // The lease ends with its connection. A free slot keeps the next request from waiting.
-            remote.close()
-            #expect(await eventually { await daemon.summary().leases.isEmpty })
+        let daemon = try await pool.start(offeredSources: ["base": path.decomposedStringWithCanonicalMapping])
+        let paired = try LeaseLedgerTests.paired("a")
+        let hidden = PoolReply.failure("the host could not complete the request. The host's log has the reason")
+        for text in texts {
+            #expect(await daemon.visible(.failure(text), to: paired) == hidden, "\(text)")
+            #expect(await daemon.visible(.failure(text), to: .local) == .failure(text), "\(text)")
         }
-        #expect(pool.logs.entries("A reply to a paired Mac named a host path").count >= names.count)
+        #expect(await daemon.visible(.failure("base"), to: paired) == .failure("base"))
+        #expect(pool.logs.entries("A reply to a paired Mac named a host path").count == texts.count)
         await daemon.shutdown()
+    }
+
+    /// Refuses an offered source with a slash in its name or with a relative path.
+    @Test func refusesOfferedSourcesThatCouldNameAPath() throws {
+        let pool = try PoolFixture()
+        for name in ["~/base", "file://base", "team/base", "a/\u{301}b"] {
+            let refusal = PoolError.invalidRequest(reason: "the offered source \"\(name)\" needs a name without \"/\"")
+            #expect(throws: refusal, "\(name)") {
+                try pool.daemon(offeredSources: [name: pool.source])
+            }
+        }
+        let relative = PoolError.invalidRequest(reason: "the offered source \"base\" needs an absolute path")
+        #expect(throws: relative) {
+            try pool.daemon(offeredSources: ["base": "base"])
+        }
     }
 
     /// Returns the text of an invalid request's failure.

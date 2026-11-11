@@ -58,6 +58,10 @@ public actor PoolDaemon {
         ///
         /// Each value is the bundle's absolute path. An empty dictionary leaves paired clients
         /// without sources.
+        ///
+        /// The daemon replaces every reply to a paired client that names a host path. A name
+        /// therefore has no `/`. Otherwise a name could hold a path, and every reply about its
+        /// source would fail.
         public var offeredSources: [String: String]
 
         /// How the daemon listens for paired Macs, or `nil` when it serves only the local socket.
@@ -307,7 +311,8 @@ public actor PoolDaemon {
     ///
     /// - Parameter configuration: The settings and collaborators.
     /// - Throws: ``PoolError/daemonRunning(path:)`` when another daemon serves the directory,
-    ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range,
+    ///   ``PoolError/invalidRequest(reason:)`` when the policy's slot count is out of range or an
+    ///   offered source has a name with `/` or a path that is not absolute,
     ///   ``PoolError/insecureDirectory(path:reason:)`` when another user could control the
     ///   directory, ``PoolError/unsupportedStateVersion(path:version:)`` when the state file has a
     ///   format version that this build does not read, or another ``PoolError`` when the directory
@@ -315,6 +320,16 @@ public actor PoolDaemon {
     public init(configuration: Configuration) throws(PoolError) {
         guard (1 ... PoolPolicy.maximumSlots).contains(configuration.policy.slots) else {
             throw .invalidRequest(reason: "the daemon takes 1 to \(PoolPolicy.maximumSlots) slots")
+        }
+        for (name, path) in configuration.offeredSources {
+            // A slash and a combining mark after it form one Character. The check therefore reads
+            // bytes.
+            guard !name.utf8.contains(UInt8(ascii: "/")) else {
+                throw .invalidRequest(reason: "the offered source \"\(name)\" needs a name without \"/\"")
+            }
+            guard path.hasPrefix("/") else {
+                throw .invalidRequest(reason: "the offered source \"\(name)\" needs an absolute path")
+            }
         }
         try configuration.directory.prepare()
         lock = try DaemonLock(directory: configuration.directory)
@@ -932,7 +947,7 @@ public actor PoolDaemon {
     ///   - reply: The reply to check.
     ///   - owner: Who the receiving client acts for.
     /// - Returns: The reply, or a failure that names no path.
-    private func visible(_ reply: PoolReply, to owner: LeaseOwner) -> PoolReply {
+    func visible(_ reply: PoolReply, to owner: LeaseOwner) -> PoolReply {
         guard owner != .local else {
             return reply
         }
