@@ -242,6 +242,8 @@ struct PoolDaemonTests {
             .lease(pool.terms(timeToLive: 0)),
             .lease(LeaseTerms(source: fresh.root.path(percentEncoded: false), timeToLive: 60)),
             .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: missing)),
+            .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: pool.root.url.path())),
+            .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: pool.source)),
             .release(#require(LeaseID("0a1b2c3d"))),
             .renew(#require(LeaseID("0a1b2c3d"))),
             .attach(#require(LeaseID("0a1b2c3d"))),

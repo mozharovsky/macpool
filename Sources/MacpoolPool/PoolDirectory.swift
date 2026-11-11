@@ -54,6 +54,73 @@ public struct PoolDirectory: Sendable, Hashable {
         return resolve(parent).appending(path: url.lastPathComponent, directoryHint: .notDirectory)
     }
 
+    /// Checks that a shared directory keeps the guest away from the data directory and a source.
+    ///
+    /// The check refuses a shared directory that is the data directory, contains it, or lies
+    /// inside it. It also refuses one that is the source or contains it. It compares the paths
+    /// after resolving symbolic links and firmlinks, and it ignores letter case and the Unicode
+    /// normalization form.
+    ///
+    /// The check reads the paths once. The VM opens the shared directory by its path when it
+    /// boots. If a directory on that path is replaced in between, the VM shares what the path
+    /// names then.
+    ///
+    /// - Parameters:
+    ///   - shared: The absolute path of the shared directory.
+    ///   - source: The absolute path of the bundle that the lease clones, or `nil` for none.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the check refuses the directory. The
+    ///   reason names the paths and a way out.
+    public func checkShare(_ shared: String, source: String? = nil) throws(PoolError) {
+        let share = Self.physicalComponents(of: shared)
+        let data = Self.physicalComponents(of: root.path(percentEncoded: false))
+        let reach = "The guest could change the images, clones, and pool state in it."
+        if data.starts(with: share) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes macpool's data directory \(root.path(percentEncoded: false)). \
+            \(reach) Share a narrower directory.
+            """)
+        }
+        if share.starts(with: data) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) lies inside macpool's data directory \(root.path(percentEncoded: false)). \
+            \(reach) Share a directory outside it.
+            """)
+        }
+        if let source, Self.physicalComponents(of: source).starts(with: share) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes the source \(source). The guest could change the source, \
+            and later clones would copy the change. Share a narrower directory.
+            """)
+        }
+    }
+
+    /// Splits a path into components after resolving symbolic links and firmlinks.
+    ///
+    /// The kernel names an open directory by its path on its volume, in the letter case and
+    /// normalization form that the volume stores. The components then pass through
+    /// ``PoolDaemon/caselessBytes(of:)`` for volumes that keep the spelling of a request. The
+    /// components after the longest existing prefix stay as written.
+    ///
+    /// - Parameter path: An absolute path.
+    /// - Returns: The components as case-folded, decomposed UTF-8 bytes.
+    private static func physicalComponents(of path: String) -> [ArraySlice<UInt8>] {
+        let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        if descriptor >= 0 {
+            defer { close(descriptor) }
+            var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
+            if fcntl(descriptor, F_GETPATH_NOFIRMLINK, &buffer) != -1 {
+                let resolved = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+                return PoolDaemon.caselessBytes(of: resolved).split(separator: UInt8(ascii: "/"))
+            }
+        }
+        let url = URL(filePath: path)
+        let parent = url.deletingLastPathComponent().path(percentEncoded: false)
+        guard parent.count < path.count else {
+            return PoolDaemon.caselessBytes(of: path).split(separator: UInt8(ascii: "/"))
+        }
+        return physicalComponents(of: parent) + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]
+    }
+
     /// The default data directory, `~/Library/Application Support/macpool`.
     public static var standard: PoolDirectory {
         let support = FileManager.default.homeDirectoryForCurrentUser

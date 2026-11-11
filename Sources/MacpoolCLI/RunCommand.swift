@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import MacpoolPool
 import MacpoolVM
 
 /// Boots a bundle headless, waits for its network, and stops it on request.
@@ -72,19 +73,23 @@ struct RunCommand: AsyncParsableCommand {
 
     /// Boots the VM, measures the time to its network and SSH, holds it, and stops it.
     ///
-    /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
-    ///   fails, or the VM stops early.
+    /// - Throws: ``CommandError`` when the shared directory overlaps the default data directory,
+    ///   the bundle is in use, the boot record rules out the provisioning choice, the VM cannot
+    ///   start, a step times out, the credential rotation fails, or the VM stops early.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
-    ///   fails, or the VM stops early.
+    /// - Throws: ``CommandError`` when the shared directory overlaps the default data directory,
+    ///   the bundle is in use, the boot record rules out the provisioning choice, the VM cannot
+    ///   start, a step times out, the credential rotation fails, or the VM stops early.
     private func perform() async throws(CommandError) {
+        // A VM outside the daemon still must not reach the daemon's images and clones.
+        if let shared = sharing.absolutePath {
+            try pool { () throws(PoolError) in try PoolDirectory.standard.checkShare(shared) }
+        }
         let target = VMBundle(root: URL(filePath: bundle))
         let stopRequest = target.stopRequest.path(percentEncoded: false)
         let session = MachineSession(
