@@ -85,29 +85,43 @@ public final class GuestSession: Sendable {
     /// Each call reads the account file again. If the file changes, later calls use the new
     /// password.
     ///
-    /// Cancelling the calling task ends the connection and throws
-    /// ``MacpoolError/guestCommandCancelled``. The command in the guest keeps running until it ends
-    /// or until it writes to its standard output or standard error. That write ends it. The guest's
-    /// state after a cancellation is unknown.
+    /// If the time limit passes, the call ends the connection and throws
+    /// ``MacpoolError/guestCommandTimedOut(limit:output:errorOutput:)``. Cancelling the calling task
+    /// ends the connection and throws ``MacpoolError/guestCommandCancelled``. In both cases the
+    /// command in the guest keeps running until it ends or until it writes to its standard output
+    /// or standard error. That write ends it. The guest's state afterward is unknown.
+    ///
+    /// For example, this call stops waiting after ten minutes.
+    ///
+    /// ```swift
+    /// let result = try await session.run(
+    ///     "/usr/bin/xcodebuild -runFirstLaunch",
+    ///     asRoot: true,
+    ///     timeLimit: .seconds(600),
+    /// )
+    /// ```
     ///
     /// - Parameters:
     ///   - command: The command line that `/bin/sh` runs in the guest.
     ///   - input: The command's standard input. Pass secrets here rather than in `command`.
     ///   - asRoot: Whether `sudo` runs the command as root. If the password is wrong, `sudo` reads
     ///     the marker and the first line of `input` as further attempts and fails.
+    ///   - timeLimit: The longest time the call may take, including the SSH login, or `nil` for no
+    ///     limit.
     /// - Returns: The command's outputs and exit status. A command that fails is a result rather
     ///   than an error.
     /// - Throws: ``MacpoolError/invalidBundle(path:reason:)`` when the account's user name needs
     ///   shell quoting or, for a root command, its password holds a line break.
     ///   ``MacpoolError/passwordlessSudo(path:)`` when `sudo` runs a root command without the
     ///   password. ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or reading its
-    ///   output fails, and
-    ///   ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled. Another
-    ///   ``MacpoolError`` when the account file cannot be read.
+    ///   output fails. ``MacpoolError/guestCommandTimedOut(limit:output:errorOutput:)`` when the
+    ///   time limit passes, and ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   cancelled. Another ``MacpoolError`` when the account file cannot be read.
     public func run(
         _ command: String,
         input: String = "",
         asRoot: Bool = false,
+        timeLimit: Duration? = nil,
     ) async throws(MacpoolError) -> GuestCommandResult {
         let accountFile = bundle.guestAccountFile
         let account = try GuestAccount.load(from: accountFile)
@@ -136,6 +150,7 @@ public final class GuestSession: Sendable {
             accountFile: accountFile,
             knownHosts: knownHosts,
             trustsFirstKey: false,
+            timeLimit: timeLimit,
         )
         let skippedPassword = result.status == .exited(Self.passwordlessSudoStatus)
             && result.errorOutput.contains(Self.passwordlessSudoMessage(marker: marker))

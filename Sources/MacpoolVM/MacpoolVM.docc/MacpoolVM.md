@@ -36,7 +36,7 @@ Login, and skips Setup Assistant. The host then finds the guest's address in its
 
 A ``GuestSession`` runs commands in a ready guest over SSH. It logs in as the bundle's account,
 accepts only the pinned host key, and runs a root command through `sudo` with the password on
-standard input.
+standard input. A call can take a time limit.
 
 ### Requirements
 

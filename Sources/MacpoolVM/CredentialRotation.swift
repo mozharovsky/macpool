@@ -381,6 +381,8 @@ private struct Login<Shell: GuestCommandRunner> {
                         accountFile: accountFile,
                         knownHosts: knownHosts,
                         trustsFirstKey: trustsFirstKey,
+                        // The rotation's own deadline covers every step, including the logins.
+                        timeLimit: nil,
                     ))
                 } catch {
                     return .failed(error)

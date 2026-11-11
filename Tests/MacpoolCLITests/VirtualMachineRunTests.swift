@@ -159,6 +159,18 @@ struct VirtualMachineRunTests {
         #expect(long.isOutputTruncated)
         #expect(long.output.hasSuffix("aend\n"))
 
+        // The limit ends the connection. The command's first write afterward ends the command.
+        let late = "/tmp/macpool-time-limit-\(UUID().uuidString)"
+        let started = ContinuousClock.now
+        let timedOut = MacpoolError.guestCommandTimedOut(limit: .seconds(10), output: "started\n", errorOutput: "")
+        await #expect(throws: timedOut) {
+            try await session.run("echo started; sleep 20; echo late; touch \(late)", timeLimit: .seconds(10))
+        }
+        #expect(ContinuousClock.now - started < .seconds(20))
+        try await Task.sleep(for: .seconds(20))
+        let leftover = try await session.run("test ! -e \(late) || { rm -f \(late); exit 1; }")
+        #expect(leftover.succeeded, "the command kept running after its first write past the limit")
+
         // With a NOPASSWD rule, sudo skips the password line. The root script then discards it.
         let rule = "\(account.username) ALL=(ALL) NOPASSWD: ALL"
         let file = "/etc/sudoers.d/macpool-test"

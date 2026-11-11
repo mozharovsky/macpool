@@ -38,6 +38,8 @@ final class ScriptedGuest: GuestCommandRunner {
         let knownHosts: String
         /// Whether the login trusted an unpinned key.
         let trustsFirstKey: Bool
+        /// The call's time limit, or `nil` for none.
+        let timeLimit: Duration?
     }
 
     /// The guest's mutable record.
@@ -106,6 +108,7 @@ final class ScriptedGuest: GuestCommandRunner {
     ///   - accountFile: The account file.
     ///   - knownHosts: The `known_hosts` file.
     ///   - trustsFirstKey: Whether the login trusts an unpinned key.
+    ///   - timeLimit: The call's time limit. The guest records it and does not enforce it.
     /// - Returns: The scripted result.
     /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when no reply is left.
     func run(
@@ -115,6 +118,7 @@ final class ScriptedGuest: GuestCommandRunner {
         accountFile: URL,
         knownHosts: URL,
         trustsFirstKey: Bool,
+        timeLimit: Duration?,
     ) async throws(MacpoolError) -> GuestCommandResult {
         let pins = (try? String(contentsOf: knownHosts, encoding: .utf8)) ?? ""
         let call = Call(
@@ -124,6 +128,7 @@ final class ScriptedGuest: GuestCommandRunner {
             accountFile: accountFile,
             knownHosts: pins,
             trustsFirstKey: trustsFirstKey,
+            timeLimit: timeLimit,
         )
         let reply = record.withLock { record -> Reply? in
             record.calls.append(call)

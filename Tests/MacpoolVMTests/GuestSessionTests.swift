@@ -23,6 +23,21 @@ struct GuestSessionTests {
         #expect(call.accountFile == bundle.guestAccountFile)
         #expect(call.knownHosts == "macpool-guest ssh-ed25519 \(HostKeyTests.first)\n")
         #expect(!call.trustsFirstKey)
+        #expect(call.timeLimit == nil)
+    }
+
+    /// Passes the time limit to the runner and throws the runner's time limit error.
+    @Test func passesTimeLimit() async throws {
+        let directory = try TemporaryDirectory()
+        let bundle = try VMBundleTests.makeSource(in: directory, hasBooted: true, rotation: .finished)
+        let timedOut = MacpoolError.guestCommandTimedOut(limit: .seconds(5), output: "a", errorOutput: "b")
+        let guest = try ScriptedGuest(directory: directory, replies: [.failure(timedOut)])
+        let session = try GuestSession(bundle: bundle, runner: guest)
+
+        await #expect(throws: timedOut) {
+            try await session.run("sleep 9", asRoot: true, timeLimit: .seconds(5))
+        }
+        #expect(guest.calls.first?.timeLimit == .seconds(5))
     }
 
     /// Runs a root command through `sudo` and a shell that checks a new marker after the password.
