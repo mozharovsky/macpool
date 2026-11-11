@@ -117,42 +117,22 @@ struct XcodeImageCommand: AsyncParsableCommand {
         }
         let base = VMBundle(root: URL(filePath: from).absoluteURL)
         let workspace = ImageWorkspace(directory: location.directory, name: name)
-        let settings = try workspace.prepare(base: base)
-        try workspace.cloneBase(base)
-        defer { workspace.removeInputs() }
-
+        // The watch starts before the clone, so a signal during the copy still reaches cleanup.
+        let interrupted = StopFlag()
+        let signals = SignalWatch { _ in interrupted.set() }
+        defer { signals.cancel() }
         let deviceName = device
-        let build = Task { () async -> Result<[String: String], CommandError> in
-            do throws(CommandError) {
-                try workspace.stageInputs(xcode: xcodeURL, runtime: runtimeURL)
-                return try await .success(buildInGuest(
-                    workspace.building,
-                    inputs: workspace.inputs,
-                    device: deviceName,
-                ))
-            } catch {
-                return .failure(error)
-            }
+        try await workspace.build(
+            from: base,
+            xcode: xcodeURL,
+            runtime: runtimeURL,
+            keepFailed: keepFailed,
+            interrupted: interrupted,
+        ) { building, inputs async throws(CommandError) in
+            try await buildInGuest(building, inputs: inputs, device: deviceName, interrupted: interrupted)
         }
-        let signals = SignalWatch { _ in build.cancel() }
-        let outcome = await build.value
-        signals.cancel()
-
-        switch outcome {
-        case var .success(builds):
-            builds["macos"] = settings.build
-            try workspace.finish(ImageRecord(isReady: true, builds: builds, createdAt: Date()))
-            Report.measure("image_seconds", Report.seconds(clock.now - started, decimals: 1))
-            Report.line("image=\(workspace.image.path(percentEncoded: false))")
-        case let .failure(error):
-            if keepFailed, (try? workspace.finish(ImageRecord(isReady: false, createdAt: Date()))) != nil {
-                Report.line("kept the failed image \(workspace.image.path(percentEncoded: false))")
-            } else {
-                workspace.discard()
-                Report.line("removed the incomplete image \(workspace.building.root.path(percentEncoded: false))")
-            }
-            throw build.isCancelled ? .interrupted : error
-        }
+        Report.measure("image_seconds", Report.seconds(clock.now - started, decimals: 1))
+        Report.line("image=\(workspace.image.path(percentEncoded: false))")
     }
 
     /// Boots the clone, runs the build in the guest, and waits until the guest shuts down.
@@ -161,14 +141,16 @@ struct XcodeImageCommand: AsyncParsableCommand {
     ///   - building: The clone of the base.
     ///   - inputs: The directory that the guest reads the archive and the runtime from.
     ///   - device: The simulator to boot once, or `nil` for the first available iPhone.
+    ///   - interrupted: The flag that a signal sets. Once it is set, the VM stops.
     /// - Returns: The builds of Xcode and of the simulator runtime.
     /// - Throws: ``CommandError`` when the VM does not become ready, a step fails, the guest does
-    ///   not shut down, or the task is cancelled.
+    ///   not shut down, or a signal stops the VM.
     private func buildInGuest(
         _ building: VMBundle,
         inputs: URL,
         device: String?,
-    ) async throws(CommandError) -> [String: String] {
+        interrupted: StopFlag,
+    ) async throws(CommandError) -> XcodeImageBuilds {
         let stop = StopFlag()
         let (addresses, continuation) = AsyncStream.makeStream(of: String.self)
         let session = MachineSession(
@@ -180,7 +162,7 @@ struct XcodeImageCommand: AsyncParsableCommand {
             hold: nil,
             stopMode: .immediate,
             logging: logging,
-            isStopRequested: { stop.isSet },
+            isStopRequested: { stop.isSet || interrupted.isSet },
             onReady: { continuation.yield($0) },
         )
         let running = Task { () async -> Result<MachineSession.Ending, CommandError> in
@@ -191,54 +173,50 @@ struct XcodeImageCommand: AsyncParsableCommand {
                 return .failure(error)
             }
         }
-        return try await withTaskCancellationHandler { () async throws(CommandError) -> [String: String] in
-            var ready = addresses.makeAsyncIterator()
-            guard let address = await ready.next() else {
-                stop.set()
-                if case let .failure(error) = await running.value {
-                    throw error
-                }
-                throw Task.isCancelled ? .interrupted : .invalidValue("the VM stopped before it was ready")
-            }
-            let builds: [String: String]
-            do throws(CommandError) {
-                let guest = try library { () throws(MacpoolError) in
-                    try GuestSession(bundle: building, address: address)
-                }
-                builds = try await XcodeImageSteps(guest: guest, deviceName: device).run()
-                Report.line("step: shutting down the guest")
-                // The delay lets ssh report the status before the guest drops the connection.
-                let shutdown = try await library { () async throws(MacpoolError) in
-                    try await guest.runStep(
-                        "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
-                        asRoot: true,
-                        timeLimit: .seconds(60),
-                    )
-                }
-                guard shutdown.succeeded else {
-                    throw .imageStep(step: "shutting down the guest", reason: shutdown.failureSummary)
-                }
-            } catch {
-                stop.set()
-                _ = await running.value
-                throw error
-            }
-            let watchdog = Task {
-                try? await Task.sleep(for: Self.shutdownTimeout)
-                stop.set()
-            }
-            let ending = await running.value
-            watchdog.cancel()
-            switch ending {
-            case .success(.guestStopped):
-                return builds
-            case .success(.stopped):
-                throw .imageStep(step: "shutting down the guest", reason: "the guest did not stop within 180 s")
-            case let .failure(error):
-                throw error
-            }
-        } onCancel: {
+        var ready = addresses.makeAsyncIterator()
+        guard let address = await ready.next() else {
             stop.set()
+            if case let .failure(error) = await running.value {
+                throw error
+            }
+            throw .invalidValue("the VM stopped before it was ready")
+        }
+        let builds: XcodeImageBuilds
+        do throws(CommandError) {
+            let guest = try library { () throws(MacpoolError) in
+                try GuestSession(bundle: building, address: address)
+            }
+            builds = try await XcodeImageSteps(guest: guest, deviceName: device).run()
+            Report.line("step: shutting down the guest")
+            // The delay lets ssh report the status before the guest drops the connection.
+            let shutdown = try await library { () async throws(MacpoolError) in
+                try await guest.runStep(
+                    "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+                    asRoot: true,
+                    timeLimit: .seconds(60),
+                )
+            }
+            guard shutdown.succeeded else {
+                throw .imageStep(step: "shutting down the guest", reason: shutdown.failureSummary)
+            }
+        } catch {
+            stop.set()
+            _ = await running.value
+            throw error
+        }
+        let watchdog = Task {
+            try? await Task.sleep(for: Self.shutdownTimeout)
+            stop.set()
+        }
+        let ending = await running.value
+        watchdog.cancel()
+        switch ending {
+        case .success(.guestStopped):
+            return builds
+        case .success(.stopped):
+            throw .imageStep(step: "shutting down the guest", reason: "the guest did not stop within 180 s")
+        case let .failure(error):
+            throw error
         }
     }
 

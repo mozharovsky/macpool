@@ -11,7 +11,8 @@ struct XcodeImageTests {
     @Test func runsStepsInOrder() async throws {
         let guest = ScriptedGuest()
         let builds = try await XcodeImageSteps(guest: guest, deviceName: nil).run()
-        #expect(builds == ["xcode": "27A266a", "ios_runtime": "24A434"])
+        #expect(builds == XcodeImageBuilds(xcode: "27A266a", iosRuntime: "24A434"))
+        #expect(builds.record(macOS: "26B123") == ["xcode": "27A266a", "ios_runtime": "24A434", "macos": "26B123"])
 
         let calls = await guest.calls
         let rootCommands = calls.filter(\.asRoot).map(\.command)
@@ -96,14 +97,16 @@ struct XcodeImageTests {
         }
     }
 
-    /// Fails when the installed Xcode is not the archive's build.
+    /// Fails when the installed Xcode is not the archive's build, even if it extends that build.
     @Test func checksXcodeVersion() async {
-        let guest = ScriptedGuest(replies: ["xcodebuild -version": .success("Xcode 26.0\nBuild version 17A1\n")])
-        await #expect(throws: CommandError.imageStep(
-            step: "checking the Xcode version",
-            reason: "xcodebuild reports Xcode 26.0\nBuild version 17A1\n",
-        )) {
-            try await XcodeImageSteps(guest: guest, deviceName: nil).run()
+        for output in ["Xcode 26.0\nBuild version 17A1\n", "Xcode 27.0\nBuild version 27A266a1\n"] {
+            let guest = ScriptedGuest(replies: ["xcodebuild -version": .success(output)])
+            await #expect(throws: CommandError.imageStep(
+                step: "checking the Xcode version",
+                reason: "xcodebuild reports \(output)",
+            )) {
+                try await XcodeImageSteps(guest: guest, deviceName: nil).run()
+            }
         }
     }
 
@@ -183,7 +186,7 @@ struct XcodeImageTests {
         #expect(try folder.base.imageRecord() == nil)
         #expect(try workspace.building.settings().credentialRotation == .pending)
 
-        try workspace.stageInputs(xcode: folder.xcode, runtime: folder.runtime)
+        try workspace.stageInputs(xcode: folder.xcode, runtime: folder.runtime, interrupted: StopFlag())
         let staged = try FileManager.default.contentsOfDirectory(atPath: workspace.inputs.path(percentEncoded: false))
         #expect(staged.sorted() == ["Runtime.dmg", "Xcode.xip"])
         #expect(FileManager.default
@@ -196,6 +199,100 @@ struct XcodeImageTests {
         #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
         #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
         #expect(folder.directory.images().map(\.name) == ["xcode"])
+    }
+
+    /// Stages the target of a symbolic link and stops before a copy once a signal arrived.
+    @Test func stagesInputs() throws {
+        let folder = try ImageFolder()
+        _ = try folder.workspace.prepare(base: folder.base)
+        let link = folder.base.root.deletingLastPathComponent().appending(path: "link.xip")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder.xcode)
+        try folder.workspace.stageInputs(xcode: link, runtime: folder.runtime, interrupted: StopFlag())
+        let staged = folder.workspace.inputs.appending(path: "Xcode.xip").path(percentEncoded: false)
+        #expect(try FileManager.default.attributesOfItem(atPath: staged)[.type] as? FileAttributeType == .typeRegular)
+        #expect(FileManager.default.contents(atPath: staged) == Data("xip".utf8))
+
+        folder.workspace.removeInputs()
+        let interrupted = StopFlag()
+        interrupted.set()
+        #expect(throws: CommandError.interrupted) {
+            try folder.workspace.stageInputs(xcode: folder.xcode, runtime: folder.runtime, interrupted: interrupted)
+        }
+        let left = try FileManager.default
+            .contentsOfDirectory(atPath: folder.workspace.inputs.path(percentEncoded: false))
+        #expect(left.isEmpty)
+    }
+
+    /// Publishes a ready image with the builds of the guest and the base.
+    @Test func buildsImage() async throws {
+        let folder = try ImageFolder()
+        let workspace = folder.workspace
+        try await workspace.build(
+            from: folder.base,
+            xcode: folder.xcode,
+            runtime: folder.runtime,
+            keepFailed: false,
+            interrupted: StopFlag(),
+        ) { building, inputs async throws(CommandError) in
+            #expect(building == workspace.building)
+            #expect(FileManager.default.fileExists(atPath: inputs.appending(path: "Runtime.dmg").path))
+            return XcodeImageBuilds(xcode: "27A266a", iosRuntime: "24A434")
+        }
+        let record = try #require(try VMBundle(root: workspace.image).imageRecord())
+        #expect(record.isReady)
+        #expect(record.builds == ["xcode": "27A266a", "ios_runtime": "24A434", "macos": "26B123"])
+        #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
+    }
+
+    /// Deletes the clone when a signal arrives during the clone, or keeps it with `keepFailed`.
+    @Test func cleansUpAfterSignal() async throws {
+        for keepFailed in [false, true] {
+            let folder = try ImageFolder()
+            let workspace = folder.workspace
+            let interrupted = StopFlag()
+            interrupted.set()
+            await #expect(throws: CommandError.interrupted) {
+                try await workspace.build(
+                    from: folder.base,
+                    xcode: folder.xcode,
+                    runtime: folder.runtime,
+                    keepFailed: keepFailed,
+                    interrupted: interrupted,
+                ) { _, _ async throws(CommandError) in
+                    Issue.record("the guest part ran after the signal")
+                    return XcodeImageBuilds(xcode: "1", iosRuntime: "1")
+                }
+            }
+            #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
+            #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
+            let kept = try VMBundle(root: workspace.image).imageRecord()
+            #expect(kept?.isReady == (keepFailed ? false : nil))
+        }
+    }
+
+    /// Deletes the clone and keeps the error when the image cannot be published.
+    @Test func cleansUpAfterFailedPublish() async throws {
+        let folder = try ImageFolder()
+        let workspace = folder.workspace
+        let error = await #expect(throws: CommandError.self) {
+            try await workspace.build(
+                from: folder.base,
+                xcode: folder.xcode,
+                runtime: folder.runtime,
+                keepFailed: false,
+                interrupted: StopFlag(),
+            ) { _, _ async throws(CommandError) in
+                // Another process takes the name while the guest builds.
+                try? FileManager.default.createDirectory(at: workspace.image, withIntermediateDirectories: true)
+                return XcodeImageBuilds(xcode: "27A266a", iosRuntime: "24A434")
+            }
+        }
+        guard case let .library(.fileSystem(operation, _, _)) = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
+        #expect(operation == "moving the image to")
+        #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
     }
 
     /// Deletes the clone of a failed build.

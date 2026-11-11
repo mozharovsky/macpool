@@ -34,7 +34,7 @@ extension GuestSession: ImageGuest {
     }
 }
 
-/// The guest side of `image xcode`, from the shared archive to a booted simulator.
+/// The guest side of `image xcode`, from the shared archive to an installed simulator runtime.
 ///
 /// The steps install Xcode from `Xcode.xip`, accept its license, install its first launch
 /// packages, add the simulator runtime from `Runtime.dmg`, and boot one simulator once. Checks
@@ -57,11 +57,10 @@ struct XcodeImageSteps {
 
     /// Runs the steps and the checks.
     ///
-    /// - Returns: The builds of Xcode and of the simulator runtime, keyed by `xcode` and
-    ///   `ios_runtime`.
+    /// - Returns: The builds of Xcode and of the simulator runtime.
     /// - Throws: ``CommandError/imageStep(step:reason:)`` when a step or a check fails, or
     ///   ``CommandError/library(_:)`` when a command cannot run or outlasts its time limit.
-    func run() async throws(CommandError) -> [String: String] {
+    func run() async throws(CommandError) -> XcodeImageBuilds {
         let shared = Self.sharedDirectory
         let work = Self.workDirectory
         // The guest mounts the share when the account logs in. That can happen after SSH is up.
@@ -106,7 +105,7 @@ struct XcodeImageSteps {
         try await step("shutting down \(device.name)", "/usr/bin/xcrun simctl shutdown \(device.udid)")
         try await check(build: build)
         try await step("removing the expanded archive", "rm -rf \(work)", asRoot: true)
-        return ["xcode": build, "ios_runtime": runtime.buildversion]
+        return XcodeImageBuilds(xcode: build, iosRuntime: runtime.buildversion)
     }
 
     /// Reads the build of the one app that the archive expanded to.
@@ -176,7 +175,8 @@ struct XcodeImageSteps {
     /// - Throws: ``CommandError/imageStep(step:reason:)`` when a check fails.
     private func check(build: String) async throws(CommandError) {
         let version = try await step("checking the Xcode version", "/usr/bin/xcodebuild -version")
-        guard version.contains("Build version \(build)") else {
+        let reported = version.split(whereSeparator: \.isNewline).first { $0.hasPrefix("Build version ") }
+        guard reported?.dropFirst("Build version ".count).trimmingCharacters(in: .whitespaces) == build else {
             throw .imageStep(step: "checking the Xcode version", reason: "xcodebuild reports \(version)")
         }
         try await step("checking the Xcode license", "/usr/bin/xcodebuild -license check")
@@ -216,6 +216,23 @@ struct XcodeImageSteps {
             throw .imageStep(step: name, reason: result.failureSummary)
         }
         return result.output
+    }
+}
+
+/// The builds that an Xcode image build installs.
+struct XcodeImageBuilds: Equatable {
+    /// The Xcode build, such as `27A266a`.
+    let xcode: String
+
+    /// The iOS simulator runtime build, such as `24A434`.
+    let iosRuntime: String
+
+    /// Creates the builds of an image record.
+    ///
+    /// - Parameter macOS: The guest's macOS build.
+    /// - Returns: The builds keyed by `xcode`, `ios_runtime`, and `macos`.
+    func record(macOS: String) -> [String: String] {
+        ["xcode": xcode, "ios_runtime": iosRuntime, "macos": macOS]
     }
 }
 

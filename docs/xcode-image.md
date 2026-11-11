@@ -2,7 +2,8 @@
 
 An image is a stopped VM that the daemon clones for leases, with software already installed.
 `macpool image xcode` builds one with Xcode and an iOS simulator runtime. A lease of the image
-reaches `xcodebuild` and a booted simulator without installing anything.
+runs `xcodebuild` and boots a simulator without installing anything. The build boots one simulator
+once and shuts it down, so the simulator in a lease starts from a stopped state.
 
 ## What you need
 

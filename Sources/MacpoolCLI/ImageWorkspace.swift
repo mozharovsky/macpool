@@ -119,16 +119,72 @@ struct ImageWorkspace {
         }
     }
 
+    /// Builds the image from a stopped base and publishes it as ``image``.
+    ///
+    /// The method clones the base, stages the inputs, and calls `inGuest` with the clone and
+    /// ``inputs``. If every step succeeds, the clone becomes ``image`` with a ready record. If a
+    /// step fails or `interrupted` is set, the method deletes the clone. With `keepFailed` it
+    /// publishes the clone with a record that is not ready instead. The method always deletes
+    /// ``inputs``.
+    ///
+    /// - Parameters:
+    ///   - base: The stopped bundle to clone.
+    ///   - xcode: The Xcode archive.
+    ///   - runtime: The simulator runtime disk image.
+    ///   - keepFailed: Whether a failed build keeps its clone.
+    ///   - interrupted: The flag that a signal sets.
+    ///   - inGuest: The guest part of the build. It returns the builds that the guest reports.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before the build ends.
+    ///   The errors of ``prepare(base:)``, ``cloneBase(_:)``, ``stageInputs(xcode:runtime:interrupted:)``,
+    ///   `inGuest`, and ``finish(_:)`` otherwise.
+    func build(
+        from base: VMBundle,
+        xcode: URL,
+        runtime: URL,
+        keepFailed: Bool,
+        interrupted: StopFlag,
+        inGuest: (VMBundle, URL) async throws(CommandError) -> XcodeImageBuilds,
+    ) async throws(CommandError) {
+        let settings = try prepare(base: base)
+        try cloneBase(base)
+        defer { removeInputs() }
+        let builds: XcodeImageBuilds
+        do throws(CommandError) {
+            try stageInputs(xcode: xcode, runtime: runtime, interrupted: interrupted)
+            try Self.check(interrupted)
+            builds = try await inGuest(building, inputs)
+            try Self.check(interrupted)
+        } catch {
+            if keepFailed, (try? finish(ImageRecord(isReady: false, createdAt: Date()))) != nil {
+                Report.line("kept the failed image \(image.path(percentEncoded: false))")
+            } else {
+                discard()
+                Report.line("removed the incomplete image \(building.root.path(percentEncoded: false))")
+            }
+            throw interrupted.isSet ? .interrupted : error
+        }
+        do throws(CommandError) {
+            try finish(ImageRecord(isReady: true, builds: builds.record(macOS: settings.build), createdAt: Date()))
+        } catch {
+            // An unpublished clone would block the next build with the same name.
+            discard()
+            throw error
+        }
+    }
+
     /// Puts the archive and the runtime in ``inputs`` under the names that the guest expects.
     ///
-    /// On the same APFS volume the files are clones and take no space. On another volume they are
-    /// copies.
+    /// The method copies the target of a symbolic link, because the guest cannot follow a link out
+    /// of the shared directory. On the same APFS volume the files are clones and take no space. On
+    /// another volume they are copies, and a signal takes effect only after the current copy.
     ///
     /// - Parameters:
     ///   - xcode: The Xcode archive.
     ///   - runtime: The simulator runtime disk image.
-    /// - Throws: ``CommandError/library(_:)`` when the directory or a file cannot be created.
-    func stageInputs(xcode: URL, runtime: URL) throws(CommandError) {
+    ///   - interrupted: The flag that a signal sets. The method checks it before each copy.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before a copy.
+    ///   ``CommandError/library(_:)`` when the directory or a file cannot be created.
+    func stageInputs(xcode: URL, runtime: URL, interrupted: StopFlag) throws(CommandError) {
         do {
             try FileManager.default.createDirectory(
                 at: inputs,
@@ -142,7 +198,9 @@ struct ImageWorkspace {
                 reason: "\(error.localizedDescription)",
             ))
         }
-        for (source, name) in [(xcode, "Xcode.xip"), (runtime, "Runtime.dmg")] {
+        for (link, name) in [(xcode, "Xcode.xip"), (runtime, "Runtime.dmg")] {
+            try Self.check(interrupted)
+            let source = link.resolvingSymlinksInPath()
             let destination = inputs.appending(path: name).path(percentEncoded: false)
             // COPYFILE_CLONE clones when the volume allows it and copies otherwise.
             guard copyfile(source.path(percentEncoded: false), destination, nil, copyfile_flags_t(COPYFILE_CLONE)) == 0
@@ -171,6 +229,16 @@ struct ImageWorkspace {
                 path: image.path(percentEncoded: false),
                 reason: "\(error.localizedDescription)",
             ))
+        }
+    }
+
+    /// Stops the build if a signal arrived.
+    ///
+    /// - Parameter interrupted: The flag that a signal sets.
+    /// - Throws: ``CommandError/interrupted`` when the flag is set.
+    private static func check(_ interrupted: StopFlag) throws(CommandError) {
+        if interrupted.isSet {
+            throw .interrupted
         }
     }
 
