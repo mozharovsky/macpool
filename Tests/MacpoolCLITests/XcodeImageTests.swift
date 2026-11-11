@@ -276,6 +276,68 @@ struct XcodeImageTests {
         }
     }
 
+    /// Accepts a symbolic link to a file and refuses a file that the user cannot read.
+    @Test func checksInputs() throws {
+        let folder = try ImageFolder()
+        let directory = folder.base.root.deletingLastPathComponent()
+        let link = directory.appending(path: "link.xip")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder.xcode)
+        #expect(throws: Never.self) {
+            try ImageWorkspace.checkInputs(xcode: link, runtime: folder.runtime)
+        }
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0],
+            ofItemAtPath: folder.runtime.path(percentEncoded: false),
+        )
+        #expect(throws: CommandError.invalidValue(
+            "--runtime \(folder.runtime.path(percentEncoded: false)) is not a readable file. "
+                + "Pass the .dmg disk image itself",
+        )) {
+            try ImageWorkspace.checkInputs(xcode: folder.xcode, runtime: folder.runtime)
+        }
+    }
+
+    /// Finishes the cleanup after `SIGHUP` when standard output is a closed terminal or a pipe
+    /// without a reader.
+    @Test(arguments: [false, true]) func cleansUpWithClosedOutput(throughPipe: Bool) async {
+        await #expect(processExitsWith: .success) { [throughPipe] in
+            // _exit skips the exit work of the harness and of stdio. That work would write to the closed output.
+            let output = throughPipe ? closedPipe() : closedTerminal()
+            guard dup2(output, STDOUT_FILENO) >= 0, dup2(output, STDERR_FILENO) >= 0 else {
+                _exit(2)
+            }
+            guard let folder = try? ImageFolder() else {
+                _exit(3)
+            }
+            let workspace = folder.workspace
+            do throws(CommandError) {
+                try await workspace.build(
+                    from: folder.base,
+                    xcode: folder.xcode,
+                    runtime: folder.runtime,
+                    keepFailed: false,
+                    watchSignals: XcodeImageCommand.watchSignals,
+                ) { _, _, interrupted async throws(CommandError) in
+                    kill(getpid(), SIGHUP)
+                    while !interrupted.isSet {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    throw .imageStep(step: "expanding Xcode", reason: "the VM stopped")
+                }
+                _exit(4)
+            } catch {
+                guard error == .interrupted else {
+                    _exit(5)
+                }
+            }
+            let manager = FileManager.default
+            let isClean = !manager.fileExists(atPath: workspace.building.root.path(percentEncoded: false))
+                && !manager.fileExists(atPath: workspace.inputs.path(percentEncoded: false))
+            try? manager.removeItem(at: folder.base.root.deletingLastPathComponent())
+            _exit(isClean ? 0 : 6)
+        }
+    }
+
     /// Accepts a base without a boot record, as the daemon does when it leases one.
     @Test func acceptsBaseWithoutBootRecord() throws {
         let legacy = try ImageFolder(hasBooted: nil)
@@ -379,8 +441,8 @@ struct XcodeImageTests {
         #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
     }
 
-    /// Watches signals before the clone, and deletes the clone after a signal or keeps it with
-    /// `keepFailed`.
+    /// Watches signals from before the clone until after the cleanup, and deletes the clone after
+    /// a signal or keeps it with `keepFailed`.
     @Test func cleansUpAfterSignal() async throws {
         for keepFailed in [false, true] {
             let folder = try ImageFolder()
@@ -400,7 +462,14 @@ struct XcodeImageTests {
                         )
                         // The signal arrives as soon as the watch exists. That moment is before the clone.
                         interrupted.set()
-                        return { stopped.set() }
+                        let inputs = workspace.inputs.path(percentEncoded: false)
+                        return {
+                            #expect(
+                                !FileManager.default.fileExists(atPath: inputs),
+                                "the watch stopped before the cleanup",
+                            )
+                            stopped.set()
+                        }
                     },
                 ) { _, _, _ async throws(CommandError) in
                     Issue.record("the guest part ran after the signal")
@@ -464,16 +533,19 @@ struct XcodeImageTests {
         #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
     }
 
-    /// Deletes the clone of a failed build, and reports a clone that it could not delete.
+    /// Deletes the clone and the inputs of a failed build, and reports when it could not.
     @Test func discardsClone() throws {
         let folder = try ImageFolder()
         _ = try folder.workspace.prepare(base: folder.base)
         try folder.workspace.cloneBase(folder.base)
+        try FileManager.default.createDirectory(at: folder.workspace.inputs, withIntermediateDirectories: false)
         let images = folder.directory.imagesDirectory.path(percentEncoded: false)
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images)
         #expect(!folder.workspace.discard())
+        #expect(!folder.workspace.removeInputs())
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images)
         #expect(folder.workspace.discard())
+        #expect(folder.workspace.removeInputs())
         #expect(!FileManager.default.fileExists(atPath: folder.workspace.building.root.path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: folder.base.root.path(percentEncoded: false)))
     }
@@ -484,6 +556,31 @@ struct XcodeImageTests {
     private static func noSignals(_: StopFlag) -> @Sendable () -> Void {
         {}
     }
+}
+
+/// Opens a terminal and closes its controlling side, as closing a terminal window does.
+///
+/// - Returns: The descriptor of the terminal's other side. A write to it fails with `EIO`.
+private func closedTerminal() -> Int32 {
+    var primary: Int32 = -1
+    var secondary: Int32 = -1
+    guard openpty(&primary, &secondary, nil, nil, nil) == 0 else {
+        _exit(7)
+    }
+    close(primary)
+    return secondary
+}
+
+/// Opens a pipe and closes its read end, as a `tee` that ended does.
+///
+/// - Returns: The write end. A write to it raises `SIGPIPE` or fails with `EPIPE`.
+private func closedPipe() -> Int32 {
+    var ends: [Int32] = [-1, -1]
+    guard pipe(&ends) == 0 else {
+        _exit(8)
+    }
+    close(ends[0])
+    return ends[1]
 }
 
 /// One recorded guest command.

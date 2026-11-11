@@ -117,16 +117,27 @@ struct XcodeImageCommand: AsyncParsableCommand {
             xcode: URL(filePath: xcode).absoluteURL,
             runtime: URL(filePath: runtime).absoluteURL,
             keepFailed: keepFailed,
-            watchSignals: { interrupted in
-                // Closing the terminal sends SIGHUP. Without a watch, it ends the build without cleanup.
-                let watch = SignalWatch(signals: SignalWatch.signals + [SIGHUP]) { _ in interrupted.set() }
-                return { watch.cancel() }
-            },
+            watchSignals: Self.watchSignals,
         ) { building, inputs, interrupted async throws(CommandError) in
             try await buildInGuest(building, inputs: inputs, device: deviceName, interrupted: interrupted)
         }
         Report.measure("image_seconds", Report.seconds(clock.now - started, decimals: 1))
         Report.line("image=\(workspace.image.path(percentEncoded: false))")
+    }
+
+    /// Starts watching the signals that interrupt a build.
+    ///
+    /// `SIGINT`, `SIGTERM`, and `SIGHUP` set `interrupted`. Closing the terminal sends `SIGHUP`, and
+    /// the build then continues with a dead standard output. `SIGPIPE` is ignored, so a write to a
+    /// closed pipe fails instead of ending the process before the cleanup.
+    ///
+    /// - Parameter interrupted: The flag that the signals set.
+    /// - Returns: The function that stops the watch and restores the default signal actions.
+    static func watchSignals(_ interrupted: StopFlag) -> @Sendable () -> Void {
+        let watch = SignalWatch(signals: SignalWatch.signals + [SIGHUP], ignoring: [SIGPIPE]) { _ in
+            interrupted.set()
+        }
+        return { watch.cancel() }
     }
 
     /// Boots the clone, runs the build in the guest, and waits until the guest shuts down.

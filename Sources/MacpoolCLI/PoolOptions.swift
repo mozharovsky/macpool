@@ -56,13 +56,14 @@ final class StopFlag: Sendable {
 
 /// Termination signals delivered as values instead of ending the process.
 ///
-/// While a watch exists, its signals are ignored by default and reach the handler instead.
-/// Cancelling the watch restores the default actions.
+/// While a watch exists, its signals are ignored by default and reach the handler instead. The
+/// signals that it ignores never reach the handler. Cancelling the watch restores the default
+/// actions.
 final class SignalWatch: Sendable {
     /// The dispatch sources that receive the signals.
     private let sources: [any DispatchSourceSignal]
 
-    /// The signals that this watch handles.
+    /// The signals that this watch handles or ignores.
     private let numbers: [Int32]
 
     /// The signals that a watch handles unless its creator names others.
@@ -72,9 +73,17 @@ final class SignalWatch: Sendable {
     ///
     /// - Parameters:
     ///   - signals: The signals to handle.
+    ///   - ignored: The signals to ignore without calling the handler.
     ///   - handler: The handler. It receives the signal number on a background queue.
-    init(signals: [Int32] = SignalWatch.signals, handler: @escaping @Sendable (Int32) -> Void) {
-        numbers = signals
+    init(
+        signals: [Int32] = SignalWatch.signals,
+        ignoring ignored: [Int32] = [],
+        handler: @escaping @Sendable (Int32) -> Void,
+    ) {
+        numbers = signals + ignored
+        for number in ignored {
+            signal(number, SIG_IGN)
+        }
         sources = signals.map { number in
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
