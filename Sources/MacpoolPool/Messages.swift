@@ -755,54 +755,56 @@ public enum PoolReply: Sendable, Equatable, Codable {
         }
     }
 
+    /// The kind of reply under the `reply` key, such as `ready` or `already_paired`.
+    var kind: String {
+        switch self {
+        case .queued: "queued"
+        case .starting: "starting"
+        case .ready: "ready"
+        case .restarting: "restarting"
+        case .ended: "ended"
+        case .renewed: "renewed"
+        case .released: "released"
+        case .status: "status"
+        case .failure: "failure"
+        case .invitation: "invitation"
+        case .paired: "paired"
+        case .alreadyPaired: "already_paired"
+        case .wrongCode: "wrong_code"
+        }
+    }
+
     /// Encodes the reply.
     ///
     /// - Parameter encoder: The encoder to write to.
     /// - Throws: An error when the encoder rejects a value.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .reply)
         switch self {
         case let .queued(position):
-            try container.encode("queued", forKey: .reply)
             try container.encode(position, forKey: .position)
-        case let .starting(lease):
-            try container.encode("starting", forKey: .reply)
-            try container.encode(lease, forKey: .lease)
-        case let .ready(lease):
-            try container.encode("ready", forKey: .reply)
+        case let .starting(lease), let .ready(lease), let .renewed(lease):
             try container.encode(lease, forKey: .lease)
         case let .restarting(lease, reason):
-            try container.encode("restarting", forKey: .reply)
             try container.encode(lease, forKey: .lease)
             try container.encode(reason, forKey: .reason)
         case let .ended(id, reason):
-            try container.encode("ended", forKey: .reply)
             try container.encode(id, forKey: .id)
             try container.encode(reason, forKey: .reason)
-        case let .renewed(lease):
-            try container.encode("renewed", forKey: .reply)
-            try container.encode(lease, forKey: .lease)
         case let .released(id):
-            try container.encode("released", forKey: .reply)
             try container.encode(id, forKey: .id)
         case let .status(pool):
-            try container.encode("status", forKey: .reply)
             try container.encode(pool, forKey: .pool)
         case let .failure(message):
-            try container.encode("failure", forKey: .reply)
             try container.encode(message, forKey: .reason)
         case let .invitation(code, expiresAt):
-            try container.encode("invitation", forKey: .reply)
             try container.encode(code, forKey: .code)
             try container.encode(expiresAt, forKey: .expiresAt)
-        case let .paired(mac):
-            try container.encode("paired", forKey: .reply)
-            try container.encode(mac, forKey: .mac)
-        case let .alreadyPaired(mac):
-            try container.encode("already_paired", forKey: .reply)
+        case let .paired(mac), let .alreadyPaired(mac):
             try container.encode(mac, forKey: .mac)
         case .wrongCode:
-            try container.encode("wrong_code", forKey: .reply)
+            break
         }
     }
 }
@@ -838,13 +840,13 @@ public struct PairedMac: Sendable, Equatable, Codable {
     ///
     /// - It has 1 to 64 Unicode scalars.
     /// - Its first scalar is not a mark.
-    /// - It has a letter, number, punctuation, or symbol scalar other than U+2800.
+    /// - It has a letter, number, punctuation, or symbol scalar that is not in ``blankSymbols``.
     /// - It has no control, format, line or paragraph separator, private-use, surrogate,
     ///   unassigned, or default-ignorable scalar.
     ///
     /// Format scalars include the controls that reverse the direction of text. Default-ignorable
     /// scalars include the characters that have no width and the Hangul fillers. A name of only
-    /// spaces, marks, or the blank Braille pattern U+2800 looks empty.
+    /// spaces, marks, or blank symbols looks empty.
     ///
     /// The check uses the Unicode tables of the running macOS. If a scalar comes from a newer
     /// Unicode version than this macOS knows, the scalar is unassigned and the name fails.
@@ -892,15 +894,20 @@ public struct PairedMac: Sendable, Equatable, Codable {
         }
     }
 
+    /// The symbols that draw nothing.
+    ///
+    /// The general category of these scalars is a symbol category, and they are not
+    /// default-ignorable. The rule therefore names them. The set holds the blank Braille pattern
+    /// U+2800 and the musical null notehead U+1D159.
+    static let blankSymbols: Set<Unicode.Scalar> = ["\u{2800}", "\u{1D159}"]
+
     /// Reports whether a scalar shows something on its own.
     ///
-    /// The blank Braille pattern U+2800 is a symbol that draws nothing. The rule therefore names
-    /// it.
-    ///
     /// - Parameter scalar: A scalar of the name.
-    /// - Returns: Whether the scalar is a letter, number, punctuation, or symbol other than U+2800.
+    /// - Returns: Whether the scalar is a letter, number, punctuation, or symbol that is not in
+    ///   ``blankSymbols``.
     private static func isVisible(_ scalar: Unicode.Scalar) -> Bool {
-        guard scalar != "\u{2800}" else {
+        guard !blankSymbols.contains(scalar) else {
             return false
         }
         switch scalar.properties.generalCategory {

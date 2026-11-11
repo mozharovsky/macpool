@@ -62,6 +62,7 @@ struct PairingTests {
             String(repeating: "\u{E9}", count: 64),
             "e\u{301}",
             "a\u{2800}b",
+            "a\u{1D159}b",
         ]
         for name in accepted {
             #expect(PairedMac.isValidName(name), "\(name)")
@@ -75,6 +76,8 @@ struct PairingTests {
             "\u{FFA0}",
             "\u{2800}",
             "\u{2800} \u{2800}",
+            "\u{1D159}",
+            "\u{1D159} \u{2800}",
             "a\u{3164}b",
             "\u{301}",
             "\u{301}abc",
@@ -304,7 +307,8 @@ struct PairingTests {
         await host.stop()
 
         let secrets = [first.code, second.code].flatMap { code in
-            [Base32.encode(code.secret), code.description].map { $0.lowercased() }
+            let hex = code.secret.map { String(format: "%02x", $0) }.joined()
+            return [Base32.encode(code.secret), code.description, "\(code.secret)", hex].map { $0.lowercased() }
         }
         let logs = host.fixture.logs.allEntries.map { "\($0.message) \($0.metadata)".lowercased() }
         let files = [host.fixture.directory, client, guesser].flatMap(regularFileContents)
@@ -448,10 +452,38 @@ struct PairingTests {
         await host.stop()
     }
 
-    /// Refuses a host's name that fails this Mac's rule with an error that names the cause. The
-    /// client records no host. A host on a newer macOS may send such a name after it recorded the
-    /// client.
+    /// Refuses a host's name that fails this Mac's rule with an error that names the cause. A host
+    /// on a newer macOS may send such a name after it recorded the client.
     @Test func refusesAHostNameThatThisMacDoesNotAccept() async throws {
+        try await expectPairing(
+            withAHostThatReplies: { .paired(PairedMac(name: "\u{3164}", key: $0)) },
+            toThrow: .malformedMessage(
+                reason: "the host's name has characters that macOS on this Mac does not accept. "
+                    + "The host recorded this Mac. Change the host's name and pair again with a new code",
+            ),
+        )
+    }
+
+    /// Names only the kind of a reply that does not finish a pairing. The host chose the texts in
+    /// the reply.
+    @Test func namesOnlyTheKindOfAnUnexpectedReply() async throws {
+        try await expectPairing(
+            withAHostThatReplies: { .alreadyPaired(PairedMac(name: "\u{1B}[2J", key: $0)) },
+            toThrow: .malformedMessage(reason: "the host replied to a pairing with an unexpected already_paired reply"),
+        )
+    }
+
+    /// Pairs with a host that greets the client and sends one reply to the pairing. Expects the
+    /// pairing to throw and the client to record no host.
+    ///
+    /// - Parameters:
+    ///   - reply: Returns the host's reply for the host's key.
+    ///   - error: The error that the pairing must throw.
+    /// - Throws: An error when the host cannot listen or the client's list of hosts cannot be read.
+    private func expectPairing(
+        withAHostThatReplies reply: @escaping @Sendable (KeyFingerprint) -> PoolReply,
+        toThrow error: PoolError,
+    ) async throws {
         let host = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
         let listener = try await PeerListener(identity: host, settings: loopbackSettings(), admits: { _ in true })
@@ -460,7 +492,7 @@ struct PairingTests {
             for await peer in listener.connections {
                 try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
                 _ = try? await peer.channel.receive(PoolRequest.self)
-                try? peer.channel.send(PoolReply.paired(PairedMac(name: "\u{3164}", key: hostKey)))
+                try? peer.channel.send(reply(hostKey))
                 await peer.channel.finish()
             }
         }
@@ -469,10 +501,7 @@ struct PairingTests {
         let client = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
         let secret = Array(0 ..< UInt8(PairingCode.secretBytes))
         let code = PairingCode(address: "127.0.0.1", port: listener.port, hostKey: hostKey, secret: secret)
-        await #expect(throws: PoolError.malformedMessage(
-            reason: "the host's name has characters that macOS on this Mac does not accept. "
-                + "The host recorded this Mac. Change the host's name and pair again with a new code",
-        )) {
+        await #expect(throws: error) {
             try await PoolClient.pair(using: code, name: "runner", directory: client)
         }
         #expect(try TrustList<TrustedHost>.load(from: client).records.isEmpty)
