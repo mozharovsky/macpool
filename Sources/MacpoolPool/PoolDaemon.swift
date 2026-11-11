@@ -1150,13 +1150,13 @@ public actor PoolDaemon {
             return .exited
         }
         guard !isStopDeferred(id) else {
-            return .deferred
+            return deferEnding(of: id)
         }
         let socket = directory.supervisorSocket(for: id)
         if let channel = try? await MessageChannel.connect(to: socket, timeout: .seconds(2)) {
             guard !isStopDeferred(id) else {
                 channel.close()
-                return .deferred
+                return deferEnding(of: id)
             }
             try? channel.send(SupervisorCommand(.stop))
             await channel.finish()
@@ -1167,7 +1167,7 @@ public actor PoolDaemon {
         var killSent = false
         for signal in [SupervisorSignal.terminate, .kill] {
             guard !isStopDeferred(id) else {
-                return .deferred
+                return deferEnding(of: id)
             }
             // The lock records the process that holds it, which covers a supervisor whose launch
             // the daemon could not store. The state's identifier has no start time, so its
@@ -1185,7 +1185,7 @@ public actor PoolDaemon {
                 )
                 // The check of the process suspends, so the lease may have ended meanwhile.
                 guard !isStopDeferred(id) else {
-                    return .deferred
+                    return deferEnding(of: id)
                 }
                 configuration.logger.warning("Signaling a supervisor", metadata: [
                     "lease": "\(id)",
@@ -1207,6 +1207,17 @@ public actor PoolDaemon {
             }
         }
         return .stuck(killSent: killSent)
+    }
+
+    /// Logs that a supervisor keeps running until a write of the state.
+    ///
+    /// - Parameter id: The lease.
+    /// - Returns: ``SupervisorEnding/deferred``.
+    private func deferEnding(of id: LeaseID) -> SupervisorEnding {
+        configuration.logger.debug("A supervisor keeps running until the state file records its stop", metadata: [
+            "lease": "\(id)",
+        ])
+        return .deferred
     }
 
     /// Waits until no process holds a lease's supervisor lock.

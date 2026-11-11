@@ -6,14 +6,21 @@ import Testing
 /// Tests of how the daemon waits for, reconnects to, and ends supervisors.
 @Suite(.timeLimit(.minutes(1)))
 struct SupervisorRecoveryTests {
+    /// The log line of a supervisor that keeps running because the state file does not record its
+    /// lease's end.
+    static let deferral = "A supervisor keeps running until the state file records its stop"
+
     /// Boots a lease again only after the earlier supervisor exited, and ignores that
     /// supervisor's late exit record.
     @Test func restartIgnoresRecordOfEarlierBoot() async throws {
         let pool = try PoolFixture()
-        let daemon = try await pool.start(slots: 1)
+        // The earlier supervisor exits only when the test ends it. The daemon must not stop it
+        // before that.
+        let daemon = try await pool.start(slots: 1, releaseTimeout: .seconds(30))
         let granted = try await pool.readyLease(pool.terms())
         let id = granted.lease.id
-        pool.launcher.plan(FakeBehavior(listenDelay: .milliseconds(500)))
+        let listening = Gate()
+        pool.launcher.plan(FakeBehavior(listenGate: listening))
         // The supervisor reports the failure while it still holds the clone and its lock.
         pool.launcher.report(id, SupervisorStatus(phase: .exited, outcome: .failed("the VM crashed")))
         let restarting = try await next(granted.client)
@@ -28,6 +35,8 @@ struct SupervisorRecoveryTests {
         #expect(pool.launcher.launches(of: id) == 1)
         // The earlier supervisor exits now and writes a record that describes its own run.
         pool.launcher.exit(id, .requested, directory: pool.directory)
+        #expect(await eventually { pool.launcher.launches(of: id) == 2 })
+        listening.open()
 
         let ready = try await next(granted.client)
         #expect(ready.lease?.phase == .ready, "\(ready)")
@@ -39,15 +48,15 @@ struct SupervisorRecoveryTests {
     /// Reconnects to a supervisor whose connection ended while it kept running.
     @Test func reconnectsToRunningSupervisor() async throws {
         let pool = try PoolFixture()
-        let daemon = try await pool.start()
+        // A supervisor that the daemon does not reach within the window gets a signal. The test
+        // must not depend on how fast it relistens.
+        let daemon = try await pool.start(reconnectWindow: .seconds(30))
         let granted = try await pool.readyLease(pool.terms())
         let id = granted.lease.id
         await pool.launcher.dropConnections(id)
-        try await Task.sleep(for: .milliseconds(300))
+        #expect(await eventually { !pool.logs.entries("A supervisor connection ended").isEmpty })
         try await pool.launcher.relisten(id, directory: pool.directory)
-        // The reconnect window ends after a second, and a supervisor that was not reached by then
-        // would get a signal.
-        try await Task.sleep(for: .milliseconds(1500))
+        #expect(await eventually { !pool.logs.entries("Reconnected to a supervisor").isEmpty })
         #expect(pool.launcher.signals().isEmpty)
         #expect(await daemon.summary().leases.map(\.phase) == [.ready])
 
@@ -95,8 +104,8 @@ struct SupervisorRecoveryTests {
         defer { chmod(root, 0o700) }
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
         await pool.launcher.dropConnections(id)
-        // The reconnect window is one second.
-        try await Task.sleep(for: .seconds(2))
+        // After the reconnect window the daemon finds that the stop must wait.
+        #expect(await eventually { !pool.logs.entries(Self.deferral).isEmpty })
         #expect(pool.launcher.isRunning(id))
         #expect(pool.launcher.signals().isEmpty)
 
@@ -113,18 +122,22 @@ struct SupervisorRecoveryTests {
     @Test func releaseDuringSignalsDefersTheNextSignal() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
-        pool.launcher.plan(FakeBehavior(ignoresTerminate: true))
+        let killCheck = Gate()
+        pool.launcher.plan(FakeBehavior(ignoresTerminate: true, identifyGates: [2: killCheck]))
         let granted = try await pool.readyLease(pool.terms(detached: true))
         let id = granted.lease.id
         granted.client.close()
         await pool.launcher.dropConnections(id)
-        // After the reconnect window the daemon sends `SIGTERM` and waits half a second.
-        #expect(await eventually { !pool.launcher.signals().isEmpty })
+        // After the reconnect window the daemon sends `SIGTERM`. Half a second later it checks the
+        // process again before `SIGKILL`, and the check waits for the gate.
+        #expect(await eventually { pool.launcher.identifications() == 2 })
+        #expect(pool.launcher.signals().map(\.signal) == [.terminate])
         let root = pool.directory.root.path(percentEncoded: false)
         #expect(chmod(root, 0o500) == 0)
         defer { chmod(root, 0o700) }
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
-        try await Task.sleep(for: .seconds(1))
+        killCheck.open()
+        #expect(await eventually { !pool.logs.entries(Self.deferral).isEmpty })
         #expect(pool.launcher.signals().map(\.signal) == [.terminate])
         #expect(pool.launcher.isRunning(id))
 
@@ -141,17 +154,19 @@ struct SupervisorRecoveryTests {
     @Test func releaseDuringProcessCheckDefersTheSignal() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
-        pool.launcher.plan(FakeBehavior(identifyDelay: .seconds(1)))
+        let terminateCheck = Gate()
+        pool.launcher.plan(FakeBehavior(identifyGates: [1: terminateCheck]))
         let granted = try await pool.readyLease(pool.terms(detached: true))
         let id = granted.lease.id
         granted.client.close()
         await pool.launcher.dropConnections(id)
-        #expect(await eventually { pool.launcher.identifications() > 0 })
+        #expect(await eventually { pool.launcher.identifications() == 1 })
         let root = pool.directory.root.path(percentEncoded: false)
         #expect(chmod(root, 0o500) == 0)
         defer { chmod(root, 0o700) }
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
-        try await Task.sleep(for: .milliseconds(1500))
+        terminateCheck.open()
+        #expect(await eventually { !pool.logs.entries(Self.deferral).isEmpty })
         #expect(pool.launcher.signals().isEmpty)
         #expect(pool.launcher.isRunning(id))
 
@@ -288,14 +303,24 @@ struct SupervisorRecoveryTests {
     @Test func discardEndsLingeringSupervisor() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
-        pool.launcher.plan(FakeBehavior(ignoresTerminate: true, lingerAfterExit: .seconds(30)))
+        let terminateCheck = Gate()
+        pool.launcher.plan(FakeBehavior(
+            ignoresTerminate: true,
+            identifyGates: [1: terminateCheck],
+            lingerAfterExit: .seconds(30),
+        ))
         let granted = try await pool.readyLease(pool.terms())
         let id = granted.lease.id
+        let clock = ContinuousClock()
+        let released = clock.now
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
-        // The discard waits for the release timeout of two seconds before it signals.
-        try await Task.sleep(for: .seconds(1))
+        // The discard waits for the release timeout of two seconds before it checks the process.
+        #expect(await eventually { pool.launcher.identifications() == 1 })
+        #expect(clock.now - released >= .seconds(2))
         #expect(await daemon.summary().leases.map(\.phase) == [.stopping])
         #expect(FileManager.default.fileExists(atPath: granted.lease.bundle))
+        #expect(pool.launcher.signals().isEmpty)
+        terminateCheck.open()
 
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         #expect(pool.launcher.signals().map(\.signal) == [.terminate, .kill])
@@ -308,13 +333,15 @@ struct SupervisorRecoveryTests {
     @Test func releaseWhileConnectingStopsNewSupervisor() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
-        pool.launcher.plan(FakeBehavior(listenDelay: .milliseconds(500)))
+        let listening = Gate()
+        pool.launcher.plan(FakeBehavior(listenGate: listening))
         let client = try await pool.requestLease(pool.terms())
         let starting = try #require(await next(client).lease)
         let id = starting.id
         #expect(await eventually { pool.launcher.launches(of: id) == 1 })
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
         #expect(try await next(client) == .ended(id, reason: "released by a client"))
+        listening.open()
 
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         #expect(pool.launcher.launches(of: id) == 1)

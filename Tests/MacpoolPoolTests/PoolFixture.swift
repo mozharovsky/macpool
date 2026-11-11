@@ -56,6 +56,8 @@ final class PoolFixture {
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
     ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
+    ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
+    ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
     /// - Returns: The daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
     func daemon(
@@ -63,6 +65,8 @@ final class PoolFixture {
         offeredSources: [String: String] = [:],
         peers: PeerSettings? = nil,
         signalGrace: Duration = .milliseconds(500),
+        reconnectWindow: Duration = .seconds(1),
+        releaseTimeout: Duration = .seconds(2),
     ) throws(PoolError) -> PoolDaemon {
         let clock = clock
         let logs = logs
@@ -75,9 +79,9 @@ final class PoolFixture {
             now: { clock.now },
             tickInterval: nil,
             supervisorConnectTimeout: .seconds(10),
-            reconnectWindow: .seconds(1),
+            reconnectWindow: reconnectWindow,
             signalGrace: signalGrace,
-            releaseTimeout: .seconds(2),
+            releaseTimeout: releaseTimeout,
             logger: Logger(label: "macpool.tests") { _ in RecordingLogHandler(recorder: logs) },
         ))
     }
@@ -89,6 +93,8 @@ final class PoolFixture {
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
     ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
+    ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
+    ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
     /// - Returns: The listening daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory or listen.
     func start(
@@ -96,8 +102,17 @@ final class PoolFixture {
         offeredSources: [String: String] = [:],
         peers: PeerSettings? = nil,
         signalGrace: Duration = .milliseconds(500),
+        reconnectWindow: Duration = .seconds(1),
+        releaseTimeout: Duration = .seconds(2),
     ) async throws(PoolError) -> PoolDaemon {
-        let daemon = try daemon(slots: slots, offeredSources: offeredSources, peers: peers, signalGrace: signalGrace)
+        let daemon = try daemon(
+            slots: slots,
+            offeredSources: offeredSources,
+            peers: peers,
+            signalGrace: signalGrace,
+            reconnectWindow: reconnectWindow,
+            releaseTimeout: releaseTimeout,
+        )
         try await daemon.start()
         return daemon
     }
@@ -191,8 +206,9 @@ final class TestClock: Sendable {
 
 /// How a fake supervisor behaves.
 struct FakeBehavior: Sendable {
-    /// The wait between the launch and the socket's first listen, like a real process's start-up.
-    var listenDelay: Duration = .zero
+    /// The gate that the supervisor waits for before its socket's first listen, like a real
+    /// process's start-up, or `nil` to listen at once.
+    var listenGate: Gate?
 
     /// Whether the supervisor ignores stop commands, like one that hangs in a VM call.
     var ignoresStop = false
@@ -200,8 +216,11 @@ struct FakeBehavior: Sendable {
     /// Whether the supervisor survives `SIGTERM`.
     var ignoresTerminate = false
 
-    /// How long the check of the supervisor's process takes before a signal.
-    var identifyDelay: Duration = .zero
+    /// The gates that checks of the supervisor's process wait for, keyed by the number of the
+    /// check from 1.
+    ///
+    /// A check without a gate returns at once.
+    var identifyGates: [Int: Gate] = [:]
 
     /// Why the check of the supervisor's process fails, or `nil` when it succeeds.
     var mismatch: SupervisorMismatch?
@@ -211,6 +230,47 @@ struct FakeBehavior: Sendable {
 
     /// The protocol version that the supervisor reports.
     var protocolVersion = SupervisorStatus.currentProtocol
+}
+
+/// A point where a fake supervisor waits until the test opens it.
+final class Gate: Sendable {
+    /// Whether the gate is open, and the tasks that wait while it is closed.
+    private struct State {
+        /// Whether ``Gate/open()`` ran.
+        var isOpen = false
+        /// The tasks that wait for the gate.
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+
+    /// The gate's state.
+    private let state = Mutex(State())
+
+    /// Returns once the gate is open.
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let isOpen = state.withLock { state in
+                if !state.isOpen {
+                    state.waiters.append(continuation)
+                }
+                return state.isOpen
+            }
+            if isOpen {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Opens the gate and resumes the waiting tasks.
+    func open() {
+        let waiters = state.withLock { state in
+            state.isOpen = true
+            defer { state.waiters = [] }
+            return state.waiters
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
 }
 
 /// A signal that the fake launcher received.
@@ -250,6 +310,8 @@ final class FakeLauncher: SupervisorLauncher {
         var status: SupervisorStatus
         /// Whether the run ended and the supervisor only waits to exit.
         var hasExited = false
+        /// The number of process checks that the daemon started for this supervisor.
+        var identifications = 0
     }
 
     /// The running supervisors and the launch history.
@@ -280,7 +342,7 @@ final class FakeLauncher: SupervisorLauncher {
         state.withLock { $0.plans += behaviors }
     }
 
-    /// Takes the lease's locks and serves its socket, at once or after the planned delay.
+    /// Takes the lease's locks and serves its socket, at once or after the planned gate opens.
     ///
     /// - Parameter launch: What to boot.
     /// - Returns: The fake process identifier, which is 10000 plus the launch's number. The lock
@@ -323,19 +385,20 @@ final class FakeLauncher: SupervisorLauncher {
             )
             state.launches[id, default: 0] += 1
         }
-        if behavior.listenDelay == .zero {
-            try await listen(id, directory: directory, processID: processID)
-        } else {
+        if let gate = behavior.listenGate {
             Task {
-                try? await Task.sleep(for: behavior.listenDelay)
+                await gate.wait()
                 try? await self.listen(id, directory: directory, processID: processID)
             }
+        } else {
+            try await listen(id, directory: directory, processID: processID)
         }
         return processID
     }
 
-    /// Accepts every process identifier after the supervisor's planned delay unless its behavior
-    /// plans a mismatch, so that ``signals()`` records each signal the daemon sends.
+    /// Accepts every process identifier unless the supervisor's behavior plans a mismatch.
+    /// ``signals()`` therefore records each signal that the daemon sends. A check with a planned
+    /// gate returns once the test opens the gate.
     ///
     /// - Parameters:
     ///   - processID: The identifier that the daemon read.
@@ -349,12 +412,16 @@ final class FakeLauncher: SupervisorLauncher {
         of id: LeaseID,
         in _: PoolDirectory,
     ) async throws(SupervisorMismatch) {
-        let behavior = state.withLock { state in
+        let (behavior, gate) = state.withLock { state -> (FakeBehavior, Gate?) in
             state.identifications += 1
             state.startTimes.append(startTime)
-            return state.supervisors[id]?.behavior ?? FakeBehavior()
+            state.supervisors[id]?.identifications += 1
+            guard let supervisor = state.supervisors[id] else {
+                return (FakeBehavior(), nil)
+            }
+            return (supervisor.behavior, supervisor.behavior.identifyGates[supervisor.identifications])
         }
-        try? await Task.sleep(for: behavior.identifyDelay)
+        await gate?.wait()
         if let mismatch = behavior.mismatch {
             throw mismatch
         }
