@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 @testable import MacpoolPool
 import Network
 import Testing
@@ -160,6 +161,7 @@ struct PairingTests {
         #expect(hosts.records.map { [$0.name, $0.address, "\($0.port)"] } == [["studio", "127.0.0.1", "\(host.port)"]])
         #expect(hosts[host.key] != nil)
         #expect(host.fixture.logs.entries("Paired a Mac").map { $0.metadata["key"] } == [clientKey.rawValue])
+        #expect(host.fixture.logs.entries("A Mac connected to pair").map(\.level) == [.debug])
 
         let channel = try await PoolClient.connect(to: host.endpoint, as: clientIdentity, hostKey: host.key)
         try channel.send(PoolRequest.status)

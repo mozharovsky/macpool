@@ -77,6 +77,9 @@ final class PeerListener: Sendable {
 
         /// The protocol version that ALPN chose.
         let version: Int
+
+        /// The Mac's IP address without the port.
+        let address: String
     }
 
     /// The underlying listener.
@@ -208,6 +211,11 @@ final class PeerListener: Sendable {
     ) {
         let outcome = HandshakeOutcome(handshakes)
         let peer = "\(connection.endpoint)"
+        let address = if case let .hostPort(host, _) = connection.endpoint {
+            "\(host)"
+        } else {
+            peer
+        }
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
@@ -221,7 +229,7 @@ final class PeerListener: Sendable {
                     return
                 }
                 let channel = MessageChannel(connection: connection, peer: peer, start: false)
-                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version)
+                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version, address: address)
                 if case .terminated = continuation.yield(admitted) {
                     channel.close()
                 }
@@ -254,7 +262,7 @@ final class PeerListener: Sendable {
 }
 
 /// The number of handshakes that run at once, up to a limit.
-private final class HandshakeCount: Sendable {
+final class HandshakeCount: Sendable {
     /// The most handshakes that run at once.
     private let limit: Int
 
@@ -291,7 +299,7 @@ private final class HandshakeCount: Sendable {
 ///
 /// The handshake leaves its ``HandshakeCount`` when the outcome settles. Settling also cancels
 /// the timer, because the timer holds the connection until it ends.
-private final class HandshakeOutcome: Sendable {
+final class HandshakeOutcome: Sendable {
     /// The state that the lock guards.
     private struct State {
         /// Whether the outcome is settled.

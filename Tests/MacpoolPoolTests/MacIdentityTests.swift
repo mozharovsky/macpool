@@ -303,6 +303,15 @@ struct MacIdentityTests {
         #expect(!FileManager.default.fileExists(atPath: shared.identityFile.path(percentEncoded: false)))
     }
 
+    /// Reads the exposure from a volume's mount flags without a mounted volume.
+    @Test func readsVolumeFlags() {
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL)) == nil)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL | MNT_RDONLY)) == nil)
+        #expect(FileExposure.exposure(ofVolumeFlags: 0) == .networkVolume)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_IGNORE_OWNERSHIP)) == .ownerlessVolume)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL | MNT_IGNORE_OWNERSHIP)) == .ownerlessVolume)
+    }
+
     /// Refuses to keep a key on a volume that ignores ownership, where every local user acts as
     /// the owner of every file.
     @Test func refusesVolumeThatIgnoresOwnership() async throws {

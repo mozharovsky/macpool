@@ -125,10 +125,19 @@ enum FileExposure: Sendable, Equatable {
         guard fstatfs(descriptor, &volume) == 0 else {
             throw .systemCall("inspecting the volume of", file)
         }
-        if volume.f_flags & UInt32(MNT_IGNORE_OWNERSHIP) != 0 {
+        return exposure(ofVolumeFlags: volume.f_flags)
+    }
+
+    /// Reads the exposure that a volume's mount flags cause.
+    ///
+    /// - Parameter flags: The `f_flags` field of the volume's `statfs` record.
+    /// - Returns: ``ownerlessVolume``, ``networkVolume``, or `nil` for a local volume that honors
+    ///   ownership.
+    static func exposure(ofVolumeFlags flags: UInt32) -> FileExposure? {
+        if flags & UInt32(MNT_IGNORE_OWNERSHIP) != 0 {
             return .ownerlessVolume
         }
-        if volume.f_flags & UInt32(MNT_LOCAL) == 0 {
+        if flags & UInt32(MNT_LOCAL) == 0 {
             return .networkVolume
         }
         return nil

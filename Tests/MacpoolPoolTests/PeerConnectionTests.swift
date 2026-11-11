@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Logging
 @testable import MacpoolPool
 import Network
 import Synchronization
@@ -460,6 +461,48 @@ struct PeerConnectionTests {
         #expect(peer.fingerprint == clientKey)
         peer.channel.close()
         channel.close()
+    }
+
+    /// Writes one info line per minute about the connections of one paired Mac from one address,
+    /// and debug lines in between.
+    @Test func limitsConnectionLines() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let levels = { fixture.logs.entries("A paired Mac connected").map(\.level) }
+        for _ in 0 ..< 2 {
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+        }
+        #expect(await eventually { levels() == [.info, .debug] })
+        fixture.clock.advance(by: PoolDaemon.connectionLogInterval)
+        try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+        #expect(await eventually { levels() == [.info, .debug, .info] })
+        await daemon.shutdown()
+    }
+
+    /// Cancels the timer of a handshake when the outcome settles, in either order, and frees the
+    /// handshake's place once.
+    @Test func settlesAHandshakeOnce() {
+        let count = HandshakeCount(limit: 1)
+        #expect(count.begin())
+        let armedFirst = HandshakeOutcome(count)
+        let timer = Task { _ = try? await Task.sleep(for: .seconds(60)) }
+        armedFirst.arm(timer)
+        #expect(!timer.isCancelled)
+        #expect(armedFirst.settle())
+        #expect(timer.isCancelled)
+        #expect(!armedFirst.settle())
+
+        #expect(count.begin())
+        let settledFirst = HandshakeOutcome(count)
+        #expect(settledFirst.settle())
+        let late = Task { _ = try? await Task.sleep(for: .seconds(60)) }
+        settledFirst.arm(late)
+        #expect(late.isCancelled)
+        #expect(count.begin())
+        #expect(!count.begin())
     }
 
     /// Frees a handshake's place when the handshake succeeds, while its connection stays open.

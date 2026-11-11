@@ -264,6 +264,16 @@ public actor PoolDaemon {
     /// A key leaves the set when one of its connections closes.
     private var keysAtConnectionLimit: Set<KeyFingerprint> = []
 
+    /// The shortest time between two info lines about connections of one paired Mac from one
+    /// address, in seconds.
+    ///
+    /// The LaunchAgent runs the daemon at the info level, and nothing rotates its log. If a Mac
+    /// reconnects in a loop, the daemon logs the connections in between at the debug level.
+    static let connectionLogInterval: TimeInterval = 60
+
+    /// When the daemon last logged a connection of each paired Mac and address at the info level.
+    private var connectionLogTimes: [ConnectionLogKey: Date] = [:]
+
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
 
@@ -595,7 +605,14 @@ public actor PoolDaemon {
             return
         }
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
-        configuration.logger.info("A paired Mac connected", metadata: [
+        let now = configuration.now()
+        connectionLogTimes = connectionLogTimes.filter { now.timeIntervalSince($0.value) < Self.connectionLogInterval }
+        let logKey = ConnectionLogKey(key: peer.fingerprint, address: peer.address)
+        let level: Logger.Level = connectionLogTimes[logKey] == nil ? .info : .debug
+        if level == .info {
+            connectionLogTimes[logKey] = now
+        }
+        configuration.logger.log(level: level, "A paired Mac connected", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
         ])
@@ -623,7 +640,9 @@ public actor PoolDaemon {
         }
         pairingConnections += 1
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
-        configuration.logger.info("A Mac connected to pair", metadata: [
+        // Any key passes the handshake while an invitation is open. Only the outcome of a pairing
+        // reaches the info level.
+        configuration.logger.debug("A Mac connected to pair", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
         ])
@@ -1660,6 +1679,15 @@ public actor PoolDaemon {
             }
         }
     }
+}
+
+/// A paired Mac's key and address, for the rate of connection lines in the log.
+private struct ConnectionLogKey: Hashable {
+    /// The fingerprint of the Mac's key.
+    let key: KeyFingerprint
+
+    /// The Mac's IP address without the port.
+    let address: String
 }
 
 /// Reads the list of paired clients during the handshakes of the listener for paired Macs.
