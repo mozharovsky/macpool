@@ -35,6 +35,12 @@ struct TrustedClient: TrustRecord {
     /// the host refuses.
     var isBlocked: Bool
 
+    /// The highest priority that the client may ask for, 0 or more.
+    ///
+    /// The field only widens what a client may do. A build that does not know the field reads the
+    /// record with a ceiling of 0. The field therefore needs no new ``TrustList/formatVersion``.
+    var priorityCeiling = 0
+
     /// The JSON keys of a record.
     private enum CodingKeys: String, CodingKey {
         /// The key's fingerprint.
@@ -45,6 +51,37 @@ struct TrustedClient: TrustRecord {
         case pairedAt = "paired_at"
         /// Whether the host refuses the client.
         case isBlocked = "blocked"
+        /// The highest priority that the client may ask for.
+        case priorityCeiling = "priority_ceiling"
+    }
+}
+
+/// The decoding of a client record. It also reads records from before priority ceilings.
+extension TrustedClient {
+    /// Decodes a record. A record without a ceiling gets a ceiling of 0.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError` when a field is missing or malformed, or when the ceiling is
+    ///   below 0.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let priorityCeiling = try container.decodeIfPresent(Int.self, forKey: .priorityCeiling) ?? 0
+        // A build that does not know the field would read a negative ceiling as 0 and widen what
+        // the client may do.
+        guard priorityCeiling >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .priorityCeiling,
+                in: container,
+                debugDescription: "The priority ceiling \(priorityCeiling) is below 0.",
+            )
+        }
+        try self.init(
+            key: container.decode(KeyFingerprint.self, forKey: .key),
+            name: container.decode(String.self, forKey: .name),
+            pairedAt: container.decode(Date.self, forKey: .pairedAt),
+            isBlocked: container.decode(Bool.self, forKey: .isBlocked),
+            priorityCeiling: priorityCeiling,
+        )
     }
 }
 

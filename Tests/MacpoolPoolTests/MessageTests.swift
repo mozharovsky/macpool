@@ -36,7 +36,14 @@ struct MessageTests {
             detached: false,
             priority: 0,
         )
-        let requests: [PoolRequest] = [.lease(terms), .attach(id), .release(id), .renew(id), .status]
+        let requests: [PoolRequest] = [
+            .lease(terms),
+            .attach(id),
+            .release(id),
+            .renew(id),
+            .status,
+            .invite(address: "127.0.0.1", priorityCeiling: 3),
+        ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
             #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: data) == request)
@@ -59,6 +66,8 @@ struct MessageTests {
             let data = try MessageCoding.encoder.encode(reply)
             #expect(try MessageCoding.decoder.decode(PoolReply.self, from: data) == reply)
         }
+        let invite = Data(#"{"request":"invite","address":"127.0.0.1"}"#.utf8)
+        #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: invite) == .invite(address: "127.0.0.1"))
         let text = try String(decoding: MessageCoding.encoder.encode(PoolRequest.lease(terms)), as: UTF8.self)
         #expect(text.hasPrefix(#"{"request":"lease","terms":{"#))
         #expect(text.contains(#""restart":"on-failure""#))

@@ -29,7 +29,8 @@ import Synchronization
 /// Each lease has a ``LeaseOwner``. A client on the socket acts for the local user and may act on
 /// every lease. A paired client from another Mac sees and changes only its own leases. It names a
 /// source by one of the names in ``Configuration/offeredSources``. It cannot share a host
-/// directory or ask for a priority above the default of 0.
+/// directory or ask for a priority above the ceiling in its record. At most ``PoolPolicy/slots``
+/// of its requests wait in the queue at once.
 ///
 /// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
 /// Mac's key only then. A key or a list of paired clients that cannot be loaded, or a port that
@@ -691,29 +692,30 @@ public actor PoolDaemon {
                 reply(.wrongCode, to: inviter)
             }
             return .failure("the pairing code is wrong")
-        case let .accepted(ended):
+        case let .accepted(ended, priorityCeiling):
             invitationEnded(ended)
             let host = PairedMac(name: hostName, key: hostKey)
-            return record(key, name: name, invitedBy: ended.inviter, at: now, host: host)
+            let client = TrustedClient(
+                key: key,
+                name: name,
+                pairedAt: now,
+                isBlocked: false,
+                priorityCeiling: priorityCeiling,
+            )
+            return record(client, invitedBy: ended.inviter, host: host)
         }
     }
 
     /// Records a client whose secret was right and returns the reply to it.
     ///
     /// - Parameters:
-    ///   - key: The fingerprint of the key that the client proved.
-    ///   - name: The name of the client.
+    ///   - client: The new record, with the key that the client proved and the invitation's
+    ///     priority ceiling.
     ///   - inviter: The connection that opened the invitation.
-    ///   - now: The time of the pairing.
     ///   - host: This host's name and key.
     /// - Returns: The reply to the client.
-    private func record(
-        _ key: KeyFingerprint,
-        name: String,
-        invitedBy inviter: ClientID,
-        at now: Date,
-        host: PairedMac,
-    ) -> PoolReply {
+    private func record(_ client: TrustedClient, invitedBy inviter: ClientID, host: PairedMac) -> PoolReply {
+        let key = client.key
         do throws(PoolError) {
             var clients = try TrustList<TrustedClient>.load(from: configuration.directory)
             if let known = clients[key] {
@@ -726,7 +728,7 @@ public actor PoolDaemon {
                 reply(.alreadyPaired(PairedMac(name: known.name, key: key)), to: inviter)
                 return .paired(host)
             }
-            clients.insert(TrustedClient(key: key, name: name, pairedAt: now, isBlocked: false))
+            clients.insert(client)
             try clients.save(to: configuration.directory)
         } catch {
             configuration.logger.error("The host cannot record a paired Mac", metadata: [
@@ -738,9 +740,10 @@ public actor PoolDaemon {
         }
         configuration.logger.info("Paired a Mac", metadata: [
             "key": "\(key)",
-            "name": "\(name)",
+            "name": "\(client.name)",
+            "priority_ceiling": "\(client.priorityCeiling)",
         ])
-        reply(.paired(PairedMac(name: name, key: key)), to: inviter)
+        reply(.paired(PairedMac(name: client.name, key: key)), to: inviter)
         return .paired(host)
     }
 
@@ -760,18 +763,29 @@ public actor PoolDaemon {
     ///
     /// - Parameters:
     ///   - address: The host's address for the code.
+    ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
     ///   - client: The inviting connection.
     ///   - owner: Who the client acts for.
     /// - Returns: The reply with the code.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client invites, the address
-    ///   cannot be part of a code, the daemon does not listen for paired Macs, or the host's name
-    ///   for clients is not a valid name.
-    private func invite(address: String, from client: ClientID, owner: LeaseOwner) throws(PoolError) -> PoolReply {
+    ///   cannot be part of a code, the ceiling is below 0, the daemon does not listen for paired
+    ///   Macs, or the host's name for clients is not a valid name.
+    private func invite(
+        address: String,
+        priorityCeiling: Int,
+        from client: ClientID,
+        owner: LeaseOwner,
+    ) throws(PoolError) -> PoolReply {
         guard owner == .local else {
             throw .invalidRequest(reason: "only the host's own user can invite Macs")
         }
         guard PairingCode.isValidAddress(address) else {
             throw .invalidRequest(reason: "\(address) is not a host name or an IP address")
+        }
+        // A negative ceiling would restrict the client, and a build that does not know the field
+        // would ignore it.
+        guard priorityCeiling >= 0 else {
+            throw .invalidRequest(reason: "the priority ceiling must be 0 or more")
         }
         guard let listener = peerListener else {
             throw .invalidRequest(reason: "the host does not listen for paired Macs"
@@ -780,14 +794,17 @@ public actor PoolDaemon {
         guard PairedMac.isValidName(configuration.peers?.name ?? "") else {
             throw .invalidRequest(reason: "the host's name for clients must have \(PairedMac.nameRule)")
         }
-        let opened = invitation.open(for: client, at: configuration.now())
+        let opened = invitation.open(for: client, priorityCeiling: priorityCeiling, at: configuration.now())
         if let replaced = opened.replaced {
             invitationEnded(replaced)
             if replaced.inviter != client {
                 reply(.failure("a newer invitation replaced this one"), to: replaced.inviter)
             }
         }
-        configuration.logger.info("Opened an invitation", metadata: ["address": "\(address)"])
+        configuration.logger.info("Opened an invitation", metadata: [
+            "address": "\(address)",
+            "priority_ceiling": "\(priorityCeiling)",
+        ])
         let code = PairingCode(address: address, port: listener.port, hostKey: listener.hostKey, secret: opened.secret)
         return .invitation(code, expiresAt: opened.expiresAt)
     }
@@ -860,8 +877,11 @@ public actor PoolDaemon {
                 reply(.renewed(summary), to: client)
             case .status:
                 reply(.status(ledger.summary(for: owner)), to: client)
-            case let .invite(address):
-                try reply(invite(address: address, from: client, owner: owner), to: client)
+            case let .invite(address, priorityCeiling):
+                try reply(
+                    invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),
+                    to: client,
+                )
             case let .pair(secret, name):
                 guard case let .client(key) = owner else {
                     throw .invalidRequest(reason: "only another Mac can pair with the host")
@@ -886,25 +906,33 @@ public actor PoolDaemon {
     ///
     /// A paired client's source is a name from ``Configuration/offeredSources``, which becomes
     /// the bundle's path. A paired client may not share a host directory, because the guest
-    /// would reach the host's files through it. Its priority may not exceed the default of 0.
-    /// Requests of equal priority wait in arrival order, so the local user gets ahead of a paired
-    /// client only with a higher priority.
+    /// would reach the host's files through it. Its priority may not exceed the ceiling in its
+    /// record. At most ``PoolPolicy/slots`` of its requests wait in the queue. Requests of equal
+    /// priority wait in arrival order. The local user therefore gets ahead of a paired client
+    /// only with a higher priority.
     ///
     /// - Parameters:
     ///   - terms: The requested terms.
     ///   - owner: Who requests the lease.
     /// - Returns: The terms with the source's path.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
-    ///   the host does not offer, asks for a shared directory, or asks for a priority above 0,
-    ///   or the errors of ``LeaseTerms/validate()`` and ``checkSource(of:)``.
+    ///   the host does not offer, asks for a shared directory or a priority above its ceiling, or
+    ///   already has the most requests in the queue. The errors of ``pairedRecord(_:)``,
+    ///   ``LeaseTerms/validate()``, and ``checkSource(of:)`` propagate.
     private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> LeaseTerms {
         var terms = terms
-        if case .client = owner {
+        if case let .client(key) = owner {
             guard terms.sharedDirectory == nil else {
                 throw .invalidRequest(reason: "a paired client cannot share a host directory")
             }
-            guard terms.priority <= 0 else {
-                throw .invalidRequest(reason: "a paired client cannot ask for a priority above 0")
+            let ceiling = try pairedRecord(key).priorityCeiling
+            guard terms.priority <= ceiling else {
+                throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(ceiling)")
+            }
+            guard ledger.waitingRequests(of: owner) < configuration.policy.slots else {
+                throw .invalidRequest(
+                    reason: "this Mac already has as many requests in the queue as the host has slots",
+                )
             }
             guard let path = configuration.offeredSources[terms.source] else {
                 throw .invalidRequest(reason: "the host offers no source named \(terms.source)")
@@ -914,6 +942,34 @@ public actor PoolDaemon {
         try terms.validate()
         try checkSource(of: terms)
         return terms
+    }
+
+    /// Reads the record of a paired client from the list of paired clients.
+    ///
+    /// The daemon reads the list for each lease request, because the list may have changed since
+    /// the client connected.
+    ///
+    /// - Parameter key: The fingerprint of the client's key.
+    /// - Returns: The client's record.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the list cannot be read, or when it
+    ///   no longer names the key or blocks it. The reason names no host path. The daemon logs
+    ///   the error of a list that cannot be read.
+    private func pairedRecord(_ key: KeyFingerprint) throws(PoolError) -> TrustedClient {
+        let clients: TrustList<TrustedClient>
+        do {
+            clients = try TrustList<TrustedClient>.load(from: configuration.directory)
+        } catch {
+            configuration.logger.log(
+                level: peerLogLevel(of: .unreadableClientList, full: .error),
+                "The list of paired clients cannot be read",
+                metadata: ["reason": "\(error)"],
+            )
+            throw .invalidRequest(reason: "the host cannot read its list of paired Macs")
+        }
+        guard let record = clients[key], !record.isBlocked else {
+            throw .invalidRequest(reason: "the host no longer accepts this Mac")
+        }
+        return record
     }
 
     /// Checks that a request's source and shared directory can serve a lease.

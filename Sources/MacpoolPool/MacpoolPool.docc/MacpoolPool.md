@@ -32,9 +32,14 @@ may see and change every lease. A paired client from another Mac is named by the
 requests about any other lease as if that lease did not exist.
 
 A paired client names its source by one of the names that the host offers, and the daemon clones
-the bundle behind that name. It cannot share a host directory with its guest or raise its
-priority above the default of 0. Requests of equal priority wait in the order they arrive. The
-local user gets ahead of a paired client's waiting request by asking for a higher priority.
+the bundle behind that name. It cannot share a host directory with its guest. Its priority may
+not exceed the `priority_ceiling` of its record in `clients.json`. The ceiling is 0 unless the
+invitation set another value. At most as many of its requests wait in the queue as the pool has
+slots. Requests of equal priority wait in the order they arrive. The local user gets ahead of a
+paired client's waiting request by asking for a higher priority.
+
+The daemon reads the client's record again for every lease request. If the record is gone or
+blocked, the request fails.
 
 ### Mac identity
 
@@ -106,9 +111,11 @@ peer still sees a normal end of the stream.
 ### Pairing
 
 A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
-code with ``PoolRequest/invite(address:)``. The code carries the host's address and port, the
-first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to the person
-who pairs the client, because anyone with the code can pair in that client's place.
+code with ``PoolRequest/invite(address:priorityCeiling:)``. The code carries the host's address
+and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to
+the person who pairs the client, because anyone with the code can pair in that client's place. The
+client gets the invitation's priority ceiling when the host records it. A Mac that the host
+already knows keeps its record and its ceiling.
 
 ``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
 it sends the secret. The host then adds the client to `clients.json`, and the client adds the

@@ -114,16 +114,16 @@ struct PairingTests {
         #expect(opened.replaced == nil)
         #expect(invitation.isOpen(at: start))
         let accepted = PairingInvitation.Ended(inviter: first, wrongSecrets: 0)
-        #expect(invitation.redeem(opened.secret, at: start) == .accepted(accepted))
+        #expect(invitation.redeem(opened.secret, at: start) == .accepted(accepted, priorityCeiling: 0))
         #expect(!invitation.isOpen(at: start))
         #expect(invitation.redeem(opened.secret, at: start) == .closed)
 
-        let guessed = invitation.open(for: first, at: start)
+        let guessed = invitation.open(for: first, priorityCeiling: 5, at: start)
         for count in 1 ... 6 {
             #expect(invitation.redeem([0], at: start) == .rejected(inviter: first, wrongSecrets: count))
         }
         let guessedOnce = PairingInvitation.Ended(inviter: first, wrongSecrets: 6)
-        #expect(invitation.redeem(guessed.secret, at: start) == .accepted(guessedOnce))
+        #expect(invitation.redeem(guessed.secret, at: start) == .accepted(guessedOnce, priorityCeiling: 5))
 
         let expiring = invitation.open(for: first, at: start)
         _ = invitation.redeem([0], at: start)
@@ -238,7 +238,7 @@ struct PairingTests {
         try FileManager.default.removeItem(at: TrustList<TrustedHost>.file(in: client))
         host.fixture.clock.advance(by: 60)
 
-        let second = try await host.invite()
+        let second = try await host.invite(priorityCeiling: 7)
         let paired = try await PoolClient.pair(using: second.code, name: "builder", directory: client)
         #expect(paired == PairedMac(name: "example", key: host.key))
         #expect(try await next(second.channel) == .alreadyPaired(PairedMac(name: "runner", key: clientKey)))
@@ -246,11 +246,72 @@ struct PairingTests {
         #expect(clients.records.map(\.name) == ["runner"])
         #expect(clients[clientKey]?.pairedAt == pairedAt)
         #expect(clients[clientKey]?.isBlocked == false)
+        #expect(clients[clientKey]?.priorityCeiling == 0)
         #expect(try TrustList<TrustedHost>.load(from: client)[host.key] != nil)
         let other = try host.clientDirectory()
         await #expect(throws: PoolError.self) {
             try await PoolClient.pair(using: second.code, name: "other", directory: other)
         }
+        await host.stop()
+    }
+
+    /// Records the priority ceiling of the code with the new client.
+    @Test func recordsTheCeilingOfTheCode() async throws {
+        let host = try await PairingHost()
+        let client = try host.clientDirectory()
+        let invitation = try await host.invite(priorityCeiling: 5)
+        _ = try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
+        let clientKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: client).keyDigest)
+        #expect(try TrustList<TrustedClient>.load(from: host.fixture.directory)[clientKey]?.priorityCeiling == 5)
+        let paired = host.fixture.logs.entries("Paired a Mac")
+        #expect(paired.map { $0.metadata["priority_ceiling"] } == ["5"])
+        await host.stop()
+    }
+
+    /// Refuses requests of Macs on the network without a host path while the host cannot read its
+    /// list of paired clients. The inviting connection gets the reason.
+    @Test func refusesWithoutPathsWhenTheListCannotBeRead() async throws {
+        let host = try await PairingHost()
+        let pairedDirectory = try host.clientDirectory()
+        let first = try await host.invite()
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: pairedDirectory)
+        let paired = try MacIdentity.loadOrCreate(in: pairedDirectory)
+        let pairedChannel = try await PoolClient.connect(to: host.endpoint, as: paired, hostKey: host.key)
+        let invitation = try await host.invite()
+        let strangerChannel = try await PoolClient.connect(to: host.endpoint, as: makeIdentity(), hostKey: host.key)
+
+        // Both handshakes read the list. Only the requests below find it unreadable.
+        try Data("{".utf8).write(to: TrustList<TrustedClient>.file(in: host.fixture.directory))
+        var replies: [PoolReply] = []
+        for _ in 0 ..< 2 {
+            try pairedChannel.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+            try await replies.append(next(pairedChannel))
+        }
+        try pairedChannel.send(PoolRequest.invite(address: "127.0.0.1"))
+        try await replies.append(next(pairedChannel))
+        try strangerChannel.send(PoolRequest.pair(secret: Base32.encode(invitation.code.secret), name: "stranger"))
+        try await replies.append(next(strangerChannel))
+        let unreadable = PoolReply.failure(
+            PoolError.invalidRequest(reason: "the host cannot read its list of paired Macs").description,
+        )
+        #expect(replies == [
+            unreadable,
+            unreadable,
+            .failure(PoolError.invalidRequest(reason: "only the host's own user can invite Macs").description),
+            .failure("the host cannot record the pairing"),
+        ])
+        guard case let .failure(reason) = try await next(invitation.channel) else {
+            Issue.record("the inviting connection received no reason")
+            return
+        }
+        #expect(reason.hasPrefix("the pairing failed: "))
+        let root = host.fixture.root.url.path(percentEncoded: false)
+        #expect(reason.contains(String(root.dropLast())))
+        // A paired Mac that repeats its requests writes one error a minute.
+        let levels = host.fixture.logs.entries("The list of paired clients cannot be read").map(\.level)
+        #expect(levels == [.error, .debug])
+        pairedChannel.close()
+        strangerChannel.close()
         await host.stop()
     }
 
@@ -416,7 +477,8 @@ struct PairingTests {
     }
 
     /// Refuses a blocked client's pairing, a pairing through the local socket, an invitation from a
-    /// paired client, and an invitation while the host does not listen.
+    /// paired client, an invitation with a negative priority ceiling, and an invitation while the
+    /// host does not listen.
     @Test func refusesInvitationsAndPairingsOutOfPlace() async throws {
         let host = try await PairingHost()
         let blocked = try host.clientDirectory()
@@ -444,6 +506,9 @@ struct PairingTests {
         try local.send(PoolRequest.invite(address: "example local"))
         let address = PoolError.invalidRequest(reason: "example local is not a host name or an IP address")
         #expect(try await next(local) == .failure(address.description))
+        try local.send(PoolRequest.invite(address: "127.0.0.1", priorityCeiling: -1))
+        let negative = PoolError.invalidRequest(reason: "the priority ceiling must be 0 or more")
+        #expect(try await next(local) == .failure(negative.description))
         local.close()
         await host.stop()
 
@@ -575,11 +640,12 @@ private final class PairingHost {
 
     /// Opens an invitation through the local socket.
     ///
+    /// - Parameter priorityCeiling: The highest priority that the Mac that pairs may ask for.
     /// - Returns: The inviting connection and the code.
     /// - Throws: An error when the daemon refuses or sends no code.
-    func invite() async throws -> OpenInvitation {
+    func invite(priorityCeiling: Int = 0) async throws -> OpenInvitation {
         let channel = try await PoolClient.connect(to: fixture.directory)
-        try channel.send(PoolRequest.invite(address: "127.0.0.1"))
+        try channel.send(PoolRequest.invite(address: "127.0.0.1", priorityCeiling: priorityCeiling))
         guard case let .invitation(code, _) = try await next(channel) else {
             throw PoolError.connectionClosed
         }
