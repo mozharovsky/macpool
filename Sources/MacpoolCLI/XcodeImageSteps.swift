@@ -187,7 +187,7 @@ struct XcodeImageSteps {
             throw .imageStep(step: name, reason: "df printed \(output)")
         }
         guard kilobytes >= Self.minimumFreeBytes / 1024 else {
-            throw .imageStep(step: name, reason: "the guest has \(kilobytes >> 20) GiB free, less than 40 GiB")
+            throw .imageStep(step: name, reason: "the guest has \(kilobytes >> 20) GB free, less than 40 GB")
         }
     }
 

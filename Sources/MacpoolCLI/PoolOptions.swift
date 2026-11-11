@@ -56,20 +56,26 @@ final class StopFlag: Sendable {
 
 /// Termination signals delivered as values instead of ending the process.
 ///
-/// While a watch exists, `SIGINT` and `SIGTERM` are ignored by default and reach the handler
-/// instead. Cancelling the watch restores the default actions.
+/// While a watch exists, its signals are ignored by default and reach the handler instead.
+/// Cancelling the watch restores the default actions.
 final class SignalWatch: Sendable {
     /// The dispatch sources that receive the signals.
     private let sources: [any DispatchSourceSignal]
 
-    /// The signals that the watch handles.
+    /// The signals that this watch handles.
+    private let numbers: [Int32]
+
+    /// The signals that a watch handles unless its creator names others.
     static let signals = [SIGINT, SIGTERM]
 
-    /// Starts watching `SIGINT` and `SIGTERM`.
+    /// Starts watching signals.
     ///
-    /// - Parameter handler: The handler, which receives the signal number on a background queue.
-    init(handler: @escaping @Sendable (Int32) -> Void) {
-        sources = Self.signals.map { number in
+    /// - Parameters:
+    ///   - signals: The signals to handle.
+    ///   - handler: The handler. It receives the signal number on a background queue.
+    init(signals: [Int32] = SignalWatch.signals, handler: @escaping @Sendable (Int32) -> Void) {
+        numbers = signals
+        sources = signals.map { number in
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
             source.setEventHandler { handler(number) }
@@ -83,7 +89,7 @@ final class SignalWatch: Sendable {
         for source in sources {
             source.cancel()
         }
-        for number in Self.signals {
+        for number in numbers {
             signal(number, SIG_DFL)
         }
     }

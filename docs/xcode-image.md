@@ -56,12 +56,16 @@ with the image's path.
    Xcode, and the runtime.
 8. Moves the clone to `images/NAME`.
 
-If a step or a check fails, or you press Control-C, the command stops the VM and deletes the
-clone. With `--keep-failed`, it keeps the clone as `images/NAME` with `ready` set to false. Delete
-a failed image yourself before you build another one with the same name.
+If a step or a check fails, or you press Control-C, or the command gets `SIGTERM` or `SIGHUP`, it
+stops the VM and deletes the clone. With `--keep-failed`, it keeps the clone as `images/NAME` with `ready`
+set to false. Delete a failed image yourself before you build another one with the same name.
+
+If the command ends without its cleanup, for example after `kill -9` or a power loss, it leaves
+`images/.NAME.building` and `images/.NAME.inputs` behind. The next build of `NAME` stops and names
+both. Delete both when no other `image xcode` is building `NAME`.
 
 The daemon refuses to lease an image that isn't ready or a bundle in `images` without
-`image.json`. It checks when a request arrives and again right before it clones a queued request.
+`image.json`. It checks when a request arrives and again each time it clones the image for a lease.
 
 ## Leasing the image
 
@@ -96,3 +100,8 @@ One build of Xcode 27.0 with the iOS 27.0 runtime took 273 seconds on a Mac with
 - The build takes only a `.xip` archive, not an installed `Xcode.app`.
 - It installs one iOS runtime. Other platforms need another tool.
 - The image keeps the source's macOS. A newer macOS needs a new source.
+- The source must have no iOS simulator runtime and no Xcode with the archive's build. Otherwise
+  the build fails after it expands the archive.
+- When the archive or the runtime is on another volume, the build copies it to the data directory.
+  The copy takes its full size there until the build ends.
+- A signal during such a copy takes effect only when the copy ends.
