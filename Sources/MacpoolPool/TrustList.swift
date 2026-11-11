@@ -175,6 +175,13 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
         }
     }
 
+    /// Removes the record of a key, if the list has one.
+    ///
+    /// - Parameter key: The fingerprint of a paired Mac's key.
+    mutating func remove(_ key: KeyFingerprint) {
+        records.removeAll { $0.key == key }
+    }
+
     /// Returns the list's file.
     ///
     /// - Parameter directory: The data directory.

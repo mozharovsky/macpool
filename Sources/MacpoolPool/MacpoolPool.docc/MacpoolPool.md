@@ -166,7 +166,7 @@ that the client's macOS does not know, the host records the client and
 ``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
 and pair again with a new code.
 
-### Revoking
+### Revoking and forgetting
 
 The local user revokes a client with ``PoolRequest/revoke(key:endLeases:)``. Name the client by its
 short key or its full fingerprint. The daemon takes no name, because each Mac chooses its own name
@@ -193,6 +193,11 @@ daemon blocks nothing. Revoke the client again once the list can be read.
 If the list has no record of the key, the daemon still closes the connections of a client with
 that key and ends the same leases. The request then fails, and the client can pair again with a new
 code.
+
+A paired client asks the host to forget it with ``PoolRequest/forget(endLeases:)``. If it holds
+leases and `endLeases` is not set, the request fails. Otherwise the daemon removes the record, ends
+the leases, and closes every connection of the client. The daemon refuses this request from a
+blocked client. A blocked record therefore stays.
 
 ### Supervisors
 

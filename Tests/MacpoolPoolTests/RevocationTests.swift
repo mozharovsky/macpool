@@ -2,7 +2,8 @@ import Foundation
 @testable import MacpoolPool
 import Testing
 
-/// Tests of revoking paired Macs and of the record check before each request of a paired Mac.
+/// Tests of revoking paired Macs, of Macs that ask the host to forget them, and of the record
+/// check before each request of a paired Mac.
 @Suite(.timeLimit(.minutes(1)))
 struct RevocationTests {
     /// The refusal that a paired Mac receives once the host no longer accepts it.
@@ -209,8 +210,128 @@ struct RevocationTests {
         await daemon.shutdown()
     }
 
+    /// Keeps the record, the leases, and the connection of a Mac that asks the host to forget it
+    /// when the list cannot be saved.
+    @Test func forgetsNothingWhenTheListCannotBeSaved() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, detached: true)))
+        #expect(try await next(remote).lease?.phase == .starting)
+        let lease = try #require(try await next(remote).lease)
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+
+        try remote.send(PoolRequest.forget(endLeases: true))
+        let unsaved = ClientRightsTests.refusal("the host cannot update its list of paired Macs")
+        #expect(try await next(remote) == .failure(unsaved))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key] != nil)
+        try remote.send(PoolRequest.status)
+        guard case let .status(summary) = try await next(remote) else {
+            Issue.record("the connection did not stay open")
+            return
+        }
+        #expect(summary.leases.map(\.id) == [lease.id])
+        #expect(summary.leases.map(\.phase) == [.ready])
+        remote.close()
+        await daemon.shutdown()
+    }
+
+    /// Removes the record of a Mac that asks the host to forget it. The Mac must first release
+    /// its leases or ask the host to end them. Every connection of the Mac then closes.
+    @Test func forgetsAPairedMac() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        let other = try await pool.pairedClient(of: daemon, owner: owner)
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, detached: true)))
+        #expect(try await next(remote).lease?.phase == .starting)
+        let lease = try #require(try await next(remote).lease)
+
+        try remote.send(PoolRequest.forget())
+        let held = "this Mac holds a lease on the host. Release the leases first, or ask again to end them"
+        #expect(try await next(remote) == .failure(ClientRightsTests.refusal(held)))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key] != nil)
+
+        try remote.send(PoolRequest.forget(endLeases: true))
+        #expect(try await next(remote) == .ended(lease.id, reason: "this Mac asked the host to forget it"))
+        #expect(try await next(remote) == .forgotten(leases: 1))
+        #expect(try await isClosed(remote))
+        #expect(try await next(other) == Self.notAccepted)
+        #expect(try await isClosed(other))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory).records.isEmpty)
+        #expect(await daemon.summary().leases.allSatisfy { $0.phase == .stopping })
+
+        await #expect(throws: PoolError.daemonRefused(
+            message: ClientRightsTests.refusal("only a paired Mac can ask the host to forget it"),
+        )) {
+            try await PoolClient.send(.forget(), to: pool.directory)
+        }
+        await daemon.shutdown()
+    }
+
+    /// Keeps host paths from a revoked Mac and from a Mac that asks the host to forget it. The
+    /// replies cover both refusals to forget, a revocation that cannot save the block, and the end
+    /// of each Mac's lease. The host's own user sees the path of the list in the revocation's
+    /// failure.
+    @Test func keepsHostPathsFromRevokedAndForgottenMacs() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(slots: 2, offeredSources: ["base": pool.source])
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let revoked = try await pool.pairedClient(of: daemon, owner: owner)
+        let leaving = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("b"))
+        var replies: [PoolReply] = []
+        try revoked.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        try await replies.append(next(revoked))
+        try await replies.append(next(revoked))
+        try leaving.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, detached: true)))
+        try await replies.append(next(leaving))
+        try await replies.append(next(leaving))
+
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+        for endLeases in [false, true] {
+            try leaving.send(PoolRequest.forget(endLeases: endLeases))
+            try await replies.append(next(leaving))
+        }
+        do {
+            _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+            Issue.record("the revocation succeeded without a saved block")
+        } catch let .daemonRefused(message) {
+            #expect(message.contains(pool.directory.trustDirectory.path(percentEncoded: false)))
+        }
+        try await replies.append(next(revoked))
+        try await replies.append(next(revoked))
+        try Self.setImmutable(false, listIn: pool.directory)
+        try leaving.send(PoolRequest.forget(endLeases: true))
+        try await replies.append(next(leaving))
+        try await replies.append(next(leaving))
+
+        let first = try #require(replies[1].lease)
+        let second = try #require(replies[3].lease)
+        #expect(Array(replies.suffix(4)) == [
+            .ended(first.id, reason: "the host revoked this Mac"),
+            Self.notAccepted,
+            .ended(second.id, reason: "this Mac asked the host to forget it"),
+            .forgotten(leases: 1),
+        ])
+        try ClientRightsTests.expectNoHostPath(in: replies, of: pool)
+        await daemon.shutdown()
+    }
+
     /// Ends the connection of a Mac at its next request once the list no longer names the Mac or
-    /// blocks it.
+    /// blocks it. A blocked Mac cannot remove its record.
     @Test func closesConnectionsOfRemovedOrBlockedMacs() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
@@ -225,7 +346,7 @@ struct RevocationTests {
         try TrustList<TrustedClient>().save(to: pool.directory)
         try ClientRightsTests.record(blocked, priorityCeiling: 0, isBlocked: true, in: pool.directory)
         try removedChannel.send(PoolRequest.status)
-        try blockedChannel.send(PoolRequest.status)
+        try blockedChannel.send(PoolRequest.forget(endLeases: true))
         for channel in [removedChannel, blockedChannel] {
             #expect(try await next(channel) == Self.notAccepted)
             #expect(try await isClosed(channel))

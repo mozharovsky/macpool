@@ -978,6 +978,12 @@ public actor PoolDaemon {
                     throw .invalidRequest(reason: "only the host's own user can revoke Macs")
                 }
                 try reply(revoke(key, endLeases: endLeases), to: client)
+            case let .forget(endLeases):
+                guard case let .client(key) = owner else {
+                    throw .invalidRequest(reason: "only a paired Mac can ask the host to forget it")
+                }
+                try forget(key, endLeases: endLeases, from: client)
+                return false
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1098,6 +1104,47 @@ public actor PoolDaemon {
         }
     }
 
+    /// Removes the record of the paired Mac that sent the request and closes the Mac's
+    /// connections.
+    ///
+    /// The daemon saves the list before it changes anything else. If the save fails, the Mac
+    /// keeps its record, its leases, and its connections.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the Mac's key.
+    ///   - endLeases: Whether the daemon ends the Mac's leases.
+    ///   - client: The connection that sent the request. It receives
+    ///     ``PoolReply/forgotten(leases:)``.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the Mac has leases and `endLeases` is
+    ///   not set, or when the list cannot be read or saved. The reason names no host path.
+    private func forget(_ key: KeyFingerprint, endLeases: Bool, from client: ClientID) throws(PoolError) {
+        let leases = ledger.liveLeases(of: .client(key)).count
+        guard leases == 0 || endLeases else {
+            let held = leases == 1 ? "a lease" : "\(leases) leases"
+            throw .invalidRequest(reason: "this Mac holds \(held) on the host. Release the leases first, or ask "
+                + "again to end them")
+        }
+        do throws(PoolError) {
+            var list = try TrustList<TrustedClient>.load(from: configuration.directory)
+            list.remove(key)
+            try list.save(to: configuration.directory)
+        } catch {
+            configuration.logger.log(
+                level: peerLogLevel(of: .unsavedClientList, full: .error),
+                "The host cannot forget a paired Mac",
+                metadata: ["key": "\(key)", "reason": "\(error)"],
+            )
+            throw .invalidRequest(reason: "the host cannot update its list of paired Macs")
+        }
+        let ended = cutOff(key, endLeases: true, reason: "this Mac asked the host to forget it", except: client)
+        configuration.logger.notice("Forgot a paired Mac on its request", metadata: [
+            "key": "\(key)",
+            "connections": "\(ended.connections)",
+            "leases": "\(ended.leases)",
+        ])
+        disconnect(client, sending: .forgotten(leases: ended.leases))
+    }
+
     /// Logs a revocation that closed a Mac's connections but could not block the Mac.
     ///
     /// - Parameters:
@@ -1113,7 +1160,7 @@ public actor PoolDaemon {
         ])
     }
 
-    /// The connections and leases that ``cutOff(_:endLeases:reason:)`` ended.
+    /// The connections and leases that ``cutOff(_:endLeases:reason:except:)`` ended.
     private struct CutOff {
         /// The number of connections that the daemon closed.
         var connections: Int
@@ -1131,8 +1178,15 @@ public actor PoolDaemon {
     ///   - endLeases: Whether the daemon also ends the leases that outlive their client. The
     ///     leases that need a client end in either case.
     ///   - reason: Why the leases end.
+    ///   - kept: A connection that the caller closes itself, if any. The count does not include
+    ///     it.
     /// - Returns: The counts of closed connections and of the Mac's leases that ended.
-    private func cutOff(_ key: KeyFingerprint, endLeases: Bool, reason: String) -> CutOff {
+    private func cutOff(
+        _ key: KeyFingerprint,
+        endLeases: Bool,
+        reason: String,
+        except kept: ClientID? = nil,
+    ) -> CutOff {
         let owner = LeaseOwner.client(key)
         let before = ledger.liveLeases(of: owner).count
         // A lease that needs a client may wait for its client to reattach after a daemon
@@ -1140,7 +1194,7 @@ public actor PoolDaemon {
         for id in ledger.liveLeases(of: owner) where endLeases || ledger.leases[id]?.needsClient == true {
             perform((try? ledger.release(id, owner: .local, reason: reason)) ?? [])
         }
-        let connections = clients.filter { $0.value.owner == owner }.keys.sorted()
+        let connections = clients.filter { $0.key != kept && $0.value.owner == owner }.keys.sorted()
         for connection in connections {
             disconnect(connection, sending: .failure(Self.notAcceptedReason))
         }
@@ -2239,7 +2293,7 @@ private extension PoolReply {
     /// Every text in the reply.
     var texts: [String] {
         switch self {
-        case .queued, .released, .wrongCode:
+        case .queued, .released, .wrongCode, .forgotten:
             []
         case let .starting(lease), let .ready(lease), let .renewed(lease):
             lease.texts

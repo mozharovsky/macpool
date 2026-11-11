@@ -178,6 +178,18 @@ struct ClientRightsTests {
         try await replies.append(receive())
         #expect(replies.last == .failure("the host could not read the request"))
 
+        try Self.expectNoHostPath(in: replies, of: pool)
+        await daemon.shutdown()
+    }
+
+    /// Checks that no reply names the fixture's root or the home directory. Also checks that the
+    /// daemon replaced no reply because it named a host path.
+    ///
+    /// - Parameters:
+    ///   - replies: The replies that paired clients received.
+    ///   - pool: The fixture of the host.
+    /// - Throws: `EncodingError` when a reply cannot be encoded.
+    static func expectNoHostPath(in replies: [PoolReply], of pool: PoolFixture) throws {
         let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
         let paths = [pool.root.url.path(percentEncoded: false), home]
             .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
@@ -188,7 +200,6 @@ struct ClientRightsTests {
             #expect(!paths.contains { text.contains($0) }, "\(text)")
         }
         #expect(pool.logs.entries("A reply to a paired Mac named a host path").isEmpty)
-        await daemon.shutdown()
     }
 
     /// Replaces a reply to a paired client that names a host path with a failure, and logs it.
