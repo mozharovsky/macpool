@@ -56,15 +56,14 @@ final class StopFlag: Sendable {
 
 /// Termination signals delivered as values instead of ending the process.
 ///
-/// While a watch exists, its signals are ignored by default and reach the handler instead. The
-/// signals that it ignores never reach the handler. Cancelling the watch restores the default
-/// actions.
+/// While a watch exists, its signals reach the handler instead of taking their usual actions.
+/// Cancelling the watch restores the actions that the signals had before it started.
 final class SignalWatch: Sendable {
     /// The dispatch sources that receive the signals.
     private let sources: [any DispatchSourceSignal]
 
-    /// The signals that this watch handles or ignores.
-    private let numbers: [Int32]
+    /// The watched signals with the actions that they had before the watch.
+    private let previousActions: [Int32: sigaction]
 
     /// The signals that a watch handles unless its creator names others.
     static let signals = [SIGINT, SIGTERM]
@@ -73,33 +72,50 @@ final class SignalWatch: Sendable {
     ///
     /// - Parameters:
     ///   - signals: The signals to handle.
-    ///   - ignored: The signals to ignore without calling the handler.
     ///   - handler: The handler. It receives the signal number on a background queue.
-    init(
-        signals: [Int32] = SignalWatch.signals,
-        ignoring ignored: [Int32] = [],
-        handler: @escaping @Sendable (Int32) -> Void,
-    ) {
-        numbers = signals + ignored
-        for number in ignored {
-            signal(number, SIG_IGN)
-        }
+    init(signals: [Int32] = SignalWatch.signals, handler: @escaping @Sendable (Int32) -> Void) {
+        var previousActions: [Int32: sigaction] = [:]
         sources = signals.map { number in
+            previousActions[number] = Self.action(of: number)
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
             source.setEventHandler { handler(number) }
             source.resume()
             return source
         }
+        self.previousActions = previousActions
     }
 
-    /// Stops watching and restores the default signal actions.
+    /// Reports whether the process ignores a signal.
+    ///
+    /// A process that `nohup` starts ignores `SIGHUP`, and a background job of a script ignores
+    /// `SIGINT`.
+    ///
+    /// - Parameter number: The signal.
+    /// - Returns: Whether the signal's action is `SIG_IGN`.
+    static func isIgnored(_ number: Int32) -> Bool {
+        let handler = action(of: number).__sigaction_u.__sa_handler
+        return unsafeBitCast(handler, to: Int.self) == unsafeBitCast(SIG_IGN, to: Int.self)
+    }
+
+    /// Reads a signal's current action.
+    ///
+    /// - Parameter number: The signal.
+    /// - Returns: The action.
+    private static func action(of number: Int32) -> sigaction {
+        var current = sigaction()
+        sigaction(number, nil, &current)
+        return current
+    }
+
+    /// Stops watching and restores the actions that the signals had before the watch.
     func cancel() {
         for source in sources {
             source.cancel()
         }
-        for number in numbers {
-            signal(number, SIG_DFL)
+        for (number, action) in previousActions {
+            var previous = action
+            sigaction(number, &previous, nil)
         }
     }
 }

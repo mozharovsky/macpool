@@ -128,15 +128,20 @@ struct XcodeImageCommand: AsyncParsableCommand {
     /// Starts watching the signals that interrupt a build.
     ///
     /// `SIGINT`, `SIGTERM`, and `SIGHUP` set `interrupted`. Closing the terminal sends `SIGHUP`, and
-    /// the build then continues with a dead standard output. `SIGPIPE` is ignored, so a write to a
-    /// closed pipe fails instead of ending the process before the cleanup.
+    /// the build then continues with a dead standard output. If the process already ignores a
+    /// signal, for example `SIGHUP` under `nohup`, the signal does not interrupt the build.
+    ///
+    /// The function also prepares the output for the rest of the process. `SIGPIPE` stays ignored,
+    /// and ``Report/line(_:)`` drops lines that it cannot write. The cleanup and the lines after a
+    /// published image then finish with a closed pipe or terminal.
     ///
     /// - Parameter interrupted: The flag that the signals set.
-    /// - Returns: The function that stops the watch and restores the default signal actions.
+    /// - Returns: The function that stops the watch and restores the earlier signal actions.
     static func watchSignals(_ interrupted: StopFlag) -> @Sendable () -> Void {
-        let watch = SignalWatch(signals: SignalWatch.signals + [SIGHUP], ignoring: [SIGPIPE]) { _ in
-            interrupted.set()
-        }
+        signal(SIGPIPE, SIG_IGN)
+        Report.dropUnwritableLines()
+        let signals = (SignalWatch.signals + [SIGHUP]).filter { !SignalWatch.isIgnored($0) }
+        let watch = SignalWatch(signals: signals) { _ in interrupted.set() }
         return { watch.cancel() }
     }
 

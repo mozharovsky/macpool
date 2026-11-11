@@ -297,8 +297,8 @@ struct XcodeImageTests {
         }
     }
 
-    /// Finishes the cleanup after `SIGHUP` when standard output is a closed terminal or a pipe
-    /// without a reader.
+    /// Finishes the cleanup after `SIGHUP` and prints later lines when standard output is a closed
+    /// terminal or a pipe without a reader.
     @Test(arguments: [false, true]) func cleansUpWithClosedOutput(throughPipe: Bool) async {
         await #expect(processExitsWith: .success) { [throughPipe] in
             // _exit skips the exit work of the harness and of stdio. That work would write to the closed output.
@@ -330,11 +330,64 @@ struct XcodeImageTests {
                     _exit(5)
                 }
             }
+            // A published image prints its lines after the watch ends.
+            Report.line("image=\(workspace.image.path(percentEncoded: false))")
             let manager = FileManager.default
             let isClean = !manager.fileExists(atPath: workspace.building.root.path(percentEncoded: false))
                 && !manager.fileExists(atPath: workspace.inputs.path(percentEncoded: false))
             try? manager.removeItem(at: folder.base.root.deletingLastPathComponent())
             _exit(isClean ? 0 : 6)
+        }
+    }
+
+    /// Leaves a build running when `SIGHUP` arrives under `nohup`, and keeps the signal ignored after
+    /// the watch ends.
+    @Test func keepsIgnoredHangup() async {
+        await #expect(processExitsWith: .success) {
+            signal(SIGHUP, SIG_IGN)
+            let interrupted = StopFlag()
+            let stopWatching = XcodeImageCommand.watchSignals(interrupted)
+            kill(getpid(), SIGHUP)
+            // A watched signal reaches its handler on a background queue within milliseconds.
+            usleep(300_000)
+            guard !interrupted.isSet else {
+                _exit(2)
+            }
+            stopWatching()
+            guard SignalWatch.isIgnored(SIGHUP) else {
+                _exit(3)
+            }
+            kill(getpid(), SIGHUP)
+            usleep(100_000)
+            _exit(0)
+        }
+    }
+
+    /// Restores the action that a signal had before the watch, instead of the default action.
+    @Test func restoresEarlierSignalAction() async {
+        await #expect(processExitsWith: .success) {
+            signal(SIGUSR1, SIG_IGN)
+            SignalWatch(signals: [SIGUSR1]) { _ in }.cancel()
+            // The default action of SIGUSR1 ends the process. Delivery to another thread can
+            // take a moment.
+            kill(getpid(), SIGUSR1)
+            usleep(100_000)
+            _exit(0)
+        }
+    }
+
+    /// Ends the process when a line cannot be written, unless an image build drops such lines.
+    @Test(arguments: [false, true]) func reportsUnwritableLine(dropping: Bool) async {
+        await #expect(processExitsWith: dropping ? .success : .failure) { [dropping] in
+            let output = closedTerminal()
+            guard dup2(output, STDOUT_FILENO) >= 0, dup2(output, STDERR_FILENO) >= 0 else {
+                _exit(2)
+            }
+            if dropping {
+                Report.dropUnwritableLines()
+            }
+            Report.line("measure probe_seconds=1.0")
+            _exit(0)
         }
     }
 

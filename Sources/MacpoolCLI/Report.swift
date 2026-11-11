@@ -1,5 +1,6 @@
 import Foundation
 import MacpoolVM
+import Synchronization
 
 /// The command line's output.
 ///
@@ -25,15 +26,33 @@ enum Report {
         "measure \(key)=\(value)"
     }
 
+    /// Whether ``line(_:)`` drops a line that it cannot write.
+    private static let dropsUnwritableLines = Mutex(false)
+
+    /// Makes ``line(_:)`` drop the lines that it cannot write for the rest of the process.
+    ///
+    /// An image build calls this so that it can clean up after the terminal closes. Other commands
+    /// keep the default. Their result is their output, and a failed write ends them abnormally.
+    static func dropUnwritableLines() {
+        dropsUnwritableLines.withLock { $0 = true }
+    }
+
     /// Prints a line on standard output.
     ///
-    /// If standard output is closed, for example after the terminal closed, the line is lost and
-    /// the command continues.
+    /// If the line cannot be written, for example because the terminal closed, the process ends
+    /// abnormally. After ``dropUnwritableLines()`` the line is lost instead and the command
+    /// continues.
     ///
     /// - Parameter text: The line without a line break.
     static func line(_ text: String) {
-        // The non-throwing write raises an Objective-C exception on EIO. The exception ends the process.
-        try? FileHandle.standardOutput.write(contentsOf: Data((text + "\n").utf8))
+        let data = Data((text + "\n").utf8)
+        if dropsUnwritableLines.withLock({ $0 }) {
+            try? FileHandle.standardOutput.write(contentsOf: data)
+        } else {
+            // The non-throwing write raises an Objective-C exception on a failure, and the
+            // exception ends the process.
+            FileHandle.standardOutput.write(data)
+        }
     }
 
     /// Formats a duration in seconds with a fixed number of decimals.
