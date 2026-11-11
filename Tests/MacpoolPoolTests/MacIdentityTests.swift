@@ -85,6 +85,115 @@ struct MacIdentityTests {
         #expect(try MacIdentity.loadOrCreate(in: directory).keyDigest == created.keyDigest)
     }
 
+    /// Creates no key while a link, a directory, or an unreadable file sits at a list's path.
+    @Test func createsNoKeyWhileAnythingSitsAtAListPath() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try directory.prepareTrustDirectory()
+        let key = directory.identityFile.path(percentEncoded: false)
+        let manager = FileManager.default
+        for list in [TrustList<TrustedClient>.file(in: directory), TrustList<TrustedHost>.file(in: directory)] {
+            let path = list.path(percentEncoded: false)
+            let missing = PoolError.missingIdentity(path: key, lists: [path])
+            try manager.createSymbolicLink(atPath: path, withDestinationPath: "absent.json")
+            #expect(throws: missing, "link at \(path)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            try manager.removeItem(atPath: path)
+            try manager.createDirectory(atPath: path, withIntermediateDirectories: false)
+            #expect(throws: missing, "directory at \(path)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            try manager.removeItem(atPath: path)
+            #expect(manager.createFile(atPath: path, contents: Data(), attributes: [.posixPermissions: 0]))
+            #expect(throws: missing, "unreadable file at \(path)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            try manager.removeItem(atPath: path)
+        }
+        #expect(!manager.fileExists(atPath: key))
+    }
+
+    /// Refuses a data directory whose access control list lets other users change its entries,
+    /// and accepts one that only denies access.
+    @Test func refusesADataDirectoryThatOthersCanChange() async throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        let path = directory.root.pathWithoutTrailingSlash
+        let reason = FileExposure.writableAccessControlList.reason
+
+        for entry in ["everyone allow add_file", "everyone allow delete_child", "everyone allow writesecurity"] {
+            try await Self.changeMode("+a", entry, path)
+            #expect(throws: PoolError.insecureDirectory(path: path, reason: reason), "\(entry)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            #expect(throws: PoolError.insecureDirectory(path: path, reason: reason), "\(entry)") {
+                try TrustList<TrustedClient>.load(from: directory)
+            }
+            try await Self.changeMode("-N", path)
+        }
+        try await Self.changeMode("+a", "everyone deny delete", path)
+        try await Self.changeMode("+a", "everyone allow list,search", path)
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        try await Self.changeMode("-N", path)
+    }
+
+    /// Accepts an access control entry of the data directory that lets only the current user
+    /// change the entries. Refuses an entry for another user or for a group, also beside an entry
+    /// for the current user.
+    @Test func acceptsWritesOnlyForTheCurrentUser() async throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        let path = directory.root.pathWithoutTrailingSlash
+        let refusal = PoolError.insecureDirectory(path: path, reason: FileExposure.writableAccessControlList.reason)
+        let user = "user:\(NSUserName()) allow add_file,delete_child,writesecurity"
+
+        try await Self.changeMode("+a", user, path)
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        try await Self.changeMode("-N", path)
+        let refused = [
+            ["user:daemon allow add_file"],
+            ["group:staff allow add_file"],
+            [user, "user:daemon allow delete_child"],
+        ]
+        for entries in refused {
+            for entry in entries {
+                try await Self.changeMode("+a", entry, path)
+            }
+            #expect(throws: refusal, "\(entries)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            #expect(throws: refusal, "\(entries)") {
+                try TrustList<TrustedClient>.load(from: directory)
+            }
+            try await Self.changeMode("-N", path)
+        }
+    }
+
+    /// Fails instead of skipping an access control entry whose subject cannot be read.
+    @Test func failsOnAnEntryWithoutASubject() throws {
+        var list = acl_init(1)
+        defer { acl_free(UnsafeMutableRawPointer(list)) }
+        var entry: acl_entry_t?
+        try #require(acl_create_entry(&list, &entry) == 0)
+        let directory = URL(filePath: "/")
+        let error = #expect(throws: PoolError.self) {
+            try FileExposure.findWriteAccess(in: #require(list), user: getuid(), of: directory)
+        }
+        guard case let .fileSystem(operation, _, _)? = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
+        #expect(operation == "reading the subject of an access control entry of")
+    }
+
     /// Names a key with the hexadecimal digits of its digest.
     @Test func namesTheKeyByItsDigest() {
         let digest = MacIdentity.keyDigest(of: P256.Signing.PrivateKey().publicKey)
@@ -246,6 +355,15 @@ struct MacIdentityTests {
         #expect(!FileManager.default.fileExists(atPath: shared.identityFile.path(percentEncoded: false)))
     }
 
+    /// Reads the exposure from a volume's mount flags without a mounted volume.
+    @Test func readsVolumeFlags() {
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL)) == nil)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL | MNT_RDONLY)) == nil)
+        #expect(FileExposure.exposure(ofVolumeFlags: 0) == .networkVolume)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_IGNORE_OWNERSHIP)) == .ownerlessVolume)
+        #expect(FileExposure.exposure(ofVolumeFlags: UInt32(MNT_LOCAL | MNT_IGNORE_OWNERSHIP)) == .ownerlessVolume)
+    }
+
     /// Refuses to keep a key on a volume that ignores ownership, where every local user acts as
     /// the owner of every file.
     @Test func refusesVolumeThatIgnoresOwnership() async throws {
@@ -253,7 +371,7 @@ struct MacIdentityTests {
         try await OwnerlessVolume.withVolume(in: root.url) { volume in
             let directory = PoolDirectory(root: volume.appending(path: "pool", directoryHint: .isDirectory))
             let refusal = PoolError.insecureDirectory(
-                path: directory.trustDirectory.pathWithoutTrailingSlash,
+                path: directory.root.pathWithoutTrailingSlash,
                 reason: FileExposure.ownerlessVolume.reason,
             )
             #expect(throws: refusal) {
@@ -261,7 +379,7 @@ struct MacIdentityTests {
             }
             #expect(!FileManager.default.fileExists(atPath: directory.identityFile.path(percentEncoded: false)))
 
-            // The key file gets the same check, which the directory check above runs first.
+            // The directory checks above run first. The key file gets the same check.
             let file = volume.appending(path: "identity.pem")
             #expect(FileManager.default.createFile(
                 atPath: file.path(percentEncoded: false),

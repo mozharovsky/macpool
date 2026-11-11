@@ -52,12 +52,20 @@ host lists its clients in `clients.json`, and a client lists its hosts in `hosts
 is missing while either list exists, the pool refuses to start the listener for paired Macs. The
 error names the lists. Put the key file back, or delete the lists and pair the Macs again.
 
+The pool reads and writes a list of at most 256 KiB. The host reads its list during every
+handshake, so the limit bounds the work of one connection. A pairing that would make the list
+larger fails.
+
 People compare a key by its ``KeyFingerprint/shortKey``, the first 80 bits of the digest in
 base32. Logs name a paired client by the same text.
 
 Permission bits alone do not keep other users out. The pool also refuses the key and the `trust`
-directory on a volume that ignores ownership and when either has an access control list. The
-`trust` directory is excluded from backups, which Time Machine honors.
+directory on a volume that ignores ownership or is not local, and when either has an access control
+list. The data directory may have an access control list that denies access or allows reading, such
+as the `group:everyone deny delete` that macOS puts on `~/Library`. The pool refuses one that lets
+other users add, delete, or rename its entries, because they could then move `trust` away. The pool
+accepts an entry that allows these writes only to the current user. The `trust` directory is
+excluded from backups, which Time Machine honors.
 
 The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.
 The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and
@@ -65,20 +73,21 @@ not the certificate's names or dates.
 
 ### Connections between Macs
 
-With ``PoolDaemon/Configuration/peers`` set, the daemon also listens on TCP for paired Macs. Both
-sides present their key in a TLS 1.3 handshake with the application protocol `macpool/1`. Each
-side checks only the key in the first certificate that the other side sends, and the system's
-trust evaluation never runs. Session resumption and session tickets are off, so every connection
-runs a full handshake.
+With ``PoolDaemon/Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It
+binds to the one numeric address in ``PeerSettings/address``. For a host name, Network would bind
+to every interface, so the listener refuses names. Both sides present their key in a TLS 1.3
+handshake with the application protocol `macpool/1`. Each side checks only the key in the first
+certificate that the other side sends, and the system's trust evaluation never runs. Session
+resumption and session tickets are off, so every connection runs a full handshake.
 
-The host reads `trust/clients.json` during every handshake and admits the keys of clients that
-are not blocked. A key that leaves the list opens no new connection, and connections that are
-already open stay open. If the list cannot be read when the listener starts, the listener does
-not start. If it cannot be read later, the host admits nobody until it can. A
-TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
-first sends a `hello` line. The line names the host's role and the protocol version that ALPN
-chose. The client sends requests only after that line. Both sides then exchange the same lines as
-on the Unix socket.
+The host reads `trust/clients.json` during every handshake and admits the keys of clients that are
+not blocked. While an invitation is open, it also admits keys that the list does not name, so that
+a new client can pair. A key that leaves the list opens no new connection, and connections that are
+already open stay open. If the list cannot be read when the listener starts, the listener does not
+start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
+its handshake before the host checks the client's key. The host therefore first sends a `hello`
+line. The line names the host's role and the protocol version that ALPN chose. The client sends
+requests only after that line. Both sides then exchange the same lines as on the Unix socket.
 
 The daemon loads the key when it starts listening. A key or a list that cannot be loaded, or a
 port that another process holds, leaves the local socket serving. The daemon logs the failure and
@@ -97,6 +106,46 @@ Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout
 ends first, it closes the connection anyway. The bytes that were still waiting are lost, and the
 peer still sees a normal end of the stream.
+
+### Pairing
+
+A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
+code with ``PoolRequest/invite(address:)``. The code carries the host's address and port, the
+first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to the person
+who pairs the client, because anyone with the code can pair in that client's place.
+
+``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
+it sends the secret. The host then adds the client to `clients.json`, and the client adds the
+host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``. If the two
+texts differ, someone else used the code.
+
+A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
+5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
+10 minutes, when a newer invitation replaces it, or when the inviting connection closes. The daemon
+keeps only the SHA-256 digest of the secret, and only in memory. A restart of the daemon therefore
+ends the invitation.
+
+Wrong secrets do not end the invitation, because a secret has 128 random bits and no guess finds
+it. After the first wrong secret, the inviting connection receives ``PoolReply/wrongCode``. When
+the invitation ends, the daemon logs how many wrong secrets it received.
+
+If a pairing fails after the host recorded the client, the client pairs again with a new code. For
+example, the host's reply may never arrive. The host then leaves its record of the client
+unchanged, and the inviting connection receives ``PoolReply/alreadyPaired(_:)``. A blocked client
+cannot pair again.
+
+Each Mac gives the other its name, and both names follow the same rule. A name has 1 to 64 Unicode
+scalars. It has no control, format, private-use, unassigned, or default-ignorable scalars and no
+line or paragraph separators. Format scalars include the controls that reverse the direction of
+text. Default-ignorable scalars include the characters that have no width and the Hangul fillers.
+A name also starts with a scalar that is not a mark. It has at least one letter, number,
+punctuation, or symbol other than the blank Braille pattern U+2800 and the musical null notehead
+U+1D159. A name therefore cannot hide part of itself or look empty when the pool shows it.
+
+Each Mac checks names with the Unicode tables of its own macOS. If the host's name has a scalar
+that the client's macOS does not know, the host records the client and
+``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
+and pair again with a new code.
 
 ### Supervisors
 
@@ -182,6 +231,8 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``LeaseID``
 - ``LeaseOwner``
 - ``KeyFingerprint``
+- ``PairingCode``
+- ``PairedMac``
 - ``RestartPolicy``
 - ``LeasePhase``
 - ``LeaseSummary``

@@ -94,9 +94,9 @@ protocol GuestCommandRunner: Sendable {
 
     /// Runs a command in the guest.
     ///
-    /// Cancelling the calling task ends the connection. The command in the guest keeps running
-    /// until it ends or until it writes to its standard output or standard error. That write ends
-    /// it. The guest's state after a cancellation is unknown.
+    /// Cancelling the calling task or reaching the time limit ends the connection. The command in
+    /// the guest keeps running until it ends or until it writes to its standard output or standard
+    /// error. That write ends it. The guest's state after either event is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -106,9 +106,12 @@ protocol GuestCommandRunner: Sendable {
     ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
+    ///   - timeLimit: The longest time the call may take, including the login, or `nil` for no
+    ///     limit.
     /// - Returns: The command's outputs and exit status.
     /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the command cannot start or reading
-    ///   its output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   its output fails. ``MacpoolError/guestCommandTimedOut(limit:output:errorOutput:)`` when
+    ///   the time limit passes. ``MacpoolError/guestCommandCancelled`` when the calling task is
     ///   cancelled.
     func run(
         _ command: String,
@@ -117,6 +120,7 @@ protocol GuestCommandRunner: Sendable {
         accountFile: URL,
         knownHosts: URL,
         trustsFirstKey: Bool,
+        timeLimit: Duration?,
     ) async throws(MacpoolError) -> GuestCommandResult
 
     /// Removes the runner's private directory and the `known_hosts` files in it.
@@ -191,9 +195,9 @@ struct GuestShell: GuestCommandRunner {
 
     /// Runs a command in the guest through `ssh`.
     ///
-    /// Cancelling the calling task terminates `ssh`. The command in the guest keeps running until
-    /// it ends or until it writes to its standard output or standard error. That write ends it.
-    /// The guest's state after a cancellation is unknown.
+    /// Cancelling the calling task or reaching the time limit terminates `ssh`. The command in the
+    /// guest keeps running until it ends or until it writes to its standard output or standard
+    /// error. That write ends it. The guest's state after either event is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -203,9 +207,13 @@ struct GuestShell: GuestCommandRunner {
     ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
+    ///   - timeLimit: The longest time the call may take, including the login, or `nil` for no
+    ///     limit.
     /// - Returns: The command's outputs and exit status.
     /// - Throws: ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or reading its
-    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    ///   output fails. ``MacpoolError/guestCommandTimedOut(limit:output:errorOutput:)`` when the
+    ///   time limit passes. ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   cancelled.
     func run(
         _ command: String,
         input: String,
@@ -213,6 +221,7 @@ struct GuestShell: GuestCommandRunner {
         accountFile: URL,
         knownHosts: URL,
         trustsFirstKey: Bool,
+        timeLimit: Duration?,
     ) async throws(MacpoolError) -> GuestCommandResult {
         try await Self.collect(
             executable: "/usr/bin/ssh",
@@ -229,6 +238,7 @@ struct GuestShell: GuestCommandRunner {
                 "MACPOOL_ACCOUNT_FILE": accountFile.filePath,
             ]),
             input: input,
+            timeLimit: timeLimit,
         )
     }
 
@@ -276,19 +286,26 @@ struct GuestShell: GuestCommandRunner {
     /// The process may exit before it reads all of its input. The rest of the input is then
     /// dropped, and the result reports the exit status.
     ///
+    /// When the time limit passes, the call sends `SIGKILL` to the process. The output streams end
+    /// when no other process holds them open.
+    ///
     /// - Parameters:
     ///   - executable: The absolute path of the program.
     ///   - arguments: The program's arguments.
     ///   - environment: The program's environment.
     ///   - input: The program's standard input.
+    ///   - timeLimit: The longest time the process may run, or `nil` for no limit.
     /// - Returns: The exit status and at most the last ``outputLimit`` bytes of each stream.
     /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the process cannot start or reading its
-    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    ///   output fails. ``MacpoolError/guestCommandTimedOut(limit:output:errorOutput:)`` when the
+    ///   time limit passes. ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   cancelled.
     static func collect(
         executable: String,
         arguments: [String],
         environment: Environment = .inherit,
         input: String,
+        timeLimit: Duration? = nil,
     ) async throws(MacpoolError) -> GuestCommandResult {
         let pipe: (readEnd: FileDescriptor, writeEnd: FileDescriptor)
         do {
@@ -305,6 +322,7 @@ struct GuestShell: GuestCommandRunner {
 
         var result: GuestCommandResult?
         var failure: (any Error)?
+        var isTimedOut = false
         do {
             let execution = try await Subprocess.run(
                 .path(FilePath(executable)),
@@ -314,12 +332,29 @@ struct GuestShell: GuestCommandRunner {
                 output: .sequence,
                 error: .sequence,
             ) { execution in
+                let timer = Task { () -> Bool in
+                    guard let timeLimit else {
+                        return false
+                    }
+                    do {
+                        try await Task.sleep(for: timeLimit)
+                    } catch {
+                        return false
+                    }
+                    try? execution.send(signal: .kill)
+                    return true
+                }
+                defer { timer.cancel() }
                 let errorStream = execution.standardError
                 async let errorTail = OutputTail(collecting: errorStream)
                 let outputTail = try await OutputTail(collecting: execution.standardOutput)
-                return try await (outputTail, errorTail)
+                let tails = try await (outputTail, errorTail)
+                timer.cancel()
+                return await (tails.0, tails.1, timer.value)
             }
-            let (outputTail, errorTail) = execution.closureResult
+            let (outputTail, errorTail, sentKill) = execution.closureResult
+            // The timer can fire after the process exited on its own. Its status then stands.
+            isTimedOut = sentKill && execution.terminationStatus == .signaled(SIGKILL)
             result = GuestCommandResult(
                 status: status(of: execution.terminationStatus),
                 output: outputTail.text,
@@ -340,6 +375,9 @@ struct GuestShell: GuestCommandRunner {
         }
         guard let result else {
             throw .guestCommand(reason: "\(failure.map { "\($0)" } ?? "no result")")
+        }
+        if let timeLimit, isTimedOut {
+            throw .guestCommandTimedOut(limit: timeLimit, output: result.output, errorOutput: result.errorOutput)
         }
         return result
     }

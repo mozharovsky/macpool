@@ -479,6 +479,28 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// Asks for the pool's state.
     case status
 
+    /// Opens an invitation for one client Mac to pair with this host.
+    ///
+    /// Only the local user may invite. The daemon replies with
+    /// ``PoolReply/invitation(_:expiresAt:)`` and keeps the invitation open while the connection
+    /// stays open. When a client pairs, the daemon sends ``PoolReply/paired(_:)`` on the same
+    /// connection. A newer invitation replaces this one.
+    ///
+    /// - Parameter address: The host's address that the code carries to clients, such as
+    ///   `example.local`.
+    case invite(address: String)
+
+    /// Pairs the sending Mac with the host.
+    ///
+    /// A Mac that the host does not know may send only this request, once per connection. A paired
+    /// Mac may send it with a new code to restore its record of the host. The host then leaves its
+    /// record of the Mac unchanged.
+    ///
+    /// - Parameters:
+    ///   - secret: The secret of the pairing code in base32.
+    ///   - name: The name that the host shows to people for the sending Mac.
+    case pair(secret: String, name: String)
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -487,6 +509,12 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case terms
         /// The lease of an attach, release, or renew request.
         case lease
+        /// The address of an invitation.
+        case address
+        /// The secret of a pairing.
+        case secret
+        /// The name of a pairing Mac.
+        case name
     }
 
     /// Decodes a request.
@@ -507,6 +535,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = try .renew(container.decode(LeaseID.self, forKey: .lease))
         case "status":
             self = .status
+        case "invite":
+            self = try .invite(address: container.decode(String.self, forKey: .address))
+        case "pair":
+            self = try .pair(
+                secret: container.decode(String.self, forKey: .secret),
+                name: container.decode(String.self, forKey: .name),
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -537,6 +572,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(id, forKey: .lease)
         case .status:
             try container.encode("status", forKey: .request)
+        case let .invite(address):
+            try container.encode("invite", forKey: .request)
+            try container.encode(address, forKey: .address)
+        case let .pair(secret, name):
+            try container.encode("pair", forKey: .request)
+            try container.encode(secret, forKey: .secret)
+            try container.encode(name, forKey: .name)
         }
     }
 }
@@ -703,6 +745,35 @@ public enum PoolReply: Sendable, Equatable, Codable {
     /// - Parameter message: Why the request failed.
     case failure(String)
 
+    /// The code of a new invitation.
+    ///
+    /// - Parameters:
+    ///   - code: The code that a client Mac pairs with.
+    ///   - expiresAt: When the invitation ends unless a client paired.
+    case invitation(PairingCode, expiresAt: Date)
+
+    /// A pairing finished.
+    ///
+    /// The inviting connection receives the client Mac, and the client receives the host.
+    ///
+    /// - Parameter mac: The Mac on the other side of the pairing.
+    case paired(PairedMac)
+
+    /// A Mac that the host already trusts used the code of the invitation.
+    ///
+    /// Only the inviting connection receives this reply, and the invitation ends. The host left
+    /// its record of the Mac unchanged. The Mac receives ``paired(_:)`` with the host.
+    ///
+    /// - Parameter mac: The paired Mac with the name in the host's record.
+    case alreadyPaired(PairedMac)
+
+    /// A Mac sent a wrong secret for the open invitation.
+    ///
+    /// Only the inviting connection receives this reply, once per invitation. The invitation stays
+    /// open. A secret has 128 random bits. A wrong one therefore means that the sender does not
+    /// have the code.
+    case wrongCode
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -717,6 +788,12 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case reason
         /// The pool summary.
         case pool
+        /// The pairing code.
+        case code
+        /// The end of an invitation.
+        case expiresAt = "expires_at"
+        /// The Mac on the other side of a pairing.
+        case mac
     }
 
     /// Decodes a reply.
@@ -751,6 +828,17 @@ public enum PoolReply: Sendable, Equatable, Codable {
             self = try .status(container.decode(PoolSummary.self, forKey: .pool))
         case "failure":
             self = try .failure(container.decode(String.self, forKey: .reason))
+        case "invitation":
+            self = try .invitation(
+                container.decode(PairingCode.self, forKey: .code),
+                expiresAt: container.decode(Date.self, forKey: .expiresAt),
+            )
+        case "paired":
+            self = try .paired(container.decode(PairedMac.self, forKey: .mac))
+        case "already_paired":
+            self = try .alreadyPaired(container.decode(PairedMac.self, forKey: .mac))
+        case "wrong_code":
+            self = .wrongCode
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -760,42 +848,170 @@ public enum PoolReply: Sendable, Equatable, Codable {
         }
     }
 
+    /// The kind of reply under the `reply` key, such as `ready` or `already_paired`.
+    var kind: String {
+        switch self {
+        case .queued: "queued"
+        case .starting: "starting"
+        case .ready: "ready"
+        case .restarting: "restarting"
+        case .ended: "ended"
+        case .renewed: "renewed"
+        case .released: "released"
+        case .status: "status"
+        case .failure: "failure"
+        case .invitation: "invitation"
+        case .paired: "paired"
+        case .alreadyPaired: "already_paired"
+        case .wrongCode: "wrong_code"
+        }
+    }
+
     /// Encodes the reply.
     ///
     /// - Parameter encoder: The encoder to write to.
     /// - Throws: An error when the encoder rejects a value.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .reply)
         switch self {
         case let .queued(position):
-            try container.encode("queued", forKey: .reply)
             try container.encode(position, forKey: .position)
-        case let .starting(lease):
-            try container.encode("starting", forKey: .reply)
-            try container.encode(lease, forKey: .lease)
-        case let .ready(lease):
-            try container.encode("ready", forKey: .reply)
+        case let .starting(lease), let .ready(lease), let .renewed(lease):
             try container.encode(lease, forKey: .lease)
         case let .restarting(lease, reason):
-            try container.encode("restarting", forKey: .reply)
             try container.encode(lease, forKey: .lease)
             try container.encode(reason, forKey: .reason)
         case let .ended(id, reason):
-            try container.encode("ended", forKey: .reply)
             try container.encode(id, forKey: .id)
             try container.encode(reason, forKey: .reason)
-        case let .renewed(lease):
-            try container.encode("renewed", forKey: .reply)
-            try container.encode(lease, forKey: .lease)
         case let .released(id):
-            try container.encode("released", forKey: .reply)
             try container.encode(id, forKey: .id)
         case let .status(pool):
-            try container.encode("status", forKey: .reply)
             try container.encode(pool, forKey: .pool)
         case let .failure(message):
-            try container.encode("failure", forKey: .reply)
             try container.encode(message, forKey: .reason)
+        case let .invitation(code, expiresAt):
+            try container.encode(code, forKey: .code)
+            try container.encode(expiresAt, forKey: .expiresAt)
+        case let .paired(mac), let .alreadyPaired(mac):
+            try container.encode(mac, forKey: .mac)
+        case .wrongCode:
+            break
+        }
+    }
+}
+
+/// The Mac on the other side of a pairing.
+public struct PairedMac: Sendable, Equatable, Codable {
+    /// The name that the Mac gave for itself.
+    public var name: String
+
+    /// The fingerprint of the Mac's key.
+    public var key: KeyFingerprint
+
+    /// Creates a description of a paired Mac.
+    ///
+    /// - Parameters:
+    ///   - name: The name that the Mac gave for itself.
+    ///   - key: The fingerprint of its key.
+    public init(name: String, key: KeyFingerprint) {
+        self.name = name
+        self.key = key
+    }
+
+    /// The most Unicode scalars in a Mac's name.
+    static let maximumNameLength = 64
+
+    /// The rule for a Mac's name in the words of error messages.
+    static let nameRule = "1 to \(maximumNameLength) printable characters that include a letter, digit, "
+        + "punctuation mark, or symbol and do not start with a combining mark"
+
+    /// Reports whether a Mac's name can be shown to people as it is.
+    ///
+    /// A valid name meets each of these conditions.
+    ///
+    /// - It has 1 to 64 Unicode scalars.
+    /// - Its first scalar is not a mark.
+    /// - It has a letter, number, punctuation, or symbol scalar that is not in ``blankSymbols``.
+    /// - It has no control, format, line or paragraph separator, private-use, surrogate,
+    ///   unassigned, or default-ignorable scalar.
+    ///
+    /// Format scalars include the controls that reverse the direction of text. Default-ignorable
+    /// scalars include the characters that have no width and the Hangul fillers. A name of only
+    /// spaces, marks, or blank symbols looks empty.
+    ///
+    /// The check uses the Unicode tables of the running macOS. If a scalar comes from a newer
+    /// Unicode version than this macOS knows, the scalar is unassigned and the name fails.
+    ///
+    /// - Parameter name: A name that a Mac gave for itself.
+    /// - Returns: Whether the name meets every condition.
+    static func isValidName(_ name: String) -> Bool {
+        let scalars = name.unicodeScalars
+        guard let first = scalars.first, scalars.count <= maximumNameLength else {
+            return false
+        }
+        return !isMark(first) && scalars.allSatisfy(isPrintable) && scalars.contains(where: isVisible)
+    }
+
+    /// Reports whether a scalar may appear in a Mac's name.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar is not default-ignorable and its general category is not a
+    ///   control, format, separator of lines or paragraphs, private-use, surrogate, or unassigned
+    ///   category.
+    private static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+        guard !scalar.properties.isDefaultIgnorableCodePoint else {
+            return false
+        }
+        switch scalar.properties.generalCategory {
+        // A newer Unicode version may assign a scalar that this macOS does not know to a format
+        // control.
+        case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// Reports whether a scalar combines with the scalar before it.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar is a nonspacing, spacing, or enclosing mark.
+    private static func isMark(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .nonspacingMark, .spacingMark, .enclosingMark:
+            true
+        default:
+            false
+        }
+    }
+
+    /// The symbols that draw nothing.
+    ///
+    /// The general category of these scalars is a symbol category, and they are not
+    /// default-ignorable. The rule therefore names them. The set holds the blank Braille pattern
+    /// U+2800 and the musical null notehead U+1D159.
+    static let blankSymbols: Set<Unicode.Scalar> = ["\u{2800}", "\u{1D159}"]
+
+    /// Reports whether a scalar shows something on its own.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar is a letter, number, punctuation, or symbol that is not in
+    ///   ``blankSymbols``.
+    private static func isVisible(_ scalar: Unicode.Scalar) -> Bool {
+        guard !blankSymbols.contains(scalar) else {
+            return false
+        }
+        switch scalar.properties.generalCategory {
+        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+             .decimalNumber, .letterNumber, .otherNumber,
+             .connectorPunctuation, .dashPunctuation, .openPunctuation, .closePunctuation,
+             .initialPunctuation, .finalPunctuation, .otherPunctuation,
+             .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
+            return true
+        default:
+            return false
         }
     }
 }

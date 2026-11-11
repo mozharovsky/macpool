@@ -14,13 +14,19 @@ enum PrivateFile {
     /// - Parameters:
     ///   - file: The file to read.
     ///   - name: What the file holds, for error messages, such as `this Mac's key`.
+    ///   - limit: The most bytes that the file may have.
     ///   - refusal: Makes the error for a file that fails a check, from the reason.
     /// - Returns: The contents, or `nil` when the file does not exist.
     /// - Throws: The error from `refusal` when the file is a symbolic link, not a regular file,
-    ///   owned by another user, or open to other users through its permissions or a
-    ///   ``FileExposure``, or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be
-    ///   opened or read.
-    static func read(at file: URL, name: String, refusal: (String) -> PoolError) throws(PoolError) -> Data? {
+    ///   owned by another user, open to other users through its permissions or a
+    ///   ``FileExposure``, or larger than `limit`, or
+    ///   ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be opened or read.
+    static func read(
+        at file: URL,
+        name: String,
+        limit: Int,
+        refusal: (String) -> PoolError,
+    ) throws(PoolError) -> Data? {
         let path = file.path(percentEncoded: false)
         let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
@@ -51,11 +57,21 @@ enum PrivateFile {
         if let exposure = try FileExposure.find(in: descriptor, of: file) {
             throw refusal(exposure.reason)
         }
+        let tooLarge = "it has more than \(limit) bytes, the most that the pool reads"
+        guard status.st_size <= limit else {
+            throw refusal(tooLarge)
+        }
+        let data: Data
         do {
-            return try handle.readToEnd() ?? Data()
+            // The file may grow after the check. A read of one byte past the limit catches that.
+            data = try handle.read(upToCount: limit + 1) ?? Data()
         } catch {
             throw .fileSystem("reading \(name)", file, error)
         }
+        guard data.count <= limit else {
+            throw refusal(tooLarge)
+        }
+        return data
     }
 
     /// Creates a file that only the current user can read, unless a file already exists at its

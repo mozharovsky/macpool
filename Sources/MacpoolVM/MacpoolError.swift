@@ -82,6 +82,18 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
     /// after a cancellation is unknown.
     case guestCommandCancelled
 
+    /// A guest command did not finish within its time limit.
+    ///
+    /// The host ends the connection when the limit passes. The command in the guest keeps running
+    /// until it ends or until it writes to its standard output or standard error. That write ends
+    /// it. The guest's state after a time limit passes is unknown.
+    ///
+    /// - Parameters:
+    ///   - limit: The call's time limit.
+    ///   - output: The end of the standard output before the limit passed, at most 64 KiB.
+    ///   - errorOutput: The end of the standard error before the limit passed, at most 64 KiB.
+    case guestCommandTimedOut(limit: Duration, output: String, errorOutput: String)
+
     /// `sudo` in the guest did not ask for the account's password, so the root command did not run.
     ///
     /// The session sends the password on standard input and checks that `sudo` read it. Without
@@ -117,9 +129,24 @@ public enum MacpoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "running a command in the guest failed: \(reason)"
         case .guestCommandCancelled:
             "the guest command was cancelled, and it may still run in the guest"
+        case let .guestCommandTimedOut(limit, _, errorOutput):
+            Self.timedOutDescription(limit: limit, errorOutput: errorOutput)
         case let .passwordlessSudo(path):
             "sudo in the guest of \(path) runs without a password, so the root command did not run"
         }
+    }
+
+    /// Describes a guest command that outlasted its time limit.
+    ///
+    /// - Parameters:
+    ///   - limit: The call's time limit.
+    ///   - errorOutput: The command's error output before the limit passed.
+    /// - Returns: The description. If the error output holds text, the description ends with its
+    ///   last 400 characters.
+    private static func timedOutDescription(limit: Duration, errorOutput: String) -> String {
+        let message = "the guest command did not finish within \(limit), and it may still run in the guest"
+        let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? message : "\(message): \(trimmed.suffix(400))"
     }
 
     /// Wraps an error that a Virtualization or Foundation call reported.

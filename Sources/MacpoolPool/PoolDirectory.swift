@@ -237,8 +237,8 @@ public struct PoolDirectory: Sendable, Hashable {
     ///
     /// Another user who could replace the trust directory could put their own key in it, so it
     /// gets the same checks as the run directory. The directory must also have no access control
-    /// list and lie on a volume that honors ownership, because either would let other users read
-    /// the key.
+    /// list and lie on a local volume that honors ownership, because otherwise other users could
+    /// read the key.
     ///
     /// A backup would keep a readable copy of the key, and restoring it on another Mac would give
     /// two Macs one key.
@@ -258,7 +258,7 @@ public struct PoolDirectory: Sendable, Hashable {
         } catch {
             throw .fileSystem("creating", trustDirectory, error)
         }
-        try Self.checkOwnership(of: root, forbidden: 0o022)
+        try checkDataDirectory()
         // The check before the change of permissions keeps chmod from following a symbolic link.
         try Self.checkOwnership(of: trustDirectory, forbidden: 0)
         if let exposure = try FileExposure.find(inDirectoryAt: trustDirectory) {
@@ -289,10 +289,26 @@ public struct PoolDirectory: Sendable, Hashable {
     ///   lets other users reach the trust directory, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be inspected.
     func checkTrustDirectory() throws(PoolError) {
-        try Self.checkOwnership(of: root, forbidden: 0o022)
+        try checkDataDirectory()
         try Self.checkOwnership(of: trustDirectory, forbidden: 0o077)
         if let exposure = try FileExposure.find(inDirectoryAt: trustDirectory) {
             throw .insecureDirectory(path: trustDirectory.pathWithoutTrailingSlash, reason: exposure.reason)
+        }
+    }
+
+    /// Checks that no other user can replace the trust directory through the data directory.
+    ///
+    /// Another user who can rename entries of the data directory could move `trust` away. The
+    /// pool would then create a new key.
+    ///
+    /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the data directory is not a
+    ///   real directory or belongs to another user, when other users can write to it through its
+    ///   permissions or its access control list, or when its volume ignores ownership or is not
+    ///   local, or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be inspected.
+    private func checkDataDirectory() throws(PoolError) {
+        try Self.checkOwnership(of: root, forbidden: 0o022)
+        if let exposure = try FileExposure.findWriteAccess(inDirectoryAt: root) {
+            throw .insecureDirectory(path: root.pathWithoutTrailingSlash, reason: exposure.reason)
         }
     }
 
