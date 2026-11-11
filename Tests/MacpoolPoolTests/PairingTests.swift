@@ -294,12 +294,8 @@ struct PairingTests {
         let unreadable = PoolReply.failure(
             PoolError.invalidRequest(reason: "the host cannot read its list of paired Macs").description,
         )
-        #expect(replies == [
-            unreadable,
-            unreadable,
-            .failure(PoolError.invalidRequest(reason: "only the host's own user can invite Macs").description),
-            .failure("the host cannot record the pairing"),
-        ])
+        // The paired connection stays open after each refusal.
+        #expect(replies == [unreadable, unreadable, unreadable, .failure("the host cannot record the pairing")])
         guard case let .failure(reason) = try await next(invitation.channel) else {
             Issue.record("the inviting connection received no reason")
             return
@@ -309,7 +305,7 @@ struct PairingTests {
         #expect(reason.contains(String(root.dropLast())))
         // A paired Mac that repeats its requests writes one error a minute.
         let levels = host.fixture.logs.entries("The list of paired clients cannot be read").map(\.level)
-        #expect(levels == [.error, .debug])
+        #expect(levels == [.error, .debug, .debug])
         pairedChannel.close()
         strangerChannel.close()
         await host.stop()

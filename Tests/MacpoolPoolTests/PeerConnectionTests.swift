@@ -566,8 +566,9 @@ struct PeerConnectionTests {
         }
     }
 
-    /// Keeps a connection open after its key is blocked and refuses the key's new connections.
-    @Test func keepsAnOpenConnectionOfABlockedKey() async throws {
+    /// Refuses the new connections of a blocked key and closes its open connection at the next
+    /// request.
+    @Test func closesABlockedKeyAtItsNextRequest() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
@@ -581,11 +582,8 @@ struct PeerConnectionTests {
             try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
         } != nil)
         try open.send(PoolRequest.status)
-        guard case .status? = try await open.receive(PoolReply.self) else {
-            Issue.record("the open connection did not answer")
-            return
-        }
-        open.close()
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
         await daemon.shutdown()
     }
 

@@ -42,8 +42,9 @@ invitation set another value. At most as many of its requests wait in the queue 
 slots. Requests of equal priority wait in the order they arrive. The local user gets ahead of a
 paired client's waiting request by asking for a higher priority.
 
-The daemon reads the client's record again for every lease request. If the record is gone or
-blocked, the request fails.
+The daemon reads the client's record again before each of its requests. If the record is gone or
+blocked, the request fails and the daemon closes the connection. If the list cannot be read, only
+the request fails.
 
 No reply to a paired client names a host path. The client sees its source by name and sees no
 clone and no guest address. When a VM fails, the client receives a fixed reason, and the host's
@@ -97,9 +98,9 @@ resumption and session tickets are off, so every connection runs a full handshak
 
 The host reads `trust/clients.json` during every handshake and admits the keys of clients that are
 not blocked. While an invitation is open, it also admits keys that the list does not name, so that
-a new client can pair. A key that leaves the list opens no new connection, and connections that are
-already open stay open. If the list cannot be read when the listener starts, the listener does not
-start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
+a new client can pair. A key that leaves the list opens no new connection, and its open connections
+close at their next request. If the list cannot be read when the listener starts, the listener does
+not start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
 its handshake before the host checks the client's key. The host therefore first sends a `hello`
 line. The line names the host's role and the protocol version that ALPN chose. The client sends
 requests only after that line. Both sides then exchange the same lines as on the Unix socket.

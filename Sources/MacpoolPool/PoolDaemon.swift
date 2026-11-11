@@ -32,6 +32,10 @@ import Synchronization
 /// directory or ask for a priority above the ceiling in its record. At most ``PoolPolicy/slots``
 /// of its requests wait in the queue at once. No reply to a paired client names a host path.
 ///
+/// The daemon reads a paired client's record again before each of its requests. If the record is
+/// gone or blocked, the daemon refuses the request and closes the connection. If the list cannot
+/// be read, the daemon refuses only the request.
+///
 /// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
 /// Mac's key only then. A key or a list of paired clients that cannot be loaded, or a port that
 /// another process holds, leaves the local socket serving, and the daemon tries again later. A
@@ -867,10 +871,13 @@ public actor PoolDaemon {
             guard let request, !isShutDown else {
                 break
             }
-            handle(request, from: client, owner: owner)
+            let keepsConnection = handle(request, from: client, owner: owner)
             // Reading on only after the replies left keeps a client that stops reading from
             // queueing replies without end.
             await channel.delivered()
+            guard keepsConnection else {
+                break
+            }
         }
         channel.close()
         if let closed = invitation.close(for: client) {
@@ -884,15 +891,35 @@ public actor PoolDaemon {
 
     /// Answers one request.
     ///
+    /// Before each request of a paired client, the daemon reads the client's record again,
+    /// because the list may have changed since the client connected. If the list no longer names
+    /// the client or blocks it, the daemon refuses the request and ends the connection. If the
+    /// list cannot be read, the daemon refuses only the request.
+    ///
     /// - Parameters:
     ///   - request: The request.
     ///   - client: The client that sent it.
     ///   - owner: Who the client acts for.
-    private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) {
+    /// - Returns: Whether the connection stays open for the next request.
+    private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) -> Bool {
+        var record: TrustedClient?
+        if case let .client(key) = owner {
+            do throws(PoolError) {
+                record = try pairedRecord(key)
+            } catch {
+                // A person's mistake in the file should not end the attached leases of every Mac.
+                reply(.failure(error.description), to: client)
+                return true
+            }
+            guard record != nil else {
+                reply(.failure(Self.notAcceptedReason), to: client)
+                return false
+            }
+        }
         do throws(PoolError) {
             switch request {
             case let .lease(terms):
-                let admitted = try admit(terms, from: owner)
+                let admitted = try admit(terms, from: record)
                 configuration.logger.info("Queued a lease request", metadata: [
                     "source": "\(admitted.terms.source)",
                     "owner": "\(owner)",
@@ -934,7 +961,12 @@ public actor PoolDaemon {
         } catch {
             reply(.failure(error.description), to: client)
         }
+        return true
     }
+
+    /// The refusal that a paired Mac receives after the host stopped accepting it.
+    private static let notAcceptedReason = PoolError.invalidRequest(reason: "the host no longer accepts this Mac")
+        .description
 
     /// Sends a reply to a client that is still connected.
     ///
@@ -1037,14 +1069,15 @@ public actor PoolDaemon {
     ///
     /// - Parameters:
     ///   - terms: The requested terms.
-    ///   - owner: Who requests the lease.
+    ///   - paired: The record of the paired client that requests the lease, or `nil` for the
+    ///     local user.
     /// - Returns: The terms with the source's path, and the source's name for a paired client.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
     ///   the host does not offer, asks for a shared directory or a priority above its ceiling, or
-    ///   already has the most requests in the queue. The errors of ``pairedRecord(_:)``,
-    ///   ``LeaseTerms/validate()``, and ``checkSource(of:offeredName:)`` propagate.
-    private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> AdmittedRequest {
-        guard case let .client(key) = owner else {
+    ///   already has the most requests in the queue. The errors of ``LeaseTerms/validate()`` and
+    ///   ``checkSource(of:offeredName:)`` propagate.
+    private func admit(_ terms: LeaseTerms, from paired: TrustedClient?) throws(PoolError) -> AdmittedRequest {
+        guard let paired else {
             try terms.validate()
             try checkSource(of: terms, offeredName: nil)
             return AdmittedRequest(terms: terms, sourceName: nil)
@@ -1052,11 +1085,10 @@ public actor PoolDaemon {
         guard terms.sharedDirectory == nil else {
             throw .invalidRequest(reason: "a paired client cannot share a host directory")
         }
-        let ceiling = try pairedRecord(key).priorityCeiling
-        guard terms.priority <= ceiling else {
-            throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(ceiling)")
+        guard terms.priority <= paired.priorityCeiling else {
+            throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(paired.priorityCeiling)")
         }
-        guard ledger.waitingRequests(of: owner) < configuration.policy.slots else {
+        guard ledger.waitingRequests(of: .client(paired.key)) < configuration.policy.slots else {
             throw .invalidRequest(reason: "this Mac already has as many requests in the queue as the host has slots")
         }
         // The reason does not repeat the name. If the name were a host path, visible(_:to:) would
@@ -1073,15 +1105,12 @@ public actor PoolDaemon {
 
     /// Reads the record of a paired client from the list of paired clients.
     ///
-    /// The daemon reads the list for each lease request, because the list may have changed since
-    /// the client connected.
-    ///
     /// - Parameter key: The fingerprint of the client's key.
-    /// - Returns: The client's record.
-    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the list cannot be read, or when it
-    ///   no longer names the key or blocks it. The reason names no host path. The daemon logs
-    ///   the error of a list that cannot be read.
-    private func pairedRecord(_ key: KeyFingerprint) throws(PoolError) -> TrustedClient {
+    /// - Returns: The client's record, or `nil` when the list no longer names the key or blocks
+    ///   it.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the list cannot be read. The reason
+    ///   names no host path. The daemon logs the list's error.
+    private func pairedRecord(_ key: KeyFingerprint) throws(PoolError) -> TrustedClient? {
         let clients: TrustList<TrustedClient>
         do {
             clients = try TrustList<TrustedClient>.load(from: configuration.directory)
@@ -1094,7 +1123,7 @@ public actor PoolDaemon {
             throw .invalidRequest(reason: "the host cannot read its list of paired Macs")
         }
         guard let record = clients[key], !record.isBlocked else {
-            throw .invalidRequest(reason: "the host no longer accepts this Mac")
+            return nil
         }
         return record
     }
