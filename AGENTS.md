@@ -112,9 +112,12 @@ parameter.
 
 Each module has a DocC catalog. DocC builds with warnings as errors.
 
-The README covers only what macpool is, its requirements, setup, commands, and a short list of
-current limitations. Each limitation takes one or two plain sentences. History and rationale
-belong in the code's documentation and in pull requests.
+The README is the project's landing page. It says what macpool is and what it is for, and gives a
+quick start, the features, the requirements, and what does not exist yet. Reference material lives
+in topic pages under `docs/`, such as commands, leases, clone credentials, troubleshooting, and
+limits. The README and `docs/` describe only the current behavior. Each limitation takes one or
+two plain sentences. History and rationale belong in the code's documentation and in pull
+requests.
 
 ## Dependencies
 
