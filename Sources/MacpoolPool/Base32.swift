@@ -28,4 +28,41 @@ enum Base32 {
         }
         return String(decoding: text, as: UTF8.self)
     }
+
+    /// Decodes text from ``encode(_:)``.
+    ///
+    /// Uppercase letters decode like lowercase ones, because people may type either.
+    ///
+    /// - Parameter text: The text, without padding.
+    /// - Returns: The bytes, or `nil` when the text has a character outside the alphabet, a
+    ///   length that no byte count encodes to, or bits other than zero after the data.
+    static func decode(_ text: String) -> [UInt8]? {
+        var bytes: [UInt8] = []
+        var buffer: UInt32 = 0
+        var bufferedBits = 0
+        for character in text.utf8 {
+            guard let value = alphabet.firstIndex(of: lowercase(character)) else {
+                return nil
+            }
+            buffer = buffer << 5 | UInt32(value)
+            bufferedBits += 5
+            if bufferedBits >= 8 {
+                bufferedBits -= 8
+                bytes.append(UInt8(truncatingIfNeeded: buffer >> UInt32(bufferedBits)))
+            }
+        }
+        // A complete encoding leaves fewer than five bits, and they are zero.
+        guard bufferedBits < 5, buffer & (1 << UInt32(bufferedBits) - 1) == 0 else {
+            return nil
+        }
+        return bytes
+    }
+
+    /// Converts an uppercase ASCII letter to lowercase and leaves other bytes alone.
+    ///
+    /// - Parameter character: A UTF-8 byte.
+    /// - Returns: The byte of the lowercase letter, or `character`.
+    private static func lowercase(_ character: UInt8) -> UInt8 {
+        (UInt8(ascii: "A") ... UInt8(ascii: "Z")).contains(character) ? character + 32 : character
+    }
 }

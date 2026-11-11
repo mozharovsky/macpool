@@ -179,7 +179,8 @@ struct LeaseCommand: AsyncParsableCommand {
             case let .reply(.failure(message)):
                 failure = .pool(.daemonRefused(message: message))
                 break loop
-            case .reply(.released), .reply(.renewed), .reply(.status):
+            case .reply(.released), .reply(.renewed), .reply(.status), .reply(.invitation), .reply(.paired),
+                 .reply(.alreadyPaired), .reply(.wrongCode):
                 break
             case .disconnected:
                 guard let id else {

@@ -13,7 +13,7 @@ struct PeerConnectionTests {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
-        let hostKey = try pair([clientKey], with: fixture.directory)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
@@ -38,7 +38,7 @@ struct PeerConnectionTests {
     /// Refuses a Mac whose key the host does not trust.
     @Test func refusesAnUntrustedMac() async throws {
         let fixture = try PoolFixture()
-        let hostKey = try pair([randomKey()], with: fixture.directory)
+        let hostKey = try listClients([randomKey()], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
@@ -72,7 +72,7 @@ struct PeerConnectionTests {
     @Test func refusesAnotherHostKey() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
         let pinned = try KeyFingerprint(digest: makeIdentity().keyDigest)
@@ -89,7 +89,7 @@ struct PeerConnectionTests {
     @Test func refusesAnotherProtocolVersion() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
@@ -113,7 +113,7 @@ struct PeerConnectionTests {
     @Test func refusesTLS12() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
@@ -134,7 +134,7 @@ struct PeerConnectionTests {
     @Test func refusesATrustedCertificateAfterTheFirst() async throws {
         let fixture = try PoolFixture()
         let trusted = try makeIdentity()
-        try pair([KeyFingerprint(digest: trusted.keyDigest)], with: fixture.directory)
+        try listClients([KeyFingerprint(digest: trusted.keyDigest)], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
@@ -185,18 +185,18 @@ struct PeerConnectionTests {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
-        let hostKey = try pair([clientKey], with: fixture.directory)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
         try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
         for blocked in [true, false] {
-            try pair(blocked ? [clientKey] : [], with: fixture.directory, blocked: [clientKey])
+            try listClients(blocked ? [clientKey] : [], in: fixture.directory, blocked: [clientKey])
             #expect(await refusal { () async throws(PoolError) in
                 try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
             } != nil, "blocked: \(blocked)")
         }
-        try pair([clientKey], with: fixture.directory)
+        try listClients([clientKey], in: fixture.directory)
         try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
         #expect(fixture.logs.entries("A paired Mac connected").count == 2)
         await daemon.shutdown()
@@ -208,7 +208,7 @@ struct PeerConnectionTests {
     @Test func keepsTheLocalSocketWithAnUnusableKey() async throws {
         let fixture = try PoolFixture()
         let daemon = try fixture.daemon(peers: loopbackSettings())
-        try pair([randomKey()], with: fixture.directory)
+        try listClients([randomKey()], in: fixture.directory)
         let keyFile = fixture.directory.identityFile.path(percentEncoded: false)
         let key = try Data(contentsOf: URL(filePath: keyFile))
         try FileManager.default.removeItem(atPath: keyFile)
@@ -258,7 +258,7 @@ struct PeerConnectionTests {
     @Test func admitsNobodyWithAnUnreadableList() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
         let list = TrustList<TrustedClient>.file(in: fixture.directory).path(percentEncoded: false)
         let unusable = PoolError.unusableTrustList(path: list, reason: "its permissions 644 let other users in")
         #expect(chmod(list, 0o644) == 0)
@@ -293,7 +293,10 @@ struct PeerConnectionTests {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let other = try makeIdentity()
-        let hostKey = try pair([client, other].map { KeyFingerprint(digest: $0.keyDigest) }, with: fixture.directory)
+        let hostKey = try listClients(
+            [client, other].map { KeyFingerprint(digest: $0.keyDigest) },
+            in: fixture.directory,
+        )
         let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
         let connect = { (mac: MacIdentity) async -> String? in
@@ -342,6 +345,64 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Binds only to the loopback address in the settings. If `listeningHost(for:)` rejects the
+    /// address, the listener throws before it binds.
+    @Test func bindsToOneAddress() async throws {
+        let host = try makeIdentity()
+        for address in ["127.0.0.1", "::1"] {
+            let listener = try await PeerListener(
+                identity: host,
+                settings: PeerSettings(address: address, port: 0),
+                admits: { _ in false },
+            )
+            #expect(boundAddresses(port: listener.port) == [address])
+            listener.close()
+        }
+        // If the listener skipped the parser, `127.1` would still bind only to the loopback address.
+        await #expect(throws: PoolError.connection(
+            path: "127.1:0",
+            reason: "the listener needs a numeric IP address, such as 192.0.2.20, that is not 0.0.0.0 or :: "
+                + "and has no zone",
+        )) {
+            _ = try await PeerListener(
+                identity: host,
+                settings: PeerSettings(address: "127.1", port: 0),
+                admits: { _ in false },
+            )
+        }
+    }
+
+    /// Accepts numeric addresses and normalizes IPv6 addresses. Rejects host names, unspecified
+    /// addresses, IPv6 zones, and IPv4 addresses that differ from their canonical dotted form.
+    @Test func readsListenerAddresses() {
+        let accepted = [
+            "127.0.0.1": "127.0.0.1",
+            "::1": "::1",
+            "192.0.2.20": "192.0.2.20",
+            "2001:db8::20": "2001:db8::20",
+            "2001:DB8:0:0:0:0:0:20": "2001:db8::20",
+        ]
+        for (address, host) in accepted {
+            #expect(PeerListener.listeningHost(for: address).map { "\($0)" } == host, "\(address)")
+        }
+        for address in [
+            "",
+            " 127.0.0.1",
+            "localhost",
+            "example.local",
+            "0.0.0.0",
+            "::",
+            "0:0:0:0:0:0:0:0",
+            "::ffff:0.0.0.0",
+            "127.1",
+            "1",
+            "127.000.000.001",
+            "fe80::1%lo0",
+        ] {
+            #expect(PeerListener.listeningHost(for: address) == nil, "\(address)")
+        }
+    }
+
     /// Closes a new connection while the most handshakes run. A handshake that fails or runs out
     /// of time frees its place.
     @Test func limitsHandshakesThatRunAtOnce() async throws {
@@ -352,7 +413,7 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
-            trustedKeys: { [clientKey] },
+            admits: { $0 == clientKey },
             handshakeTimeout: .seconds(3),
             handshakeLimit: 2,
         )
@@ -399,7 +460,7 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
-            trustedKeys: { [clientKey] },
+            admits: { $0 == clientKey },
         )
         defer { listener.close() }
         let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
@@ -465,11 +526,71 @@ struct PeerConnectionTests {
     }
 }
 
+/// Lists the local addresses of this process's unconnected TCP sockets on a port.
+///
+/// The test reads the sockets themselves, because the settings say only what the listener asked
+/// for. Darwin has no `SO_ACCEPTCONN`. A socket without a peer therefore stands for a listening
+/// one.
+///
+/// - Parameter port: The TCP port.
+/// - Returns: The numeric addresses, in the order of the file descriptors.
+func boundAddresses(port: UInt16) -> [String] {
+    var addresses: [String] = []
+    for descriptor in 0 ..< getdtablesize() {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFSOCK else {
+            continue
+        }
+        var type: Int32 = 0
+        var size = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &size) == 0, type == SOCK_STREAM else {
+            continue
+        }
+        var storage = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var service = [CChar](repeating: 0, count: Int(NI_MAXSERV))
+        let converted = withUnsafeMutablePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                var peerLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                guard getpeername(descriptor, address, &peerLength) != 0,
+                      getsockname(descriptor, address, &length) == 0
+                else {
+                    return false
+                }
+                let flags = NI_NUMERICHOST | NI_NUMERICSERV
+                return getnameinfo(
+                    address,
+                    length,
+                    &host,
+                    socklen_t(host.count),
+                    &service,
+                    socklen_t(service.count),
+                    flags,
+                ) == 0
+            }
+        }
+        guard converted, text(of: service) == "\(port)" else {
+            continue
+        }
+        addresses.append(text(of: host))
+    }
+    return addresses
+}
+
+/// Converts a NUL-terminated C string in a buffer to a string.
+///
+/// - Parameter buffer: The buffer.
+/// - Returns: The text before the first NUL.
+private func text(of buffer: [CChar]) -> String {
+    String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+}
+
 /// Creates settings that listen on 127.0.0.1 and retry quickly.
 ///
 /// - Parameter port: The port, or 0 for a free one.
 /// - Returns: The settings.
-private func loopbackSettings(port: UInt16 = 0) -> PeerSettings {
+func loopbackSettings(port: UInt16 = 0) -> PeerSettings {
     PeerSettings(address: "127.0.0.1", port: port, retryInterval: .milliseconds(100))
 }
 
@@ -484,9 +605,9 @@ private func loopbackSettings(port: UInt16 = 0) -> PeerSettings {
 /// - Returns: The fingerprint of the host's key.
 /// - Throws: ``PoolError`` when the key or the list cannot be written.
 @discardableResult
-private func pair(
+func listClients(
     _ keys: [KeyFingerprint],
-    with directory: PoolDirectory,
+    in directory: PoolDirectory,
     blocked: Set<KeyFingerprint> = [],
 ) throws(PoolError) -> KeyFingerprint {
     let host = try MacIdentity.loadOrCreate(in: directory)
@@ -601,7 +722,7 @@ private func hostGreets(_ endpoint: NWEndpoint, using parameters: NWParameters) 
 ///
 /// - Returns: The identity. Its key file does not exist.
 /// - Throws: ``PoolError`` when the certificate cannot be built.
-private func makeIdentity() throws(PoolError) -> MacIdentity {
+func makeIdentity() throws(PoolError) -> MacIdentity {
     try MacIdentity(privateKey: P256.Signing.PrivateKey(), file: URL(filePath: "/nonexistent/identity.pem"))
 }
 
@@ -610,7 +731,7 @@ private func makeIdentity() throws(PoolError) -> MacIdentity {
 /// - Parameter port: A port number other than 0.
 /// - Returns: The endpoint.
 /// - Throws: An error when the port is 0.
-private func loopback(_ port: UInt16) throws -> NWEndpoint {
+func loopback(_ port: UInt16) throws -> NWEndpoint {
     try .hostPort(host: .ipv4(.loopback), port: #require(NWEndpoint.Port(rawValue: port)))
 }
 
@@ -621,7 +742,7 @@ private func loopback(_ port: UInt16) throws -> NWEndpoint {
 ///   - timeout: The longest wait.
 /// - Returns: The port.
 /// - Throws: An error when the daemon does not listen in time.
-private func listeningPort(of daemon: PoolDaemon, within timeout: Duration = .seconds(10)) async throws -> UInt16 {
+func listeningPort(of daemon: PoolDaemon, within timeout: Duration = .seconds(10)) async throws -> UInt16 {
     let deadline = ContinuousClock.now + timeout
     var port = await daemon.peerPort
     while port == nil, ContinuousClock.now < deadline {
@@ -635,7 +756,7 @@ private func listeningPort(of daemon: PoolDaemon, within timeout: Duration = .se
 ///
 /// - Parameter connect: Opens the connection.
 /// - Returns: The reason of the failure, or `nil` when the connection opened.
-private func refusal(_ connect: () async throws(PoolError) -> MessageChannel) async -> String? {
+func refusal(_ connect: () async throws(PoolError) -> MessageChannel) async -> String? {
     do {
         try await connect().close()
         return nil

@@ -19,8 +19,8 @@ struct TrustListTests {
         var hosts = TrustList<TrustedHost>()
         hosts.insert(TrustedHost(
             key: randomKey(),
-            name: "studio",
-            address: "studio.local",
+            name: "example",
+            address: "example.local",
             port: 7373,
             pairedAt: Date(timeIntervalSince1970: 1_800_000_000),
         ))
@@ -129,6 +129,45 @@ struct TrustListTests {
                 try TrustList<TrustedClient>.load(from: directory)
             }
         }
+    }
+
+    /// Refuses to read or write a list file larger than the limit.
+    @Test func limitsTheSizeOfLists() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try TrustList<TrustedClient>().save(to: directory)
+        let file = TrustList<TrustedClient>.file(in: directory)
+        let path = file.path(percentEncoded: false)
+        let limit = TrustList<TrustedClient>.byteLimit
+        let empty = #"{"version":1,"macs":[]}"#
+        let full = empty + String(repeating: " ", count: limit - empty.utf8.count)
+
+        try Data(full.utf8).write(to: file)
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        try Data((full + " ").utf8).write(to: file)
+        #expect(throws: PoolError.unusableTrustList(
+            path: path,
+            reason: "it has more than \(limit) bytes, the most that the pool reads",
+        )) {
+            try TrustList<TrustedClient>.load(from: directory)
+        }
+
+        try TrustList<TrustedClient>().save(to: directory)
+        var list = TrustList<TrustedClient>()
+        while list.records.count < 2000 {
+            list.insert(client(String(repeating: "n", count: PairedMac.maximumNameLength)))
+        }
+        let error = #expect(throws: PoolError.self) {
+            try list.save(to: directory)
+        }
+        guard case let .unusableTrustList(failed, reason)? = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
+        #expect(failed == path)
+        #expect(reason.hasPrefix("it would have "))
+        #expect(reason.hasSuffix(" bytes, and the pool reads at most \(limit)"))
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
     }
 
     /// Shows the first 80 bits of a fingerprint in base32. Logs name a paired client by the same

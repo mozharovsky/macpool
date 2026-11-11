@@ -635,7 +635,7 @@ extension PoolReply {
         switch self {
         case let .starting(lease), let .ready(lease), let .restarting(lease, _), let .renewed(lease):
             lease
-        case .queued, .ended, .released, .status, .failure:
+        case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode:
             nil
         }
     }
@@ -722,6 +722,11 @@ final class LogRecorder: Sendable {
     /// - Parameter entry: The message.
     func record(_ entry: LogEntry) {
         entries.withLock { $0.append(entry) }
+    }
+
+    /// Every message in the order of logging.
+    var allEntries: [LogEntry] {
+        entries.withLock { $0 }
     }
 
     /// Returns the messages with a text.

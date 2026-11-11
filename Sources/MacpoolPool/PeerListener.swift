@@ -4,10 +4,15 @@ import Synchronization
 
 /// How the daemon listens for paired Macs.
 public struct PeerSettings: Sendable {
-    /// The local address to listen on, such as `127.0.0.1`.
+    /// The host's name that a client Mac receives when it pairs.
+    public var name: String
+
+    /// The numeric IPv4 or IPv6 address to listen on, such as `127.0.0.1` or `::1`.
     ///
     /// The listener binds only to this address. It has no default, so a caller never opens every
-    /// interface by accident.
+    /// interface by accident. Network binds to every interface for a host name or an unspecified
+    /// address. The listener therefore refuses a host name, `0.0.0.0`, and `::`. It also refuses
+    /// an IPv6 zone such as `%en0` and a shortened IPv4 address such as `127.1`.
     public var address: String
 
     /// The TCP port, or 0 for a free port that the system picks.
@@ -20,13 +25,32 @@ public struct PeerSettings: Sendable {
     /// Creates listener settings.
     ///
     /// - Parameters:
-    ///   - address: The local address to listen on.
+    ///   - name: The host's name for clients, or `nil` for the first 64 Unicode scalars of this
+    ///     Mac's name in Sharing settings. If that name has characters that a pairing rejects, the
+    ///     default is `Mac`.
+    ///   - address: The numeric IP address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - retryInterval: The wait before another attempt to listen.
-    public init(address: String, port: UInt16, retryInterval: Duration = .seconds(10)) {
+    public init(
+        name: String? = nil,
+        address: String,
+        port: UInt16,
+        retryInterval: Duration = .seconds(10),
+    ) {
+        self.name = name ?? Self.computerName()
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
+    }
+
+    /// Returns this Mac's name in Sharing settings in a form that a pairing accepts.
+    ///
+    /// - Returns: The first 64 Unicode scalars of the name, or `Mac` when they are not a valid
+    ///   name.
+    private static func computerName() -> String {
+        let scalars = (Host.current().localizedName ?? "").unicodeScalars.prefix(PairedMac.maximumNameLength)
+        let name = String(String.UnicodeScalarView(scalars))
+        return PairedMac.isValidName(name) ? name : "Mac"
     }
 }
 
@@ -61,6 +85,9 @@ final class PeerListener: Sendable {
     /// The port on which the listener accepts connections.
     let port: UInt16
 
+    /// The fingerprint of the key that the listener presents.
+    let hostKey: KeyFingerprint
+
     /// The connections that finished their handshake.
     ///
     /// The stream ends when the listener closes or fails.
@@ -74,27 +101,31 @@ final class PeerListener: Sendable {
     /// - Parameters:
     ///   - identity: This Mac's key and certificate.
     ///   - settings: The address and the port.
-    ///   - trustedKeys: Returns the fingerprints of the keys that may connect. The listener calls
-    ///     it during every handshake on one serial queue, so a slow call delays every handshake.
-    ///     If the keys cannot be read, it must return an empty set.
+    ///   - admits: Decides whether a key may connect. The listener calls it during every
+    ///     handshake on one serial queue, so a slow call delays every handshake.
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
     ///   - handshakeLimit: The most handshakes that run at once.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
-    ///   ``PoolError/connection(path:reason:)`` when the listener cannot start, for example
-    ///   because another process holds the port.
+    ///   ``PoolError/connection(path:reason:)`` when ``PeerSettings/address`` breaks its rules or
+    ///   the listener cannot start, for example because another process holds the port.
     init(
         identity: MacIdentity,
         settings: PeerSettings,
-        trustedKeys: @escaping @Sendable () -> Set<KeyFingerprint>,
+        admits: @escaping @Sendable (KeyFingerprint) -> Bool,
         handshakeTimeout: Duration = .seconds(5),
         handshakeLimit: Int = 16,
     ) async throws(PoolError) {
-        let parameters = try PeerSecurity.parameters(identity: identity, isServer: true) { key in
-            trustedKeys().contains(key)
-        }
-        let port = NWEndpoint.Port(rawValue: settings.port) ?? .any
         let place = "\(settings.address):\(settings.port)"
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(settings.address), port: port)
+        guard let host = Self.listeningHost(for: settings.address) else {
+            throw .connection(
+                path: place,
+                reason: "the listener needs a numeric IP address, "
+                    + "such as 192.0.2.20, that is not 0.0.0.0 or :: and has no zone",
+            )
+        }
+        let parameters = try PeerSecurity.parameters(identity: identity, isServer: true, admits: admits)
+        let port = NWEndpoint.Port(rawValue: settings.port) ?? .any
+        parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
         let listener: NWListener
         do {
             listener = try NWListener(using: parameters)
@@ -137,8 +168,28 @@ final class PeerListener: Sendable {
         }
         self.listener = listener
         self.port = bound
+        hostKey = KeyFingerprint(digest: identity.keyDigest)
         self.connections = connections
         self.continuation = continuation
+    }
+
+    /// Reads the address that the listener binds to.
+    ///
+    /// Network accepts shortened IPv4 forms such as `127.1`. The listener takes only the
+    /// canonical dotted form. An IPv4 address in errors and logs is then the address that the
+    /// listener binds.
+    ///
+    /// - Parameter address: The address from ``PeerSettings``.
+    /// - Returns: The host, or `nil` when the address is a host name, an unspecified address, an
+    ///   IPv6 address with a zone, or an IPv4 address that differs from its canonical dotted form.
+    static func listeningHost(for address: String) -> NWEndpoint.Host? {
+        if let ipv4 = IPv4Address(address) {
+            return ipv4 != .any && address == "\(ipv4)" ? .ipv4(ipv4) : nil
+        }
+        if let ipv6 = IPv6Address(address), !address.contains("%") {
+            return ipv6 != .any && ipv6.asIPv4 != .any ? .ipv6(ipv6) : nil
+        }
+        return nil
     }
 
     /// Runs a connection's handshake and passes the connection on once the peer proved its key.

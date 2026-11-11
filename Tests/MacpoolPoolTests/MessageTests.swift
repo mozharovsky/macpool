@@ -51,6 +51,9 @@ struct MessageTests {
             .released(id),
             .status(PoolSummary(slots: 2, leases: [lease], queue: [])),
             .failure("no lease"),
+            .paired(PairedMac(name: "runner", key: randomKey())),
+            .alreadyPaired(PairedMac(name: "runner", key: randomKey())),
+            .wrongCode,
         ]
         for reply in replies {
             let data = try MessageCoding.encoder.encode(reply)
