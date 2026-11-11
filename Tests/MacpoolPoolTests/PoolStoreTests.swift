@@ -23,6 +23,7 @@ struct PoolStoreTests {
             id: #require(LeaseID("0a1b2c3e")),
             owner: .local,
             terms: LeaseTerms(source: "/vms/base", timeToLive: 60),
+            sourceName: nil,
             phase: .starting,
             grantedAt: Date(timeIntervalSince1970: 1_800_000_000),
             restarts: 0,
@@ -37,6 +38,7 @@ struct PoolStoreTests {
         #expect(text.contains("\"ttl_seconds\" : 600"))
         #expect(text.contains("\"restart\" : \"always\""))
         #expect(text.contains("\"supervisor_pid\" : 4242"))
+        #expect(text.contains("\"source_name\" : \"base\""))
     }
 
     /// Reads a file that lists one lease twice as malformed.
@@ -69,6 +71,7 @@ struct PoolStoreTests {
                 bootTimeout: 300,
                 detached: true,
             ),
+            sourceName: "base",
             phase: .restarting,
             address: nil,
             grantedAt: Date(timeIntervalSince1970: 1_800_000_000),
@@ -132,6 +135,19 @@ struct PoolStoreTests {
         }
         try Data(#"{"version": 2, "leases": [\#(lease), "owner": "local"}]}"#.utf8).write(to: store.file)
         #expect(try store.load().leases.map(\.owner) == [.local])
+    }
+
+    /// Reads a paired client's lease without a source name from an older state file.
+    @Test func readsLeasesWithoutSourceNames() throws {
+        let directory = try ShortDirectory()
+        let store = PoolStore(file: directory.url.appending(path: "state.json"))
+        let lease = #"{"granted_at": "2027-01-15T08:00:00Z", "id": "0a1b2c3d", "phase": "ready", "restarts": 0, "#
+            + #""terms": {"boot_timeout_seconds": 900, "detached": false, "priority": 0, "restart": "never", "#
+            + #""source": "/vms/base", "ttl_seconds": 600}, "owner": "\#(Self.fingerprint)"}"#
+        try Data(#"{"version": 2, "leases": [\#(lease)]}"#.utf8).write(to: store.file)
+        let leases = try store.load().leases
+        #expect(leases.map(\.sourceName) == [nil])
+        #expect(leases.map(\.terms.source) == ["/vms/base"])
     }
 
     /// Accepts only 64 lowercase hexadecimal digits as a fingerprint.

@@ -68,6 +68,13 @@ struct MessageTests {
         }
         let invite = Data(#"{"request":"invite","address":"127.0.0.1"}"#.utf8)
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: invite) == .invite(address: "127.0.0.1"))
+        var hidden = lease
+        hidden.source = "base"
+        hidden.bundle = nil
+        hidden.address = nil
+        let hiddenText = try String(decoding: MessageCoding.encoder.encode(PoolReply.ready(hidden)), as: UTF8.self)
+        #expect(!hiddenText.contains("bundle"))
+        #expect(try MessageCoding.decoder.decode(PoolReply.self, from: Data(hiddenText.utf8)) == .ready(hidden))
         let text = try String(decoding: MessageCoding.encoder.encode(PoolRequest.lease(terms)), as: UTF8.self)
         #expect(text.hasPrefix(#"{"request":"lease","terms":{"#))
         #expect(text.contains(#""restart":"on-failure""#))

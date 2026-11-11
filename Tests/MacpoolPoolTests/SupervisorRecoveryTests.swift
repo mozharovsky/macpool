@@ -97,6 +97,7 @@ struct SupervisorRecoveryTests {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
         let granted = try await pool.readyLease(pool.terms(detached: true))
+        let bundle = try #require(granted.lease.bundle)
         let id = granted.lease.id
         granted.client.close()
         let root = pool.directory.root.path(percentEncoded: false)
@@ -113,7 +114,7 @@ struct SupervisorRecoveryTests {
         await daemon.tick()
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         #expect(!pool.launcher.isRunning(id))
-        #expect(!FileManager.default.fileExists(atPath: granted.lease.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         await daemon.shutdown()
     }
 
@@ -207,6 +208,7 @@ struct SupervisorRecoveryTests {
         let daemon = try await pool.start()
         pool.launcher.plan(FakeBehavior(ignoresStop: true, ignoresTerminate: true))
         let granted = try await pool.readyLease(pool.terms())
+        let bundle = try #require(granted.lease.bundle)
         let id = granted.lease.id
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
         #expect(try await next(granted.client) == .ended(id, reason: "released by a client"))
@@ -224,7 +226,7 @@ struct SupervisorRecoveryTests {
             ReceivedSignal(lease: id, signal: .kill, processID: 10001),
         ])
         #expect(!pool.launcher.isRunning(id))
-        #expect(!FileManager.default.fileExists(atPath: granted.lease.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         await daemon.shutdown()
     }
 
@@ -310,6 +312,7 @@ struct SupervisorRecoveryTests {
             lingerAfterExit: .seconds(30),
         ))
         let granted = try await pool.readyLease(pool.terms())
+        let bundle = try #require(granted.lease.bundle)
         let id = granted.lease.id
         let clock = ContinuousClock()
         let released = clock.now
@@ -318,14 +321,14 @@ struct SupervisorRecoveryTests {
         #expect(await eventually { pool.launcher.identifications() == 1 })
         #expect(clock.now - released >= .seconds(2))
         #expect(await daemon.summary().leases.map(\.phase) == [.stopping])
-        #expect(FileManager.default.fileExists(atPath: granted.lease.bundle))
+        #expect(FileManager.default.fileExists(atPath: bundle))
         #expect(pool.launcher.signals().isEmpty)
         terminateCheck.open()
 
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         #expect(pool.launcher.signals().map(\.signal) == [.terminate, .kill])
         #expect(!pool.launcher.isRunning(id))
-        #expect(!FileManager.default.fileExists(atPath: granted.lease.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         await daemon.shutdown()
     }
 
@@ -337,6 +340,7 @@ struct SupervisorRecoveryTests {
         pool.launcher.plan(FakeBehavior(listenGate: listening))
         let client = try await pool.requestLease(pool.terms())
         let starting = try #require(await next(client).lease)
+        let bundle = try #require(starting.bundle)
         let id = starting.id
         #expect(await eventually { pool.launcher.launches(of: id) == 1 })
         #expect(try await PoolClient.send(.release(id), to: pool.directory) == .released(id))
@@ -347,7 +351,7 @@ struct SupervisorRecoveryTests {
         #expect(pool.launcher.launches(of: id) == 1)
         #expect(!pool.launcher.isRunning(id))
         #expect(pool.launcher.signals().isEmpty)
-        #expect(!FileManager.default.fileExists(atPath: starting.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         await daemon.shutdown()
     }
 
