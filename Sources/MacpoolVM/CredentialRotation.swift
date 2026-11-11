@@ -181,7 +181,7 @@ public enum CredentialRotation {
                 reason: "the account's user name or password has unsupported characters",
             )
         }
-        let pinned = try inheritedKeys(of: bundle)
+        let pinned = try bundle.pinnedHostKeys()
         guard pinned != [] else {
             throw .credentialRotation(
                 step: "starting",
@@ -244,22 +244,6 @@ public enum CredentialRotation {
         settings.credentialRotation = .finished
         try bundle.writeSettings(settings)
         return key
-    }
-
-    /// Reads the Ed25519 keys that the clone's copied `known_hosts` pins and does not revoke.
-    ///
-    /// - Parameter bundle: The clone's bundle.
-    /// - Returns: The pinned keys, or `nil` when the file does not exist.
-    /// - Throws: ``MacpoolError`` when the file exists and cannot be read or is not UTF-8.
-    static func inheritedKeys(of bundle: VMBundle) throws(MacpoolError) -> [HostKey]? {
-        let file = bundle.knownHostsFile
-        guard let data = try FileSystem.readIfPresent(file, for: "reading the inherited host keys") else {
-            return nil
-        }
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw .invalidBundle(path: file.filePath, reason: "not UTF-8 text")
-        }
-        return HostKey.pinnedKeys(inKnownHosts: text)
     }
 
     /// Encodes a password for `/etc/kcpassword`.
@@ -422,6 +406,10 @@ private struct Login<Shell: GuestCommandRunner> {
         switch outcome {
         case let .finished(result):
             return result
+        case let .failed(.guestCommand(reason)):
+            throw .credentialRotation(step: step, reason: reason)
+        case .failed(.guestCommandCancelled):
+            throw .credentialRotation(step: step, reason: "the rotation was cancelled")
         case let .failed(error):
             throw error
         case .timedOut:

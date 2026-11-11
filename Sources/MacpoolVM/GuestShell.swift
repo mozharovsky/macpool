@@ -2,24 +2,79 @@ import Foundation
 import Subprocess
 import System
 
+/// How the `ssh` process of a guest command ended.
+public enum GuestCommandStatus: Sendable, Hashable, CustomStringConvertible {
+    /// `ssh` exited with this code.
+    ///
+    /// The code is the remote command's exit code. If `ssh` fails itself, or if a signal ends the
+    /// remote command, the code is 255.
+    case exited(Int32)
+
+    /// A signal with this number ended the local `ssh`. For example, 9 is `SIGKILL`.
+    case signaled(Int32)
+
+    /// The status in the form `exited(3)` or `signaled(9)`.
+    public var description: String {
+        switch self {
+        case let .exited(code):
+            "exited(\(code))"
+        case let .signaled(signal):
+            "signaled(\(signal))"
+        }
+    }
+}
+
 /// The result of one command in a guest.
-struct GuestCommandResult: Sendable, Equatable {
-    /// Whether `ssh` and the remote command exited with status zero.
-    let succeeded: Bool
+///
+/// Each output keeps at most the last 64 KiB that the command wrote. The command still runs to its
+/// end when it writes more, and the result keeps its exit status.
+public struct GuestCommandResult: Sendable, Equatable {
+    /// How `ssh` ended.
+    public let status: GuestCommandStatus
 
-    /// The exit status of `ssh`, such as `exited(255)`.
-    let status: String
+    /// The end of the remote command's standard output.
+    public let output: String
 
-    /// The remote command's standard output.
-    let output: String
+    /// The end of the standard error of `ssh` and the remote command.
+    public let errorOutput: String
 
-    /// The standard error of `ssh` and the remote command.
-    let errorOutput: String
+    /// Whether ``output`` lost its beginning to the 64 KiB limit.
+    public let isOutputTruncated: Bool
 
-    /// The exit status and the end of the error output.
-    var failureSummary: String {
+    /// Whether ``errorOutput`` lost its beginning to the 64 KiB limit.
+    public let isErrorOutputTruncated: Bool
+
+    /// Whether `ssh` and the remote command exited with code zero.
+    public var succeeded: Bool {
+        status == .exited(0)
+    }
+
+    /// The exit status and the last 400 characters of the error output.
+    public var failureSummary: String {
         let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "ssh \(status) without output" : "ssh \(status): \(trimmed.suffix(400))"
+    }
+
+    /// Creates a result from its parts.
+    ///
+    /// - Parameters:
+    ///   - status: How `ssh` ended.
+    ///   - output: The end of the standard output.
+    ///   - errorOutput: The end of the standard error.
+    ///   - isOutputTruncated: Whether the standard output lost its beginning.
+    ///   - isErrorOutputTruncated: Whether the standard error lost its beginning.
+    init(
+        status: GuestCommandStatus,
+        output: String,
+        errorOutput: String,
+        isOutputTruncated: Bool = false,
+        isErrorOutputTruncated: Bool = false,
+    ) {
+        self.status = status
+        self.output = output
+        self.errorOutput = errorOutput
+        self.isOutputTruncated = isOutputTruncated
+        self.isErrorOutputTruncated = isErrorOutputTruncated
     }
 }
 
@@ -39,7 +94,9 @@ protocol GuestCommandRunner: Sendable {
 
     /// Runs a command in the guest.
     ///
-    /// Cancelling the calling task ends the command.
+    /// Cancelling the calling task ends the connection. The command in the guest keeps running
+    /// until it ends or until it writes to its standard output or standard error. That write ends
+    /// it. The guest's state after a cancellation is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -49,8 +106,10 @@ protocol GuestCommandRunner: Sendable {
     ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
-    /// - Returns: The command's outputs and whether it succeeded.
-    /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when the command cannot start.
+    /// - Returns: The command's outputs and exit status.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the command cannot start or reading
+    ///   its output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is
+    ///   cancelled.
     func run(
         _ command: String,
         input: String,
@@ -59,6 +118,9 @@ protocol GuestCommandRunner: Sendable {
         knownHosts: URL,
         trustsFirstKey: Bool,
     ) async throws(MacpoolError) -> GuestCommandResult
+
+    /// Removes the runner's private directory and the `known_hosts` files in it.
+    func removeDirectory()
 }
 
 /// An SSH client for one guest that logs in with the password of a stored account file.
@@ -74,7 +136,7 @@ protocol GuestCommandRunner: Sendable {
 /// A process that ends by a signal leaves the directory in the temporary directory. It holds only
 /// the askpass script and public keys.
 struct GuestShell: GuestCommandRunner {
-    /// The most bytes collected from each output stream of a command.
+    /// The most bytes that a result keeps from the end of each output stream.
     static let outputLimit = 1 << 16
 
     /// The guest's IPv4 address.
@@ -129,7 +191,9 @@ struct GuestShell: GuestCommandRunner {
 
     /// Runs a command in the guest through `ssh`.
     ///
-    /// Cancelling the calling task terminates `ssh`.
+    /// Cancelling the calling task terminates `ssh`. The command in the guest keeps running until
+    /// it ends or until it writes to its standard output or standard error. That write ends it.
+    /// The guest's state after a cancellation is unknown.
     ///
     /// - Parameters:
     ///   - command: The command line that the account's login shell runs.
@@ -139,9 +203,9 @@ struct GuestShell: GuestCommandRunner {
     ///   - knownHosts: The `known_hosts` file from ``writeKnownHosts(_:named:)``.
     ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
     ///     A key that differs from a pinned one fails the connection either way.
-    /// - Returns: The command's outputs and whether it succeeded.
-    /// - Throws: ``MacpoolError/credentialRotation(step:reason:)`` when `ssh` cannot start or
-    ///   its output exceeds ``outputLimit``.
+    /// - Returns: The command's outputs and exit status.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when `ssh` cannot start or reading its
+    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
     func run(
         _ command: String,
         input: String,
@@ -150,7 +214,41 @@ struct GuestShell: GuestCommandRunner {
         knownHosts: URL,
         trustsFirstKey: Bool,
     ) async throws(MacpoolError) -> GuestCommandResult {
-        let arguments = [
+        try await Self.collect(
+            executable: "/usr/bin/ssh",
+            arguments: Self.arguments(
+                command: command,
+                username: username,
+                address: address,
+                knownHosts: knownHosts,
+                trustsFirstKey: trustsFirstKey,
+            ),
+            environment: Environment.inherit.updating([
+                "SSH_ASKPASS": askpass.filePath,
+                "SSH_ASKPASS_REQUIRE": "force",
+                "MACPOOL_ACCOUNT_FILE": accountFile.filePath,
+            ]),
+            input: input,
+        )
+    }
+
+    /// Builds the `ssh` arguments for one command.
+    ///
+    /// - Parameters:
+    ///   - command: The command line that the account's login shell runs.
+    ///   - username: The account's short user name. It must need no shell quoting.
+    ///   - address: The guest's IPv4 address.
+    ///   - knownHosts: The `known_hosts` file with the keys to accept.
+    ///   - trustsFirstKey: Whether an empty `known_hosts` file accepts the key the guest presents.
+    /// - Returns: The arguments. The last three are `--`, the destination, and the command.
+    static func arguments(
+        command: String,
+        username: String,
+        address: String,
+        knownHosts: URL,
+        trustsFirstKey: Bool,
+    ) -> [String] {
+        [
             "-F", "/dev/null",
             "-o", "ForwardAgent=no",
             "-o", "IdentityAgent=none",
@@ -166,36 +264,157 @@ struct GuestShell: GuestCommandRunner {
             "-o", "ConnectTimeout=10",
             "-o", "ServerAliveInterval=5",
             "-o", "ServerAliveCountMax=6",
+            // Without the separator, a command that starts with -o would set an ssh option.
+            "--",
             "\(username)@\(address)",
             command,
         ]
-        let environment = Environment.inherit.updating([
-            "SSH_ASKPASS": askpass.filePath,
-            "SSH_ASKPASS_REQUIRE": "force",
-            "MACPOOL_ACCOUNT_FILE": accountFile.filePath,
-        ])
+    }
+
+    /// Runs a process with input and collects the end of each output stream.
+    ///
+    /// The process may exit before it reads all of its input. The rest of the input is then
+    /// dropped, and the result reports the exit status.
+    ///
+    /// - Parameters:
+    ///   - executable: The absolute path of the program.
+    ///   - arguments: The program's arguments.
+    ///   - environment: The program's environment.
+    ///   - input: The program's standard input.
+    /// - Returns: The exit status and at most the last ``outputLimit`` bytes of each stream.
+    /// - Throws: ``MacpoolError/guestCommand(reason:)`` when the process cannot start or reading its
+    ///   output fails, or ``MacpoolError/guestCommandCancelled`` when the calling task is cancelled.
+    static func collect(
+        executable: String,
+        arguments: [String],
+        environment: Environment = .inherit,
+        input: String,
+    ) async throws(MacpoolError) -> GuestCommandResult {
+        let pipe: (readEnd: FileDescriptor, writeEnd: FileDescriptor)
         do {
-            let result = try await Subprocess.run(
-                .path("/usr/bin/ssh"),
+            // Both ends close on exec, so a process that the caller spawns meanwhile cannot hold
+            // them open. Subprocess clears the flag on the child's standard input when it moves
+            // the read end there.
+            pipe = try FileDescriptor.pipe(options: .closeOnExec)
+        } catch {
+            throw .guestCommand(reason: "creating the input pipe failed: \(error)")
+        }
+        // A write after the process exits then fails with EPIPE. SIGPIPE would end this process.
+        _ = fcntl(pipe.writeEnd.rawValue, F_SETNOSIGPIPE, 1)
+        let writer = Task { await write(Array(input.utf8), to: pipe.writeEnd) }
+
+        var result: GuestCommandResult?
+        var failure: (any Error)?
+        do {
+            let execution = try await Subprocess.run(
+                .path(FilePath(executable)),
                 arguments: Arguments(arguments),
                 environment: environment,
-                input: .string(input),
-                output: .string(limit: Self.outputLimit),
-                error: .string(limit: Self.outputLimit),
-            )
-            return GuestCommandResult(
-                succeeded: result.terminationStatus.isSuccess,
-                status: "\(result.terminationStatus)",
-                output: result.standardOutput,
-                errorOutput: result.standardError,
+                input: .fileDescriptor(pipe.readEnd, closeAfterSpawningProcess: false),
+                output: .sequence,
+                error: .sequence,
+            ) { execution in
+                let errorStream = execution.standardError
+                async let errorTail = OutputTail(collecting: errorStream)
+                let outputTail = try await OutputTail(collecting: execution.standardOutput)
+                return try await (outputTail, errorTail)
+            }
+            let (outputTail, errorTail) = execution.closureResult
+            result = GuestCommandResult(
+                status: status(of: execution.terminationStatus),
+                output: outputTail.text,
+                errorOutput: errorTail.text,
+                isOutputTruncated: outputTail.isTruncated,
+                isErrorOutputTruncated: errorTail.isTruncated,
             )
         } catch {
-            throw .credentialRotation(step: "running ssh", reason: "\(error)")
+            failure = error
+        }
+        // The process held the only other copy of the read end. Closing this one makes a write
+        // that waits for a reader fail, so the writer ends.
+        try? pipe.readEnd.close()
+        await writer.value
+
+        guard !Task.isCancelled else {
+            throw .guestCommandCancelled
+        }
+        guard let result else {
+            throw .guestCommand(reason: "\(failure.map { "\($0)" } ?? "no result")")
+        }
+        return result
+    }
+
+    /// Converts a process's termination status.
+    ///
+    /// - Parameter status: The status that Subprocess reports.
+    /// - Returns: The same status as a ``GuestCommandStatus``.
+    private static func status(of status: TerminationStatus) -> GuestCommandStatus {
+        switch status {
+        case let .exited(code):
+            .exited(code)
+        case let .signaled(signal):
+            .signaled(signal)
+        }
+    }
+
+    /// Writes bytes to a pipe on a dispatch queue and closes the pipe.
+    ///
+    /// The blocking writes stay off the concurrency pool's threads.
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes to write.
+    ///   - descriptor: The pipe's write end. The call closes it.
+    private static func write(_ bytes: [UInt8], to descriptor: FileDescriptor) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                // A failed write means the reader exited early. Its exit status tells why.
+                _ = try? descriptor.writeAll(bytes)
+                try? descriptor.close()
+                continuation.resume()
+            }
         }
     }
 
     /// Removes the client's temporary directory.
     func removeDirectory() {
         try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+/// The end of one output stream, at most ``GuestShell/outputLimit`` bytes.
+private struct OutputTail: Sendable {
+    /// The last bytes of the stream.
+    let bytes: [UInt8]
+
+    /// Whether the stream was longer than ``bytes``.
+    let isTruncated: Bool
+
+    /// The bytes as UTF-8 text. Invalid sequences become replacement characters.
+    var text: String {
+        String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Reads a stream to its end and keeps its last bytes.
+    ///
+    /// - Parameter stream: The stream to read.
+    /// - Throws: The stream's read error.
+    init(collecting stream: SubprocessOutputSequence) async throws {
+        let limit = GuestShell.outputLimit
+        var tail: [UInt8] = []
+        var isTruncated = false
+        for try await buffer in stream {
+            buffer.withUnsafeBytes { tail.append(contentsOf: $0) }
+            // Trimming only past twice the limit keeps the copying linear in the stream's length.
+            if tail.count > 2 * limit {
+                tail.removeFirst(tail.count - limit)
+                isTruncated = true
+            }
+        }
+        if tail.count > limit {
+            tail.removeFirst(tail.count - limit)
+            isTruncated = true
+        }
+        bytes = tail
+        self.isTruncated = isTruncated
     }
 }
