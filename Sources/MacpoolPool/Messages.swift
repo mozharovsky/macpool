@@ -386,6 +386,26 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// Asks for the pool's state.
     case status
 
+    /// Opens an invitation for one client Mac to pair with this host.
+    ///
+    /// Only the local user may invite. The daemon replies with
+    /// ``PoolReply/invitation(_:expiresAt:)`` and keeps the invitation open while the connection
+    /// stays open. When a client pairs, the daemon sends ``PoolReply/paired(_:)`` on the same
+    /// connection. A newer invitation replaces this one.
+    ///
+    /// - Parameter address: The host's address that the code carries to clients, such as
+    ///   `studio.local`.
+    case invite(address: String)
+
+    /// Pairs the sending Mac with the host.
+    ///
+    /// A Mac that the host does not know may send only this request, once per connection.
+    ///
+    /// - Parameters:
+    ///   - secret: The secret of the pairing code in base32.
+    ///   - name: The name that the host shows to people for the sending Mac.
+    case pair(secret: String, name: String)
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -394,6 +414,12 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case terms
         /// The lease of an attach, release, or renew request.
         case lease
+        /// The address of an invitation.
+        case address
+        /// The secret of a pairing.
+        case secret
+        /// The name of a pairing Mac.
+        case name
     }
 
     /// Decodes a request.
@@ -414,6 +440,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = try .renew(container.decode(LeaseID.self, forKey: .lease))
         case "status":
             self = .status
+        case "invite":
+            self = try .invite(address: container.decode(String.self, forKey: .address))
+        case "pair":
+            self = try .pair(
+                secret: container.decode(String.self, forKey: .secret),
+                name: container.decode(String.self, forKey: .name),
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -444,6 +477,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(id, forKey: .lease)
         case .status:
             try container.encode("status", forKey: .request)
+        case let .invite(address):
+            try container.encode("invite", forKey: .request)
+            try container.encode(address, forKey: .address)
+        case let .pair(secret, name):
+            try container.encode("pair", forKey: .request)
+            try container.encode(secret, forKey: .secret)
+            try container.encode(name, forKey: .name)
         }
     }
 }
@@ -610,6 +650,20 @@ public enum PoolReply: Sendable, Equatable, Codable {
     /// - Parameter message: Why the request failed.
     case failure(String)
 
+    /// The code of a new invitation.
+    ///
+    /// - Parameters:
+    ///   - code: The code that a client Mac pairs with.
+    ///   - expiresAt: When the invitation ends unless a client paired.
+    case invitation(PairingCode, expiresAt: Date)
+
+    /// A pairing finished.
+    ///
+    /// The inviting connection receives the client Mac, and the client receives the host.
+    ///
+    /// - Parameter mac: The Mac on the other side of the pairing.
+    case paired(PairedMac)
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -624,6 +678,12 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case reason
         /// The pool summary.
         case pool
+        /// The pairing code.
+        case code
+        /// The end of an invitation.
+        case expiresAt = "expires_at"
+        /// The Mac on the other side of a pairing.
+        case mac
     }
 
     /// Decodes a reply.
@@ -658,6 +718,13 @@ public enum PoolReply: Sendable, Equatable, Codable {
             self = try .status(container.decode(PoolSummary.self, forKey: .pool))
         case "failure":
             self = try .failure(container.decode(String.self, forKey: .reason))
+        case "invitation":
+            self = try .invitation(
+                container.decode(PairingCode.self, forKey: .code),
+                expiresAt: container.decode(Date.self, forKey: .expiresAt),
+            )
+        case "paired":
+            self = try .paired(container.decode(PairedMac.self, forKey: .mac))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -703,6 +770,47 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case let .failure(message):
             try container.encode("failure", forKey: .reply)
             try container.encode(message, forKey: .reason)
+        case let .invitation(code, expiresAt):
+            try container.encode("invitation", forKey: .reply)
+            try container.encode(code, forKey: .code)
+            try container.encode(expiresAt, forKey: .expiresAt)
+        case let .paired(mac):
+            try container.encode("paired", forKey: .reply)
+            try container.encode(mac, forKey: .mac)
         }
+    }
+}
+
+/// The Mac on the other side of a pairing.
+public struct PairedMac: Sendable, Equatable, Codable {
+    /// The name that the Mac gave for itself.
+    public var name: String
+
+    /// The fingerprint of the Mac's key.
+    public var key: KeyFingerprint
+
+    /// Creates a description of a paired Mac.
+    ///
+    /// - Parameters:
+    ///   - name: The name that the Mac gave for itself.
+    ///   - key: The fingerprint of its key.
+    public init(name: String, key: KeyFingerprint) {
+        self.name = name
+        self.key = key
+    }
+
+    /// The most characters in a Mac's name.
+    static let maximumNameLength = 64
+
+    /// Reports whether a Mac's name can be shown to people as it is.
+    ///
+    /// - Parameter name: A name that a Mac gave for itself.
+    /// - Returns: Whether the name has 1 to 64 characters, at least one of them visible, and no
+    ///   control characters.
+    static func isValidName(_ name: String) -> Bool {
+        let scalars = name.unicodeScalars
+        return (1 ... maximumNameLength).contains(name.count)
+            && !scalars.contains { $0.properties.generalCategory == .control }
+            && scalars.contains { !$0.properties.isWhitespace }
     }
 }

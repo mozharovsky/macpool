@@ -4,6 +4,9 @@ import Synchronization
 
 /// How the daemon listens for paired Macs.
 public struct PeerSettings: Sendable {
+    /// The host's name that a client Mac receives when it pairs.
+    public var name: String
+
     /// The local address to listen on, such as `127.0.0.1`.
     ///
     /// The listener binds only to this address. It has no default, so a caller never opens every
@@ -20,10 +23,18 @@ public struct PeerSettings: Sendable {
     /// Creates listener settings.
     ///
     /// - Parameters:
+    ///   - name: The host's name for clients, or `nil` for this Mac's name in Sharing settings,
+    ///     cut to 64 characters.
     ///   - address: The local address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - retryInterval: The wait before another attempt to listen.
-    public init(address: String, port: UInt16, retryInterval: Duration = .seconds(10)) {
+    public init(
+        name: String? = nil,
+        address: String,
+        port: UInt16,
+        retryInterval: Duration = .seconds(10),
+    ) {
+        self.name = name ?? String((Host.current().localizedName ?? "Mac").prefix(PairedMac.maximumNameLength))
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
@@ -61,6 +72,9 @@ final class PeerListener: Sendable {
     /// The port on which the listener accepts connections.
     let port: UInt16
 
+    /// The fingerprint of the key that the listener presents.
+    let hostKey: KeyFingerprint
+
     /// The connections that finished their handshake.
     ///
     /// The stream ends when the listener closes or fails.
@@ -74,9 +88,8 @@ final class PeerListener: Sendable {
     /// - Parameters:
     ///   - identity: This Mac's key and certificate.
     ///   - settings: The address and the port.
-    ///   - trustedKeys: Returns the fingerprints of the keys that may connect. The listener calls
-    ///     it during every handshake on one serial queue, so a slow call delays every handshake.
-    ///     If the keys cannot be read, it must return an empty set.
+    ///   - admits: Decides whether a key may connect. The listener calls it during every
+    ///     handshake on one serial queue, so a slow call delays every handshake.
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
     ///   - handshakeLimit: The most handshakes that run at once.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
@@ -85,13 +98,11 @@ final class PeerListener: Sendable {
     init(
         identity: MacIdentity,
         settings: PeerSettings,
-        trustedKeys: @escaping @Sendable () -> Set<KeyFingerprint>,
+        admits: @escaping @Sendable (KeyFingerprint) -> Bool,
         handshakeTimeout: Duration = .seconds(5),
         handshakeLimit: Int = 16,
     ) async throws(PoolError) {
-        let parameters = try PeerSecurity.parameters(identity: identity, isServer: true) { key in
-            trustedKeys().contains(key)
-        }
+        let parameters = try PeerSecurity.parameters(identity: identity, isServer: true, admits: admits)
         let port = NWEndpoint.Port(rawValue: settings.port) ?? .any
         let place = "\(settings.address):\(settings.port)"
         parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(settings.address), port: port)
@@ -137,6 +148,7 @@ final class PeerListener: Sendable {
         }
         self.listener = listener
         self.port = bound
+        hostKey = KeyFingerprint(digest: identity.keyDigest)
         self.connections = connections
         self.continuation = continuation
     }

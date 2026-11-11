@@ -76,13 +76,7 @@ public struct KeyFingerprint: Hashable, Sendable, Codable, CustomStringConvertib
     /// trusts with the key of the client. Finding another key with the same short key takes
     /// about 2^80 attempts.
     public var shortKey: String {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(Self.shortKeyBytes)
-        var digits = rawValue.utf8.makeIterator()
-        while bytes.count < Self.shortKeyBytes, let high = digits.next(), let low = digits.next() {
-            bytes.append(Self.nibble(high) << 4 | Self.nibble(low))
-        }
-        let text = Base32.encode(bytes)
+        let text = Base32.encode(leadingBytes(Self.shortKeyBytes))
         return stride(from: 0, to: text.count, by: 4)
             .map { offset in String(text.dropFirst(offset).prefix(4)) }
             .joined(separator: "-")
@@ -91,6 +85,20 @@ public struct KeyFingerprint: Hashable, Sendable, Codable, CustomStringConvertib
     /// The fingerprint's text.
     public var description: String {
         rawValue
+    }
+
+    /// Returns the first bytes of the digest.
+    ///
+    /// - Parameter count: The number of bytes, at most 32.
+    /// - Returns: The bytes.
+    func leadingBytes(_ count: Int) -> [UInt8] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(count)
+        var digits = rawValue.utf8.makeIterator()
+        while bytes.count < count, let high = digits.next(), let low = digits.next() {
+            bytes.append(Self.nibble(high) << 4 | Self.nibble(low))
+        }
+        return bytes
     }
 
     /// Converts a lowercase hexadecimal digit to its value.

@@ -67,14 +67,14 @@ side checks only the key in the first certificate that the other side sends, and
 trust evaluation never runs. Session resumption and session tickets are off, so every connection
 runs a full handshake.
 
-The host reads `trust/clients.json` during every handshake and admits the keys of clients that
-are not blocked. A key that leaves the list opens no new connection, and connections that are
-already open stay open. If the list cannot be read when the listener starts, the listener does
-not start. If it cannot be read later, the host admits nobody until it can. A
-TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
-first sends a `hello` line. The line names the host's role and the protocol version that ALPN
-chose. The client sends requests only after that line. Both sides then exchange the same lines as
-on the Unix socket.
+The host reads `trust/clients.json` during every handshake and admits the keys of clients that are
+not blocked. While an invitation is open, it also admits keys that the list does not name, so that
+a new client can pair. A key that leaves the list opens no new connection, and connections that are
+already open stay open. If the list cannot be read when the listener starts, the listener does not
+start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
+its handshake before the host checks the client's key. The host therefore first sends a `hello`
+line. The line names the host's role and the protocol version that ALPN chose. The client sends
+requests only after that line. Both sides then exchange the same lines as on the Unix socket.
 
 The daemon loads the key when it starts listening. A key or a list that cannot be loaded, or a
 port that another process holds, leaves the local socket serving. The daemon logs the failure and
@@ -93,6 +93,24 @@ Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout
 ends first, it closes the connection anyway. The bytes that were still waiting are lost, and the
 peer still sees a normal end of the stream.
+
+### Pairing
+
+A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
+code with ``PoolRequest/invite(address:)``. The code carries the host's address and port, the
+first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to the person
+who pairs the client, because anyone with the code can pair in that client's place.
+
+``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
+it sends the secret. The host then adds the client to `clients.json`, and the client adds the
+host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``. If the two
+texts differ, someone else used the code.
+
+A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
+5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
+10 minutes, after 5 wrong secrets, when a newer invitation replaces it, or when the inviting
+connection closes. The daemon keeps only the SHA-256 digest of the secret, and only in memory. A
+restart of the daemon therefore ends the invitation. A blocked client cannot pair again.
 
 ### Supervisors
 
@@ -178,6 +196,8 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``LeaseID``
 - ``LeaseOwner``
 - ``KeyFingerprint``
+- ``PairingCode``
+- ``PairedMac``
 - ``RestartPolicy``
 - ``LeasePhase``
 - ``LeaseSummary``

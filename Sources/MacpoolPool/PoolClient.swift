@@ -1,3 +1,4 @@
+import Foundation
 import Network
 import Synchronization
 
@@ -32,6 +33,8 @@ public enum PoolClient {
     ///   - hostKey: The fingerprint of the key that the host must present.
     ///   - timeout: The longest wait for the handshake, and then for the greeting.
     ///   - protocols: The application protocols to offer, in order of preference.
+    ///   - closedReason: The reason in the error when the host closes the connection before its
+    ///     greeting.
     /// - Returns: A connection that is ready for requests.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails, the host
     ///   presents another key, refuses this Mac's key or the connection, closes the connection or
@@ -43,23 +46,58 @@ public enum PoolClient {
         hostKey: KeyFingerprint,
         timeout: Duration = .seconds(10),
         protocols: [String] = [PeerSecurity.protocolName],
+        closedReason: String = "the host closed the connection, so it does not accept this Mac's key",
+    ) async throws(PoolError) -> MessageChannel {
+        try await connect(
+            to: endpoint,
+            as: identity,
+            timeout: timeout,
+            protocols: protocols,
+            closedReason: closedReason,
+            expected: hostKey.rawValue,
+        ) { $0 == hostKey }
+    }
+
+    /// Connects to the daemon of another Mac whose key passes a check, and waits for its
+    /// greeting.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The host's address and port.
+    ///   - identity: This Mac's key and certificate.
+    ///   - timeout: The longest wait for the handshake, and then for the greeting.
+    ///   - protocols: The application protocols to offer, in order of preference.
+    ///   - closedReason: The reason in the error when the host closes the connection before its
+    ///     greeting.
+    ///   - expected: The text that names the expected key in the error when the host presents
+    ///     another key.
+    ///   - accepts: Decides whether the key that the host presents is the expected one.
+    /// - Returns: A connection that is ready for requests.
+    /// - Throws: The errors of ``connect(to:as:hostKey:timeout:protocols:closedReason:)``.
+    private static func connect(
+        to endpoint: NWEndpoint,
+        as identity: MacIdentity,
+        timeout: Duration,
+        protocols: [String],
+        closedReason: String,
+        expected: String,
+        accepts: @escaping @Sendable (KeyFingerprint) -> Bool,
     ) async throws(PoolError) -> MessageChannel {
         let place = "\(endpoint)"
         let presented = Mutex<KeyFingerprint?>(nil)
         let parameters = try PeerSecurity.parameters(identity: identity, protocols: protocols, isServer: false) { key in
             presented.withLock { $0 = key }
-            return key == hostKey
+            return accepts(key)
         }
         let channel: MessageChannel
         do {
             channel = try await MessageChannel.connect(to: endpoint, using: parameters, timeout: timeout)
         } catch {
-            if let key = presented.withLock({ $0 }), key != hostKey {
-                throw .connection(path: place, reason: "the host presented the key \(key) instead of \(hostKey)")
+            if let key = presented.withLock({ $0 }), !accepts(key) {
+                throw .connection(path: place, reason: "the host presented the key \(key) instead of \(expected)")
             }
             throw error
         }
-        let greeting = try await greeting(on: channel, from: place, within: timeout)
+        let greeting = try await greeting(on: channel, from: place, within: timeout, closedReason: closedReason)
         guard greeting == HostGreeting(version: PeerSecurity.protocolVersion, role: .host) else {
             channel.close()
             throw .connection(
@@ -77,6 +115,7 @@ public enum PoolClient {
     ///   - channel: A connection whose handshake finished on this side.
     ///   - place: The host's address, for error messages.
     ///   - timeout: The longest wait.
+    ///   - closedReason: The reason in the error when the host closes the connection.
     /// - Returns: The greeting.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the host refuses or closes the
     ///   connection, sends something else, or stays silent for `timeout`.
@@ -84,6 +123,7 @@ public enum PoolClient {
         on channel: MessageChannel,
         from place: String,
         within timeout: Duration,
+        closedReason: String,
     ) async throws(PoolError) -> HostGreeting {
         let watchdog = Task {
             do {
@@ -112,13 +152,94 @@ public enum PoolClient {
             throw .connection(path: place, reason: "the host refused the connection: \(reason)")
         case .success(nil):
             channel.close()
-            throw .connection(
-                path: place,
-                reason: "the host closed the connection, so it does not accept this Mac's key",
-            )
+            throw .connection(path: place, reason: closedReason)
         case let .failure(error):
             channel.close()
             throw .connection(path: place, reason: "the host sent no greeting: \(error)")
+        }
+    }
+
+    /// Pairs this Mac with a host and adds the host to `trust/hosts.json`.
+    ///
+    /// The host must present a key that matches the code. This Mac then proves its own key and
+    /// sends the code's secret with its name. The host adds this Mac to its list of paired clients
+    /// and returns its own name.
+    ///
+    /// Show the person who pairs the ``KeyFingerprint/shortKey`` of this Mac's key. The host shows
+    /// the same text for the client it paired. If the two differ, someone else used the code.
+    ///
+    /// - Parameters:
+    ///   - code: The code from the host.
+    ///   - name: The name that the host shows to people for this Mac.
+    ///   - directory: This Mac's data directory. The call creates this Mac's key if the directory
+    ///     has none.
+    ///   - timeout: The longest wait for the handshake, the greeting, and the host's reply, each.
+    /// - Returns: The host's name and key.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when `name` cannot be shown to people,
+    ///   ``PoolError/connection(path:reason:)`` when the connection fails or the host presents a
+    ///   key that does not match the code, ``PoolError/daemonRefused(message:)`` when the host
+    ///   refuses the code, ``PoolError/connectionClosed`` when the host closes the connection
+    ///   before it replies, or ``PoolError/malformedMessage(reason:)`` when the reply names another
+    ///   key. Another ``PoolError`` means that this Mac's key or the list of hosts cannot be read
+    ///   or written.
+    public static func pair(
+        using code: PairingCode,
+        name: String,
+        directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(PoolError) -> PairedMac {
+        guard PairedMac.isValidName(name) else {
+            throw .invalidRequest(reason: "the name must have 1 to \(PairedMac.maximumNameLength) characters "
+                + "without control characters")
+        }
+        guard let port = NWEndpoint.Port(rawValue: code.port) else {
+            throw .invalidRequest(reason: "the code names port \(code.port)")
+        }
+        let identity = try MacIdentity.loadOrCreate(in: directory)
+        let matching = Mutex<KeyFingerprint?>(nil)
+        let channel = try await connect(
+            to: .hostPort(host: NWEndpoint.Host(code.address), port: port),
+            as: identity,
+            timeout: timeout,
+            protocols: [PeerSecurity.protocolName],
+            closedReason: "the host closed the connection, so the code was used, expired, or replaced",
+            expected: "a key that matches the code",
+        ) { key in
+            guard code.matches(key) else {
+                return false
+            }
+            matching.withLock { $0 = key }
+            return true
+        }
+        defer { channel.close() }
+        guard let hostKey = matching.withLock({ $0 }) else {
+            throw .connection(path: "\(code.address):\(code.port)", reason: "the host proved no key")
+        }
+        try channel.send(PoolRequest.pair(secret: Base32.encode(code.secret), name: name))
+        let watchdog = Task {
+            try await Task.sleep(for: timeout)
+            channel.close()
+        }
+        let reply = try await channel.receive(PoolReply.self)
+        watchdog.cancel()
+        switch reply {
+        case let .paired(host)? where host.key == hostKey && PairedMac.isValidName(host.name):
+            var hosts = try TrustList<TrustedHost>.load(from: directory)
+            hosts.insert(TrustedHost(
+                key: hostKey,
+                name: host.name,
+                address: code.address,
+                port: code.port,
+                pairedAt: Date(),
+            ))
+            try hosts.save(to: directory)
+            return host
+        case let .failure(message)?:
+            throw .daemonRefused(message: message)
+        case nil:
+            throw .connectionClosed
+        case let reply?:
+            throw .malformedMessage(reason: "the host replied to a pairing with \(reply)")
         }
     }
 

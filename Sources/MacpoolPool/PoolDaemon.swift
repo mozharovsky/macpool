@@ -238,6 +238,21 @@ public actor PoolDaemon {
     /// can hold this way.
     static let connectionsPerPeer = 4
 
+    /// The most connections of Macs that pair at once.
+    ///
+    /// While an invitation is open, any key passes the handshake. The limit bounds the connections
+    /// that such keys hold.
+    static let pairingConnectionLimit = 4
+
+    /// The longest wait for the one request of a Mac that pairs.
+    static let pairingTimeout = Duration.seconds(5)
+
+    /// The open invitation for a client Mac to pair, if any.
+    private let invitation = PairingInvitation()
+
+    /// The connections of Macs that pair.
+    private var pairingConnections = 0
+
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
 
@@ -400,6 +415,9 @@ public actor PoolDaemon {
             return
         }
         let now = configuration.now()
+        if let inviter = invitation.expire(at: now) {
+            reply(.failure("the invitation expired"), to: inviter)
+        }
         perform(ledger.tick(now: now))
         let stopGrace = configuration.stopGrace / .seconds(1)
         for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
@@ -470,8 +488,19 @@ public actor PoolDaemon {
             // A list that cannot be read now would refuse every handshake, so the log says why
             // once instead.
             _ = try TrustList<TrustedClient>.load(from: configuration.directory)
-            let clientKeys = ClientKeys(directory: configuration.directory, logger: configuration.logger)
-            started = try await PeerListener(identity: identity, settings: settings, trustedKeys: { clientKeys.read() })
+            let clients = ClientListReader(directory: configuration.directory, logger: configuration.logger)
+            let invitation = invitation
+            let now = configuration.now
+            started = try await PeerListener(identity: identity, settings: settings) { key in
+                guard let list = clients.read() else {
+                    return false
+                }
+                if let record = list[key] {
+                    return !record.isBlocked
+                }
+                // A Mac that the host does not know gets in only to pair.
+                return invitation.isOpen(at: now())
+            }
         } catch {
             if peerListenerFailure != error.description {
                 peerListenerFailure = error.description
@@ -506,17 +535,39 @@ public actor PoolDaemon {
         configuration.logger.error("The listener for paired Macs stopped")
     }
 
+    /// Serves a Mac whose handshake succeeded as a paired client or as a Mac that pairs.
+    ///
+    /// The daemon reads the list of paired clients again, because it may have changed since the
+    /// handshake. If the list names the key, the Mac is a paired client unless it is blocked. If
+    /// the list does not name the key and an invitation is open, the Mac may pair. The daemon
+    /// closes any other connection.
+    ///
+    /// - Parameter peer: A connection whose handshake proved a key.
+    private func acceptPeer(_ peer: PeerListener.Peer) {
+        guard !isShutDown, let clients = try? TrustList<TrustedClient>.load(from: configuration.directory) else {
+            peer.channel.close()
+            return
+        }
+        if let record = clients[peer.fingerprint] {
+            if record.isBlocked {
+                peer.channel.close()
+            } else {
+                acceptPairedMac(peer)
+            }
+        } else if invitation.isOpen(at: configuration.now()) {
+            acceptPairingMac(peer)
+        } else {
+            peer.channel.close()
+        }
+    }
+
     /// Greets a paired Mac and serves its requests as the owner of its key.
     ///
     /// A Mac that already has ``connectionsPerPeer`` connections gets a failure reply instead of
     /// the greeting, and the daemon closes the new connection.
     ///
-    /// - Parameter peer: A connection whose handshake proved a trusted key.
-    private func acceptPeer(_ peer: PeerListener.Peer) {
-        guard !isShutDown else {
-            peer.channel.close()
-            return
-        }
+    /// - Parameter peer: A connection whose handshake proved the key of a paired client.
+    private func acceptPairedMac(_ peer: PeerListener.Peer) {
         let owner = LeaseOwner.client(peer.fingerprint)
         guard clients.values.count(where: { $0.owner == owner }) < Self.connectionsPerPeer else {
             configuration.logger.warning("A paired Mac has too many connections", metadata: [
@@ -535,6 +586,139 @@ public actor PoolDaemon {
             "address": "\(peer.channel.peer)",
         ])
         accept(peer.channel, owner: owner)
+    }
+
+    /// Greets a Mac that may pair and waits for its pairing request.
+    ///
+    /// If ``pairingConnectionLimit`` Macs already pair, the new one gets a failure reply instead
+    /// of the greeting, and the daemon closes its connection.
+    ///
+    /// - Parameter peer: A connection whose handshake proved a key that the host does not know.
+    private func acceptPairingMac(_ peer: PeerListener.Peer) {
+        guard pairingConnections < Self.pairingConnectionLimit else {
+            configuration.logger.warning("Too many Macs pair at once", metadata: [
+                "key": "\(peer.fingerprint)",
+                "address": "\(peer.channel.peer)",
+            ])
+            try? peer.channel.send(PoolReply.failure("other Macs are pairing with the host, so try again shortly"))
+            Task { await peer.channel.finish() }
+            return
+        }
+        pairingConnections += 1
+        try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
+        configuration.logger.info("A Mac connected to pair", metadata: [
+            "key": "\(peer.fingerprint)",
+            "address": "\(peer.channel.peer)",
+        ])
+        Task { await self.servePairing(peer) }
+    }
+
+    /// Reads the one request of a Mac that pairs, replies to it, and closes the connection.
+    ///
+    /// The daemon closes the connection if no request arrives within ``pairingTimeout``. Any
+    /// request other than a pairing gets a failure reply.
+    ///
+    /// - Parameter peer: The connection of a Mac that the host does not know.
+    private func servePairing(_ peer: PeerListener.Peer) async {
+        let watchdog = Task {
+            try await Task.sleep(for: Self.pairingTimeout)
+            peer.channel.close()
+        }
+        let request = try? await peer.channel.receive(PoolRequest.self)
+        watchdog.cancel()
+        switch request {
+        case let .pair(secret, name)?:
+            try? peer.channel.send(pair(peer.fingerprint, secret: secret, name: name))
+        case nil:
+            break
+        default:
+            try? peer.channel.send(PoolReply.failure("this Mac is not paired with the host, so it can only pair"))
+        }
+        await peer.channel.finish()
+        pairingConnections -= 1
+    }
+
+    /// Checks a pairing request against the open invitation and records a new paired client.
+    ///
+    /// The reply to the Mac that pairs never names a host path. The inviting connection receives
+    /// the new client or the reason that the invitation ended.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the key that the Mac proved.
+    ///   - secret: The secret from the request.
+    ///   - name: The name of the Mac.
+    /// - Returns: The reply to the Mac that pairs.
+    private func pair(_ key: KeyFingerprint, secret: String, name: String) -> PoolReply {
+        guard PairedMac.isValidName(name) else {
+            return .failure("the name of this Mac must have 1 to \(PairedMac.maximumNameLength) characters "
+                + "without control characters")
+        }
+        guard let hostKey = peerListener?.hostKey, let hostName = configuration.peers?.name else {
+            return .failure("the host stopped listening for Macs")
+        }
+        // A secret that is not base32 counts as a wrong one.
+        let now = configuration.now()
+        switch invitation.redeem(Base32.decode(secret) ?? [], at: now) {
+        case .closed:
+            return .failure("the host has no open invitation, so ask for a new code")
+        case let .rejected(inviter, remaining):
+            configuration.logger.warning("A Mac sent a wrong pairing code", metadata: [
+                "key": "\(key)",
+                "remaining": "\(remaining)",
+            ])
+            if remaining == 0 {
+                reply(.failure("\(PairingInvitation.wrongSecretLimit) wrong codes ended the invitation"), to: inviter)
+            }
+            return .failure("the pairing code is wrong")
+        case let .accepted(inviter):
+            do throws(PoolError) {
+                var clients = try TrustList<TrustedClient>.load(from: configuration.directory)
+                clients.insert(TrustedClient(key: key, name: name, pairedAt: now, isBlocked: false))
+                try clients.save(to: configuration.directory)
+            } catch {
+                configuration.logger.error("The host cannot record a paired Mac", metadata: [
+                    "key": "\(key)",
+                    "reason": "\(error)",
+                ])
+                reply(.failure("the pairing failed: \(error)"), to: inviter)
+                return .failure("the host cannot record the pairing")
+            }
+            configuration.logger.info("Paired a Mac", metadata: [
+                "key": "\(key)",
+                "name": "\(name)",
+            ])
+            reply(.paired(PairedMac(name: name, key: key)), to: inviter)
+            return .paired(PairedMac(name: hostName, key: hostKey))
+        }
+    }
+
+    /// Opens an invitation for the local user.
+    ///
+    /// - Parameters:
+    ///   - address: The host's address for the code.
+    ///   - client: The inviting connection.
+    ///   - owner: Who the client acts for.
+    /// - Returns: The reply with the code.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client invites, the address
+    ///   cannot be part of a code, or the daemon does not listen for paired Macs.
+    private func invite(address: String, from client: ClientID, owner: LeaseOwner) throws(PoolError) -> PoolReply {
+        guard owner == .local else {
+            throw .invalidRequest(reason: "only the host's own user can invite Macs")
+        }
+        guard PairingCode.isValidAddress(address) else {
+            throw .invalidRequest(reason: "\(address) is not a host name or an IP address")
+        }
+        guard let listener = peerListener else {
+            throw .invalidRequest(reason: "the host does not listen for paired Macs"
+                + (peerListenerFailure.map { ": \($0)" } ?? ""))
+        }
+        let opened = invitation.open(for: client, at: configuration.now())
+        if let replaced = opened.replaced {
+            reply(.failure("a newer invitation replaced this one"), to: replaced)
+        }
+        configuration.logger.info("Opened an invitation", metadata: ["address": "\(address)"])
+        let code = PairingCode(address: address, port: listener.port, hostKey: listener.hostKey, secret: opened.secret)
+        return .invitation(code, expiresAt: opened.expiresAt)
     }
 
     /// The port on which the daemon listens for paired Macs, or `nil` while it does not listen.
@@ -569,6 +753,7 @@ public actor PoolDaemon {
             await channel.delivered()
         }
         channel.close()
+        invitation.close(for: client)
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
@@ -602,6 +787,10 @@ public actor PoolDaemon {
                 reply(.renewed(summary), to: client)
             case .status:
                 reply(.status(ledger.summary(for: owner)), to: client)
+            case let .invite(address):
+                try reply(invite(address: address, from: client, owner: owner), to: client)
+            case .pair:
+                throw .invalidRequest(reason: "only a Mac that the host does not know can pair")
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1395,12 +1584,10 @@ public actor PoolDaemon {
     }
 }
 
-/// Reads the keys of the paired clients that may connect, during the handshakes of the listener
-/// for paired Macs.
+/// Reads the list of paired clients during the handshakes of the listener for paired Macs.
 ///
-/// If the list cannot be read, the reader returns no keys, and the listener admits nobody. The
-/// reader logs a failure once until its reason changes or a read succeeds.
-private final class ClientKeys: Sendable {
+/// The reader logs a failure once until its reason changes or a read succeeds.
+private final class ClientListReader: Sendable {
     /// The data directory.
     private let directory: PoolDirectory
 
@@ -1420,14 +1607,14 @@ private final class ClientKeys: Sendable {
         self.logger = logger
     }
 
-    /// Reads the keys of the clients that are not blocked.
+    /// Reads the list.
     ///
-    /// - Returns: The keys, or an empty set when the list cannot be read.
-    func read() -> Set<KeyFingerprint> {
+    /// - Returns: The list, or `nil` when it cannot be read. The listener then admits nobody.
+    func read() -> TrustList<TrustedClient>? {
         do throws(PoolError) {
-            let keys = try TrustList<TrustedClient>.load(from: directory).admittedKeys
+            let list = try TrustList<TrustedClient>.load(from: directory)
             failure.withLock { $0 = nil }
-            return keys
+            return list
         } catch {
             let isNew = failure.withLock { last in
                 defer { last = error.description }
@@ -1438,7 +1625,7 @@ private final class ClientKeys: Sendable {
                     "reason": "\(error)",
                 ])
             }
-            return []
+            return nil
         }
     }
 }
