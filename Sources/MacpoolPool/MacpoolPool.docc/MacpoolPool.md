@@ -60,7 +60,7 @@ directory on a volume that ignores ownership or is not local, and when either ha
 list. The data directory may have an access control list that denies access or allows reading, such
 as the `group:everyone deny delete` that macOS puts on `~/Library`. The pool refuses one that lets
 other users add, delete, or rename its entries, because they could then move `trust` away. The pool
-accepts an entry that allows these writes only to the directory's owner. The `trust` directory is
+accepts an entry that allows these writes only to the current user. The `trust` directory is
 excluded from backups, which Time Machine honors.
 
 The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.

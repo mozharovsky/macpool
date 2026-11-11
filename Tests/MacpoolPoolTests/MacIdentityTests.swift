@@ -142,25 +142,26 @@ struct MacIdentityTests {
         try await Self.changeMode("-N", path)
     }
 
-    /// Accepts an access control entry of the data directory that lets only its owner change the
-    /// entries. Refuses an entry for another user or for a group, also beside an entry for the owner.
-    @Test func acceptsWritesOnlyForTheOwnerOfTheDataDirectory() async throws {
+    /// Accepts an access control entry of the data directory that lets only the current user
+    /// change the entries. Refuses an entry for another user or for a group, also beside an entry
+    /// for the current user.
+    @Test func acceptsWritesOnlyForTheCurrentUser() async throws {
         let root = try ShortDirectory()
         let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
         _ = try MacIdentity.loadOrCreate(in: directory)
         try TrustList<TrustedClient>().save(to: directory)
         let path = directory.root.pathWithoutTrailingSlash
         let refusal = PoolError.insecureDirectory(path: path, reason: FileExposure.writableAccessControlList.reason)
-        let owner = "user:\(NSUserName()) allow add_file,delete_child,writesecurity"
+        let user = "user:\(NSUserName()) allow add_file,delete_child,writesecurity"
 
-        try await Self.changeMode("+a", owner, path)
+        try await Self.changeMode("+a", user, path)
         _ = try MacIdentity.loadOrCreate(in: directory)
         #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
         try await Self.changeMode("-N", path)
         let refused = [
             ["user:daemon allow add_file"],
             ["group:staff allow add_file"],
-            [owner, "user:daemon allow delete_child"],
+            [user, "user:daemon allow delete_child"],
         ]
         for entries in refused {
             for entry in entries {
@@ -184,13 +185,13 @@ struct MacIdentityTests {
         try #require(acl_create_entry(&list, &entry) == 0)
         let directory = URL(filePath: "/")
         let error = #expect(throws: PoolError.self) {
-            try FileExposure.findWriteAccess(in: #require(list), owner: getuid(), of: directory)
+            try FileExposure.findWriteAccess(in: #require(list), user: getuid(), of: directory)
         }
         guard case let .fileSystem(operation, _, _)? = error else {
             Issue.record("unexpected error \(String(describing: error))")
             return
         }
-        #expect(operation == "reading the access control list of")
+        #expect(operation == "reading the subject of an access control entry of")
     }
 
     /// Names a key with the hexadecimal digits of its digest.
