@@ -1960,7 +1960,7 @@ private extension PoolReply {
         case let .ended(_, reason):
             [reason]
         case let .status(pool):
-            pool.leases.flatMap(\.texts) + pool.queue.map(\.source)
+            pool.leases.flatMap(\.texts) + pool.queue.map(\.source) + pool.images.flatMap(\.texts)
         case let .failure(message):
             [message]
         case let .invitation(code, _):
@@ -1976,5 +1976,13 @@ private extension LeaseSummary {
     /// The source, the clone's path, and the address, without the missing ones.
     var texts: [String] {
         [source, bundle, address].compactMap(\.self)
+    }
+}
+
+/// The texts of an image summary.
+private extension ImageSummary {
+    /// The name, the path, the problem if there is one, and the names and versions of the builds.
+    var texts: [String] {
+        [name, path] + [problem].compactMap(\.self) + builds.keys + builds.values
     }
 }

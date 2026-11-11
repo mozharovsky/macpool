@@ -201,7 +201,8 @@ struct ClientRightsTests {
     ///
     /// The host offers a source at a decomposed path. The texts hold the precomposed path, alone
     /// and before a combining mark, as a file URL, and percent-encoded from either form. Two more
-    /// texts are a file URL to another path and a path that starts with `~/`.
+    /// texts are a file URL to another path and a path that starts with `~/`. A status with an
+    /// image in the data directory also gets the failure.
     @Test func replacesRepliesThatNameHostPaths() async throws {
         let pool = try PoolFixture()
         let path = try pool.makeSource(named: "j\u{FC} rgen")
@@ -224,7 +225,14 @@ struct ClientRightsTests {
             #expect(await daemon.visible(.failure(text), to: .local) == .failure(text), "\(text)")
         }
         #expect(await daemon.visible(.failure("base"), to: paired) == .failure("base"))
-        #expect(pool.logs.entries("A reply to a paired Mac named a host path").count == texts.count)
+        let image = ImageSummary(
+            name: "xcode",
+            path: pool.directory.imagesDirectory.appending(path: "xcode").path(percentEncoded: false),
+            isReady: true,
+        )
+        let status = PoolReply.status(PoolSummary(slots: 1, leases: [], queue: [], images: [image]))
+        #expect(await daemon.visible(status, to: paired) == hidden)
+        #expect(pool.logs.entries("A reply to a paired Mac named a host path").count == texts.count + 1)
         await daemon.shutdown()
     }
 
