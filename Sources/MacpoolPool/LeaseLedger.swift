@@ -349,6 +349,14 @@ struct LeaseLedger {
         return schedule(now: now)
     }
 
+    /// Counts the requests of an owner that wait for a slot.
+    ///
+    /// - Parameter owner: The local user or a paired client.
+    /// - Returns: The number of the owner's requests in the queue.
+    func waitingRequests(of owner: LeaseOwner) -> Int {
+        queue.count { $0.owner == owner }
+    }
+
     /// Withdraws a disconnected client's requests and ends the leases that needed it.
     ///
     /// - Parameters:
