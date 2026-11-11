@@ -14,6 +14,8 @@ public import MacpoolVM
 /// - `logs` holds the supervisors' output and, under launchd, the daemon's.
 /// - `trust` holds this Mac's key for connections between Macs and the lists of paired Macs. Only
 ///   the owner can enter it, and backups skip it.
+/// - `images` holds stopped bundles that serve as images, one directory per image. `list` shows
+///   them.
 ///
 /// Clones must live on the same APFS volume as their sources, so the data directory shares a
 /// volume with the source bundles.
@@ -97,6 +99,45 @@ public struct PoolDirectory: Sendable, Hashable {
     /// The file with this Mac's P-256 private key in PKCS#8 PEM, which only the owner can read.
     public var identityFile: URL {
         trustDirectory.appending(path: "identity.pem")
+    }
+
+    /// The directory with the images that `list` shows.
+    public var imagesDirectory: URL {
+        root.appending(path: "images", directoryHint: .isDirectory)
+    }
+
+    /// Describes every directory in ``imagesDirectory``, ordered by name.
+    ///
+    /// A directory without a readable image record is listed as not ready, with the reason.
+    ///
+    /// - Returns: The images, or an empty array if the directory does not exist or cannot be
+    ///   read.
+    func images() -> [ImageSummary] {
+        let manager = FileManager.default
+        let names = (try? manager.contentsOfDirectory(atPath: imagesDirectory.path(percentEncoded: false))) ?? []
+        return names.filter { !$0.hasPrefix(".") }.sorted().compactMap(image(named:))
+    }
+
+    /// Describes one entry of ``imagesDirectory``.
+    ///
+    /// - Parameter name: The entry's name.
+    /// - Returns: The image, or `nil` if the entry is not a directory.
+    private func image(named name: String) -> ImageSummary? {
+        // Without a trailing slash, the path matches what `lease --from` and `clonefile` expect.
+        let url = imagesDirectory.appending(path: name, directoryHint: .notDirectory)
+        let path = url.path(percentEncoded: false)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        do {
+            guard let record = try VMBundle(root: url).imageRecord() else {
+                return ImageSummary(name: name, path: path, isReady: false, problem: "it has no image.json")
+            }
+            return ImageSummary(name: name, path: path, isReady: record.isReady, builds: record.builds)
+        } catch {
+            return ImageSummary(name: name, path: path, isReady: false, problem: error.description)
+        }
     }
 
     /// The clone that a lease uses.

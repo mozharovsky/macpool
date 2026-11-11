@@ -452,9 +452,11 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, and queue, as the local user sees them.
+    /// - Returns: The slots, leases, queue, and images, as the local user sees them.
     public func summary() -> PoolSummary {
-        ledger.summary(for: .local)
+        var summary = ledger.summary(for: .local)
+        summary.images = configuration.directory.images()
+        return summary
     }
 
     // MARK: Clients
@@ -876,7 +878,12 @@ public actor PoolDaemon {
                 perform([])
                 reply(.renewed(summary), to: client)
             case .status:
-                reply(.status(ledger.summary(for: owner)), to: client)
+                var summary = ledger.summary(for: owner)
+                // A paired Mac gets no paths on this Mac's disk.
+                if owner == .local {
+                    summary.images = configuration.directory.images()
+                }
+                reply(.status(summary), to: client)
             case let .invite(address, priorityCeiling):
                 try reply(
                     invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),
@@ -918,9 +925,10 @@ public actor PoolDaemon {
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
     ///   the host does not offer, asks for a shared directory or a priority above its ceiling, or
     ///   already has the most requests in the queue. The errors of ``pairedRecord(_:)``,
-    ///   ``LeaseTerms/validate()``, and ``checkSource(of:)`` propagate.
+    ///   ``LeaseTerms/validate()``, and ``checkSource(of:offeredName:)`` propagate.
     private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> LeaseTerms {
         var terms = terms
+        var offeredName: String?
         if case let .client(key) = owner {
             guard terms.sharedDirectory == nil else {
                 throw .invalidRequest(reason: "a paired client cannot share a host directory")
@@ -937,10 +945,11 @@ public actor PoolDaemon {
             guard let path = configuration.offeredSources[terms.source] else {
                 throw .invalidRequest(reason: "the host offers no source named \(terms.source)")
             }
+            offeredName = terms.source
             terms.source = path
         }
         try terms.validate()
-        try checkSource(of: terms)
+        try checkSource(of: terms, offeredName: offeredName)
         return terms
     }
 
@@ -977,12 +986,19 @@ public actor PoolDaemon {
     /// A request that fails these checks would only fail its boots, so it is refused before it
     /// takes a place in the queue.
     ///
-    /// - Parameter terms: The requested terms.
+    /// A source in the data directory's `images` directory needs an image record that marks it
+    /// ready. A source elsewhere may have no record.
+    ///
+    /// - Parameters:
+    ///   - terms: The requested terms.
+    ///   - offeredName: The name that a paired client used for the source, or `nil` for a local
+    ///     client. If it is set, the image refusals name the source by it instead of its path.
     /// - Throws: ``PoolError/library(_:)`` when the source's settings cannot be read, its own
-    ///   credential rotation did not finish, or another process holds it, or
-    ///   ``PoolError/invalidRequest(reason:)`` when the source never booted, lies on another
-    ///   volume than the data directory, or the shared directory is missing.
-    private func checkSource(of terms: LeaseTerms) throws(PoolError) {
+    ///   credential rotation did not finish, or another process holds it. The same error when a
+    ///   local client's image record cannot be read. ``PoolError/invalidRequest(reason:)`` when the
+    ///   source never booted, is an image without a readable record that marks it ready, lies on
+    ///   another volume than the data directory, or the shared directory is missing.
+    private func checkSource(of terms: LeaseTerms, offeredName: String?) throws(PoolError) {
         let source = terms.source
         let bundle = VMBundle(root: URL(filePath: source))
         let settings: BundleSettings
@@ -996,6 +1012,25 @@ public actor PoolDaemon {
         }
         guard settings.hasBooted != false else {
             throw .invalidRequest(reason: "the source \(source) never booted, so its clones have no guest account")
+        }
+        // A paired Mac learns no paths on this Mac's disk.
+        let imageName = offeredName ?? source
+        let image: ImageRecord?
+        do {
+            image = try bundle.imageRecord()
+        } catch {
+            guard offeredName == nil else {
+                throw .invalidRequest(
+                    reason: "the image \(imageName) has an unreadable image.json, so it cannot be leased",
+                )
+            }
+            throw .library(error)
+        }
+        if image == nil, isInImagesDirectory(bundle) {
+            throw .invalidRequest(reason: "the image \(imageName) has no image.json, so it cannot be leased")
+        }
+        if let image, !image.isReady {
+            throw .invalidRequest(reason: "the image \(imageName) did not pass its checks, so it cannot be leased")
         }
         guard !BundleLock.isHeld(on: bundle) else {
             throw .library(.bundleInUse(path: source))
@@ -1016,6 +1051,16 @@ public actor PoolDaemon {
                 throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
             }
         }
+    }
+
+    /// Reports whether a bundle lies directly in the data directory's `images` directory.
+    ///
+    /// - Parameter bundle: The bundle.
+    /// - Returns: Whether the bundle's parent directory is `images`, after resolving symbolic links.
+    private func isInImagesDirectory(_ bundle: VMBundle) -> Bool {
+        let parent = bundle.root.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent()
+        let images = configuration.directory.imagesDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        return parent.pathComponents == images.pathComponents
     }
 
     // MARK: Ledger actions

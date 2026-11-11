@@ -49,6 +49,24 @@ final class PoolFixture {
         source = bundle.root.path(percentEncoded: false)
     }
 
+    /// Creates a booted bundle without an image record in the data directory's `images` directory.
+    ///
+    /// - Parameter name: The image's name.
+    /// - Returns: The bundle.
+    /// - Throws: An error when the directory or the settings cannot be written.
+    func makeImage(named name: String) throws -> VMBundle {
+        let image = VMBundle(root: directory.imagesDirectory.appending(path: name, directoryHint: .notDirectory))
+        try FileManager.default.createDirectory(at: image.root, withIntermediateDirectories: true)
+        try image.writeSettings(BundleSettings(
+            cpuCount: 2,
+            memoryByteCount: 4 << 30,
+            macAddress: Self.sourceMACAddress,
+            build: "25A1",
+            hasBooted: true,
+        ))
+        return image
+    }
+
     /// Creates a daemon for the data directory without starting it.
     ///
     /// - Parameters:
