@@ -10,15 +10,16 @@ import Synchronization
 /// The invitation keeps the SHA-256 digest of its secret instead of the secret. A check compares
 /// digests. Its time therefore does not depend on how many leading bytes of a guess are right.
 ///
-/// The invitation ends when a client pairs, after ``lifetime``, after ``wrongSecretLimit`` wrong
-/// secrets, or when the inviting connection closes. The listener reads it during handshakes on
-/// its own queue. A lock therefore guards its state.
+/// The invitation ends when a client pairs, after ``lifetime``, or when the inviting connection
+/// closes. It counts wrong secrets and stays open after them. A secret has 128 random bits. A
+/// limit on wrong secrets would therefore stop no guess, and any peer could end the invitation
+/// with it.
+///
+/// The listener reads the invitation during handshakes on its own queue. A lock therefore guards
+/// its state.
 final class PairingInvitation: Sendable {
     /// How long an invitation stays open, in seconds.
     static let lifetime: TimeInterval = 600
-
-    /// The number of wrong secrets that end an invitation.
-    static let wrongSecretLimit = 5
 
     /// The state of an open invitation.
     private struct Ticket {
@@ -43,23 +44,32 @@ final class PairingInvitation: Sendable {
         /// When the invitation ends unless a client pairs.
         let expiresAt: Date
 
-        /// The connection whose invitation the new one closed, if any.
-        let replaced: ClientID?
+        /// The invitation that the new one closed, if any.
+        let replaced: Ended?
+    }
+
+    /// An invitation that ended.
+    struct Ended: Equatable {
+        /// The connection that opened the invitation.
+        let inviter: ClientID
+
+        /// The wrong secrets that the invitation received.
+        let wrongSecrets: Int
     }
 
     /// The result of a pairing attempt.
     enum Redemption: Equatable {
         /// The secret was right, and the invitation ended.
         ///
-        /// - Parameter inviter: The connection that opened the invitation.
-        case accepted(inviter: ClientID)
+        /// - Parameter ended: The invitation.
+        case accepted(Ended)
 
-        /// The secret was wrong.
+        /// The secret was wrong, and the invitation stays open.
         ///
         /// - Parameters:
         ///   - inviter: The connection that opened the invitation.
-        ///   - remaining: The wrong secrets that the invitation still takes. At 0 it ended.
-        case rejected(inviter: ClientID, remaining: Int)
+        ///   - wrongSecrets: The wrong secrets so far, this one included.
+        case rejected(inviter: ClientID, wrongSecrets: Int)
 
         /// No invitation was open.
         case closed
@@ -86,9 +96,9 @@ final class PairingInvitation: Sendable {
                     inviter: inviter,
                 )
             }
-            return ticket.map(\.inviter)
+            return ticket.map { Ended(inviter: $0.inviter, wrongSecrets: $0.wrongSecrets) }
         }
-        return Opened(secret: secret, expiresAt: expiresAt, replaced: replaced == inviter ? nil : replaced)
+        return Opened(secret: secret, expiresAt: expiresAt, replaced: replaced)
     }
 
     /// Reports whether an invitation is open.
@@ -104,7 +114,7 @@ final class PairingInvitation: Sendable {
     /// - Parameters:
     ///   - secret: The secret that a client sent.
     ///   - now: The current time.
-    /// - Returns: The result. A right secret and the last allowed wrong one end the invitation.
+    /// - Returns: The result. Only a right secret ends the invitation.
     func redeem(_ secret: [UInt8], at now: Date) -> Redemption {
         let digest = SHA256.hash(data: secret)
         return ticket.withLock { ticket in
@@ -113,37 +123,38 @@ final class PairingInvitation: Sendable {
             }
             if digest == open.digest {
                 ticket = nil
-                return .accepted(inviter: open.inviter)
+                return .accepted(Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets))
             }
-            var counted = open
-            counted.wrongSecrets += 1
-            ticket = counted.wrongSecrets < Self.wrongSecretLimit ? counted : nil
-            return .rejected(inviter: open.inviter, remaining: Self.wrongSecretLimit - counted.wrongSecrets)
+            ticket?.wrongSecrets += 1
+            return .rejected(inviter: open.inviter, wrongSecrets: open.wrongSecrets + 1)
         }
     }
 
     /// Closes the invitation of a connection.
     ///
     /// - Parameter inviter: A connection that may have opened the invitation.
-    func close(for inviter: ClientID) {
+    /// - Returns: The invitation, or `nil` when the connection had none open.
+    func close(for inviter: ClientID) -> Ended? {
         ticket.withLock { ticket in
-            if ticket?.inviter == inviter {
-                ticket = nil
+            guard let open = ticket, open.inviter == inviter else {
+                return nil
             }
+            ticket = nil
+            return Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets)
         }
     }
 
     /// Closes the invitation once it expired.
     ///
     /// - Parameter now: The current time.
-    /// - Returns: The connection whose invitation expired, or `nil` when none did.
-    func expire(at now: Date) -> ClientID? {
+    /// - Returns: The invitation that expired, or `nil` when none did.
+    func expire(at now: Date) -> Ended? {
         ticket.withLock { ticket in
             guard let open = ticket, now >= open.expiresAt else {
                 return nil
             }
             ticket = nil
-            return open.inviter
+            return Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets)
         }
     }
 }

@@ -415,8 +415,9 @@ public actor PoolDaemon {
             return
         }
         let now = configuration.now()
-        if let inviter = invitation.expire(at: now) {
-            reply(.failure("the invitation expired"), to: inviter)
+        if let expired = invitation.expire(at: now) {
+            invitationEnded(expired)
+            reply(.failure("the invitation expired"), to: expired.inviter)
         }
         perform(ledger.tick(now: now))
         let stopGrace = configuration.stopGrace / .seconds(1)
@@ -640,8 +641,13 @@ public actor PoolDaemon {
 
     /// Checks a pairing request against the open invitation and records a new paired client.
     ///
+    /// If the list already names the key, the daemon leaves the record unchanged. A paired Mac
+    /// then receives the host again, and a blocked one receives a failure. The daemon reads the
+    /// list again here, because the list may have changed since the handshake.
+    ///
     /// The reply to the Mac that pairs never names a host path. The inviting connection receives
-    /// the new client or the reason that the invitation ended.
+    /// the client or the reason that the invitation ended. It also receives
+    /// ``PoolReply/wrongCode`` after the first wrong secret.
     ///
     /// - Parameters:
     ///   - key: The fingerprint of the key that the Mac proved.
@@ -660,35 +666,76 @@ public actor PoolDaemon {
         switch invitation.redeem(Base32.decode(secret) ?? [], at: now) {
         case .closed:
             return .failure("the host has no open invitation, so ask for a new code")
-        case let .rejected(inviter, remaining):
-            configuration.logger.warning("A Mac sent a wrong pairing code", metadata: [
-                "key": "\(key)",
-                "remaining": "\(remaining)",
-            ])
-            if remaining == 0 {
-                reply(.failure("\(PairingInvitation.wrongSecretLimit) wrong codes ended the invitation"), to: inviter)
+        case let .rejected(inviter, wrongSecrets):
+            // One warning per invitation keeps a flood of wrong secrets out of the log.
+            if wrongSecrets == 1 {
+                configuration.logger.warning("A Mac sent a wrong pairing code", metadata: ["key": "\(key)"])
+                reply(.wrongCode, to: inviter)
             }
             return .failure("the pairing code is wrong")
-        case let .accepted(inviter):
-            do throws(PoolError) {
-                var clients = try TrustList<TrustedClient>.load(from: configuration.directory)
-                clients.insert(TrustedClient(key: key, name: name, pairedAt: now, isBlocked: false))
-                try clients.save(to: configuration.directory)
-            } catch {
-                configuration.logger.error("The host cannot record a paired Mac", metadata: [
-                    "key": "\(key)",
-                    "reason": "\(error)",
-                ])
-                reply(.failure("the pairing failed: \(error)"), to: inviter)
-                return .failure("the host cannot record the pairing")
-            }
-            configuration.logger.info("Paired a Mac", metadata: [
-                "key": "\(key)",
-                "name": "\(name)",
-            ])
-            reply(.paired(PairedMac(name: name, key: key)), to: inviter)
-            return .paired(PairedMac(name: hostName, key: hostKey))
+        case let .accepted(ended):
+            invitationEnded(ended)
+            let host = PairedMac(name: hostName, key: hostKey)
+            return record(key, name: name, invitedBy: ended.inviter, at: now, host: host)
         }
+    }
+
+    /// Records a client whose secret was right and returns the reply to it.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the key that the client proved.
+    ///   - name: The name of the client.
+    ///   - inviter: The connection that opened the invitation.
+    ///   - now: The time of the pairing.
+    ///   - host: This host's name and key.
+    /// - Returns: The reply to the client.
+    private func record(
+        _ key: KeyFingerprint,
+        name: String,
+        invitedBy inviter: ClientID,
+        at now: Date,
+        host: PairedMac,
+    ) -> PoolReply {
+        do throws(PoolError) {
+            var clients = try TrustList<TrustedClient>.load(from: configuration.directory)
+            if let known = clients[key] {
+                guard !known.isBlocked else {
+                    configuration.logger.warning("A blocked Mac used a pairing code", metadata: ["key": "\(key)"])
+                    reply(.failure("a blocked Mac used the code and ended the invitation"), to: inviter)
+                    return .failure("the host blocked this Mac")
+                }
+                configuration.logger.info("A paired Mac used a pairing code", metadata: ["key": "\(key)"])
+                reply(.alreadyPaired(PairedMac(name: known.name, key: key)), to: inviter)
+                return .paired(host)
+            }
+            clients.insert(TrustedClient(key: key, name: name, pairedAt: now, isBlocked: false))
+            try clients.save(to: configuration.directory)
+        } catch {
+            configuration.logger.error("The host cannot record a paired Mac", metadata: [
+                "key": "\(key)",
+                "reason": "\(error)",
+            ])
+            reply(.failure("the pairing failed: \(error)"), to: inviter)
+            return .failure("the host cannot record the pairing")
+        }
+        configuration.logger.info("Paired a Mac", metadata: [
+            "key": "\(key)",
+            "name": "\(name)",
+        ])
+        reply(.paired(PairedMac(name: name, key: key)), to: inviter)
+        return .paired(host)
+    }
+
+    /// Logs the count of wrong secrets that an invitation received, if any.
+    ///
+    /// - Parameter ended: The invitation.
+    private func invitationEnded(_ ended: PairingInvitation.Ended) {
+        guard ended.wrongSecrets > 0 else {
+            return
+        }
+        configuration.logger.warning("An invitation ended after wrong pairing codes", metadata: [
+            "count": "\(ended.wrongSecrets)",
+        ])
     }
 
     /// Opens an invitation for the local user.
@@ -717,7 +764,10 @@ public actor PoolDaemon {
         }
         let opened = invitation.open(for: client, at: configuration.now())
         if let replaced = opened.replaced {
-            reply(.failure("a newer invitation replaced this one"), to: replaced)
+            invitationEnded(replaced)
+            if replaced.inviter != client {
+                reply(.failure("a newer invitation replaced this one"), to: replaced.inviter)
+            }
         }
         configuration.logger.info("Opened an invitation", metadata: ["address": "\(address)"])
         let code = PairingCode(address: address, port: listener.port, hostKey: listener.hostKey, secret: opened.secret)
@@ -756,7 +806,9 @@ public actor PoolDaemon {
             await channel.delivered()
         }
         channel.close()
-        invitation.close(for: client)
+        if let closed = invitation.close(for: client) {
+            invitationEnded(closed)
+        }
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
@@ -792,8 +844,11 @@ public actor PoolDaemon {
                 reply(.status(ledger.summary(for: owner)), to: client)
             case let .invite(address):
                 try reply(invite(address: address, from: client, owner: owner), to: client)
-            case .pair:
-                throw .invalidRequest(reason: "only a Mac that the host does not know can pair")
+            case let .pair(secret, name):
+                guard case let .client(key) = owner else {
+                    throw .invalidRequest(reason: "only another Mac can pair with the host")
+                }
+                reply(pair(key, secret: secret, name: name), to: client)
             }
         } catch {
             reply(.failure(error.description), to: client)

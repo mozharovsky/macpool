@@ -113,14 +113,26 @@ texts differ, someone else used the code.
 
 A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
 5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
-10 minutes, after 5 wrong secrets, when a newer invitation replaces it, or when the inviting
-connection closes. The daemon keeps only the SHA-256 digest of the secret, and only in memory. A
-restart of the daemon therefore ends the invitation. A blocked client cannot pair again.
+10 minutes, when a newer invitation replaces it, or when the inviting connection closes. The daemon
+keeps only the SHA-256 digest of the secret, and only in memory. A restart of the daemon therefore
+ends the invitation.
+
+Wrong secrets do not end the invitation, because a secret has 128 random bits and no guess finds
+it. After the first wrong secret, the inviting connection receives ``PoolReply/wrongCode``. When
+the invitation ends, the daemon logs how many wrong secrets it received.
+
+If a pairing fails after the host recorded the client, the client pairs again with a new code. For
+example, the host's reply may never arrive. The host then leaves its record of the client
+unchanged, and the inviting connection receives ``PoolReply/alreadyPaired(_:)``. A blocked client
+cannot pair again.
 
 Each Mac gives the other its name, and both names follow the same rule. A name has 1 to 64 Unicode
-scalars and not only whitespace. It has no control, format, private-use, or unassigned scalars and
-no line or paragraph separators. Format scalars include the controls that reverse the direction of
-text, so a name cannot hide part of itself when the pool shows it.
+scalars. It has no control, format, private-use, unassigned, or default-ignorable scalars and no
+line or paragraph separators. Format scalars include the controls that reverse the direction of
+text. Default-ignorable scalars include the characters that have no width and the Hangul fillers.
+A name also starts with a scalar that is not a mark. It has at least one letter, number,
+punctuation, or symbol other than the blank Braille pattern U+2800. A name therefore cannot hide
+part of itself or look empty when the pool shows it.
 
 ### Supervisors
 

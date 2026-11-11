@@ -399,7 +399,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
 
     /// Pairs the sending Mac with the host.
     ///
-    /// A Mac that the host does not know may send only this request, once per connection.
+    /// A Mac that the host does not know may send only this request, once per connection. A paired
+    /// Mac may send it with a new code to restore its record of the host. The host then leaves its
+    /// record of the Mac unchanged.
     ///
     /// - Parameters:
     ///   - secret: The secret of the pairing code in base32.
@@ -664,6 +666,21 @@ public enum PoolReply: Sendable, Equatable, Codable {
     /// - Parameter mac: The Mac on the other side of the pairing.
     case paired(PairedMac)
 
+    /// A Mac that the host already trusts used the code of the invitation.
+    ///
+    /// Only the inviting connection receives this reply, and the invitation ends. The host left
+    /// its record of the Mac unchanged. The Mac receives ``paired(_:)`` with the host.
+    ///
+    /// - Parameter mac: The paired Mac with the name in the host's record.
+    case alreadyPaired(PairedMac)
+
+    /// A Mac sent a wrong secret for the open invitation.
+    ///
+    /// Only the inviting connection receives this reply, once per invitation. The invitation stays
+    /// open. A secret has 128 random bits. A wrong one therefore means that the sender does not
+    /// have the code.
+    case wrongCode
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -725,6 +742,10 @@ public enum PoolReply: Sendable, Equatable, Codable {
             )
         case "paired":
             self = try .paired(container.decode(PairedMac.self, forKey: .mac))
+        case "already_paired":
+            self = try .alreadyPaired(container.decode(PairedMac.self, forKey: .mac))
+        case "wrong_code":
+            self = .wrongCode
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -777,6 +798,11 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case let .paired(mac):
             try container.encode("paired", forKey: .reply)
             try container.encode(mac, forKey: .mac)
+        case let .alreadyPaired(mac):
+            try container.encode("already_paired", forKey: .reply)
+            try container.encode(mac, forKey: .mac)
+        case .wrongCode:
+            try container.encode("wrong_code", forKey: .reply)
         }
     }
 }
@@ -803,35 +829,84 @@ public struct PairedMac: Sendable, Equatable, Codable {
     static let maximumNameLength = 64
 
     /// The rule for a Mac's name in the words of error messages.
-    static let nameRule = "1 to \(maximumNameLength) printable characters and not only spaces"
+    static let nameRule = "1 to \(maximumNameLength) printable characters that include a letter, digit, "
+        + "punctuation mark, or symbol and do not start with a combining mark"
 
     /// Reports whether a Mac's name can be shown to people as it is.
     ///
-    /// A name may not contain format characters, because they include the controls that
-    /// reverse the direction of text and the characters that have no width.
+    /// A valid name meets each of these conditions.
+    ///
+    /// - It has 1 to 64 Unicode scalars.
+    /// - Its first scalar is not a mark.
+    /// - It has a letter, number, punctuation, or symbol scalar other than U+2800.
+    /// - It has no control, format, line or paragraph separator, private-use, surrogate,
+    ///   unassigned, or default-ignorable scalar.
+    ///
+    /// Format scalars include the controls that reverse the direction of text. Default-ignorable
+    /// scalars include the characters that have no width and the Hangul fillers. A name of only
+    /// spaces, marks, or the blank Braille pattern U+2800 looks empty.
     ///
     /// - Parameter name: A name that a Mac gave for itself.
-    /// - Returns: Whether the name has 1 to 64 Unicode scalars, at least one of them not
-    ///   whitespace, and no control, format, line or paragraph separator, private-use, surrogate,
-    ///   or unassigned scalar.
+    /// - Returns: Whether the name meets every condition.
     static func isValidName(_ name: String) -> Bool {
         let scalars = name.unicodeScalars
-        return (1 ... maximumNameLength).contains(scalars.count)
-            && scalars.allSatisfy(isPrintable)
-            && scalars.contains { !$0.properties.isWhitespace }
+        guard let first = scalars.first, scalars.count <= maximumNameLength else {
+            return false
+        }
+        return !isMark(first) && scalars.allSatisfy(isPrintable) && scalars.contains(where: isVisible)
     }
 
     /// Reports whether a scalar may appear in a Mac's name.
     ///
     /// - Parameter scalar: A scalar of the name.
-    /// - Returns: Whether the scalar's general category is not a control, format, separator of
-    ///   lines or paragraphs, private-use, surrogate, or unassigned category.
+    /// - Returns: Whether the scalar is not default-ignorable and its general category is not a
+    ///   control, format, separator of lines or paragraphs, private-use, surrogate, or unassigned
+    ///   category.
     private static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+        guard !scalar.properties.isDefaultIgnorableCodePoint else {
+            return false
+        }
         switch scalar.properties.generalCategory {
         case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
-            false
+            return false
         default:
+            return true
+        }
+    }
+
+    /// Reports whether a scalar combines with the scalar before it.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar is a nonspacing, spacing, or enclosing mark.
+    private static func isMark(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .nonspacingMark, .spacingMark, .enclosingMark:
             true
+        default:
+            false
+        }
+    }
+
+    /// Reports whether a scalar shows something on its own.
+    ///
+    /// The blank Braille pattern U+2800 is a symbol that draws nothing. The rule therefore names
+    /// it.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar is a letter, number, punctuation, or symbol other than U+2800.
+    private static func isVisible(_ scalar: Unicode.Scalar) -> Bool {
+        guard scalar != "\u{2800}" else {
+            return false
+        }
+        switch scalar.properties.generalCategory {
+        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+             .decimalNumber, .letterNumber, .otherNumber,
+             .connectorPunctuation, .dashPunctuation, .openPunctuation, .closePunctuation,
+             .initialPunctuation, .finalPunctuation, .otherPunctuation,
+             .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
+            return true
+        default:
+            return false
         }
     }
 }
