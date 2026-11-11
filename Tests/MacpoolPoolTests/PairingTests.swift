@@ -11,26 +11,26 @@ struct PairingTests {
     @Test func readsAndWritesCodes() {
         let hostKey = randomKey()
         let secret = Array(0 ..< UInt8(PairingCode.secretBytes))
-        let code = PairingCode(address: "studio.local", port: 7373, hostKey: hostKey, secret: secret)
+        let code = PairingCode(address: "example.local", port: 7373, hostKey: hostKey, secret: secret)
         let text = code.description
-        #expect(text.hasPrefix("macpool1:studio.local:7373:"))
+        #expect(text.hasPrefix("macpool1:example.local:7373:"))
         #expect(text.split(separator: ":").last?.count == 52)
         #expect(PairingCode(text) == code)
         let characters = String(text.split(separator: ":").last ?? "")
-        #expect(PairingCode(" macpool1:studio.local:7373:\(characters.uppercased())\n") == code)
+        #expect(PairingCode(" macpool1:example.local:7373:\(characters.uppercased())\n") == code)
         #expect(code.matches(hostKey))
         #expect(!code.matches(randomKey()))
 
         let ipv6 = PairingCode(address: "fe80::1%en0", port: 1, hostKey: hostKey, secret: secret)
         #expect(PairingCode(ipv6.description) == ipv6)
         for broken in [
-            "macpool2:studio.local:7373:\(characters)",
+            "macpool2:example.local:7373:\(characters)",
             "macpool1::7373:\(characters)",
-            "macpool1:studio.local:0:\(characters)",
-            "macpool1:studio.local:70000:\(characters)",
-            "macpool1:studio.local:7373:\(characters.dropLast())",
-            "macpool1:studio.local:7373:\(characters.dropLast())1",
-            "macpool1:studio.local:7373",
+            "macpool1:example.local:0:\(characters)",
+            "macpool1:example.local:70000:\(characters)",
+            "macpool1:example.local:7373:\(characters.dropLast())",
+            "macpool1:example.local:7373:\(characters.dropLast())1",
+            "macpool1:example.local:7373",
             "macpool1:exa\u{1B}[31mmple:7373:\(characters)",
             "macpool1:example local:7373:\(characters)",
             "macpool1:\(String(repeating: "a", count: 254)):7373:\(characters)",
@@ -38,7 +38,7 @@ struct PairingTests {
             #expect(PairingCode(broken) == nil, "\(broken)")
         }
         #expect(PairingCode.isValidAddress("192.0.2.20"))
-        #expect(!PairingCode.isValidAddress("studio local"))
+        #expect(!PairingCode.isValidAddress("example local"))
         #expect(!PairingCode.isValidAddress(""))
     }
 
@@ -63,6 +63,7 @@ struct PairingTests {
             String(repeating: "\u{E9}", count: 64),
             "e\u{301}",
             "a\u{2800}b",
+            "a\u{1D159}b",
         ]
         for name in accepted {
             #expect(PairedMac.isValidName(name), "\(name)")
@@ -76,6 +77,8 @@ struct PairingTests {
             "\u{FFA0}",
             "\u{2800}",
             "\u{2800} \u{2800}",
+            "\u{1D159}",
+            "\u{1D159} \u{2800}",
             "a\u{3164}b",
             "\u{301}",
             "\u{301}abc",
@@ -148,7 +151,7 @@ struct PairingTests {
         let client = try host.clientDirectory()
 
         let paired = try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
-        #expect(paired == PairedMac(name: "studio", key: host.key))
+        #expect(paired == PairedMac(name: "example", key: host.key))
         let clientIdentity = try MacIdentity.loadOrCreate(in: client)
         let clientKey = KeyFingerprint(digest: clientIdentity.keyDigest)
         #expect(try await next(invitation.channel) == .paired(PairedMac(name: "runner", key: clientKey)))
@@ -158,7 +161,7 @@ struct PairingTests {
         #expect(clients[clientKey]?.isBlocked == false)
         #expect(clients[clientKey]?.pairedAt == host.fixture.clock.now)
         let hosts = try TrustList<TrustedHost>.load(from: client)
-        #expect(hosts.records.map { [$0.name, $0.address, "\($0.port)"] } == [["studio", "127.0.0.1", "\(host.port)"]])
+        #expect(hosts.records.map { [$0.name, $0.address, "\($0.port)"] } == [["example", "127.0.0.1", "\(host.port)"]])
         #expect(hosts[host.key] != nil)
         #expect(host.fixture.logs.entries("Paired a Mac").map { $0.metadata["key"] } == [clientKey.rawValue])
         #expect(host.fixture.logs.entries("A Mac connected to pair").map(\.level) == [.debug])
@@ -237,7 +240,7 @@ struct PairingTests {
 
         let second = try await host.invite()
         let paired = try await PoolClient.pair(using: second.code, name: "builder", directory: client)
-        #expect(paired == PairedMac(name: "studio", key: host.key))
+        #expect(paired == PairedMac(name: "example", key: host.key))
         #expect(try await next(second.channel) == .alreadyPaired(PairedMac(name: "runner", key: clientKey)))
         let clients = try TrustList<TrustedClient>.load(from: host.fixture.directory)
         #expect(clients.records.map(\.name) == ["runner"])
@@ -306,7 +309,8 @@ struct PairingTests {
         await host.stop()
 
         let secrets = [first.code, second.code].flatMap { code in
-            [Base32.encode(code.secret), code.description].map { $0.lowercased() }
+            let hex = code.secret.map { String(format: "%02x", $0) }.joined()
+            return [Base32.encode(code.secret), code.description, "\(code.secret)", hex].map { $0.lowercased() }
         }
         let logs = host.fixture.logs.allEntries.map { "\($0.message) \($0.metadata)".lowercased() }
         let files = [host.fixture.directory, client, guesser].flatMap(regularFileContents)
@@ -407,8 +411,8 @@ struct PairingTests {
             _ = try await PoolClient.send(request, to: host.fixture.directory)
         }
         let local = try await PoolClient.connect(to: host.fixture.directory)
-        try local.send(PoolRequest.invite(address: "studio local"))
-        let address = PoolError.invalidRequest(reason: "studio local is not a host name or an IP address")
+        try local.send(PoolRequest.invite(address: "example local"))
+        let address = PoolError.invalidRequest(reason: "example local is not a host name or an IP address")
         #expect(try await next(local) == .failure(address.description))
         local.close()
         await host.stop()
@@ -420,7 +424,7 @@ struct PairingTests {
         }
         await daemon.shutdown()
 
-        let unnamed = try await PairingHost(name: "studio\u{202E}")
+        let unnamed = try await PairingHost(name: "example\u{202E}")
         await #expect(throws: PoolError.daemonRefused(
             message: "the host's name for clients must have \(PairedMac.nameRule)",
         )) {
@@ -449,9 +453,64 @@ struct PairingTests {
         _ = try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
         await host.stop()
     }
+
+    /// Refuses a host's name that fails this Mac's rule with an error that names the cause. A host
+    /// on a newer macOS may send such a name after it recorded the client.
+    @Test func refusesAHostNameThatThisMacDoesNotAccept() async throws {
+        try await expectPairing(
+            withAHostThatReplies: { .paired(PairedMac(name: "\u{3164}", key: $0)) },
+            toThrow: .malformedMessage(
+                reason: "the host's name has characters that macOS on this Mac does not accept. "
+                    + "The host recorded this Mac. Change the host's name and pair again with a new code",
+            ),
+        )
+    }
+
+    /// Names only the kind of a reply that does not finish a pairing. The host chose the texts in
+    /// the reply.
+    @Test func namesOnlyTheKindOfAnUnexpectedReply() async throws {
+        try await expectPairing(
+            withAHostThatReplies: { .alreadyPaired(PairedMac(name: "\u{1B}[2J", key: $0)) },
+            toThrow: .malformedMessage(reason: "the host replied to a pairing with an unexpected already_paired reply"),
+        )
+    }
+
+    /// Pairs with a host that greets the client and sends one reply to the pairing. Expects the
+    /// pairing to throw and the client to record no host.
+    ///
+    /// - Parameters:
+    ///   - reply: Returns the host's reply for the host's key.
+    ///   - error: The error that the pairing must throw.
+    /// - Throws: An error when the host cannot listen or the client's list of hosts cannot be read.
+    private func expectPairing(
+        withAHostThatReplies reply: @escaping @Sendable (KeyFingerprint) -> PoolReply,
+        toThrow error: PoolError,
+    ) async throws {
+        let host = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let listener = try await PeerListener(identity: host, settings: loopbackSettings(), admits: { _ in true })
+        defer { listener.close() }
+        let fakeHost = Task {
+            for await peer in listener.connections {
+                try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
+                _ = try? await peer.channel.receive(PoolRequest.self)
+                try? peer.channel.send(reply(hostKey))
+                await peer.channel.finish()
+            }
+        }
+        defer { fakeHost.cancel() }
+        let root = try ShortDirectory()
+        let client = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let secret = Array(0 ..< UInt8(PairingCode.secretBytes))
+        let code = PairingCode(address: "127.0.0.1", port: listener.port, hostKey: hostKey, secret: secret)
+        await #expect(throws: error) {
+            try await PoolClient.pair(using: code, name: "runner", directory: client)
+        }
+        #expect(try TrustList<TrustedHost>.load(from: client).records.isEmpty)
+    }
 }
 
-/// A host daemon that listens for paired Macs on 127.0.0.1 under the name `studio`.
+/// A host daemon that listens for paired Macs on 127.0.0.1 under the name `example`.
 private final class PairingHost {
     /// The host's data directory and clock.
     let fixture: PoolFixture
@@ -472,7 +531,7 @@ private final class PairingHost {
     ///
     /// - Parameter name: The host's name for clients.
     /// - Throws: An error when the daemon does not start or listen.
-    init(name: String = "studio") async throws {
+    init(name: String = "example") async throws {
         fixture = try PoolFixture()
         let settings = PeerSettings(name: name, address: "127.0.0.1", port: 0, retryInterval: .milliseconds(100))
         daemon = try await fixture.start(peers: settings)

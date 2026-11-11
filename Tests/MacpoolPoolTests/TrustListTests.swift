@@ -19,8 +19,8 @@ struct TrustListTests {
         var hosts = TrustList<TrustedHost>()
         hosts.insert(TrustedHost(
             key: randomKey(),
-            name: "studio",
-            address: "studio.local",
+            name: "example",
+            address: "example.local",
             port: 7373,
             pairedAt: Date(timeIntervalSince1970: 1_800_000_000),
         ))

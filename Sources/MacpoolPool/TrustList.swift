@@ -62,7 +62,7 @@ struct TrustedHost: TrustRecord {
     /// The name by which this Mac's commands refer to the host.
     var name: String
 
-    /// The host's address, such as `studio.local`.
+    /// The host's address, such as `example.local`.
     var address: String
 
     /// The host's TCP port.

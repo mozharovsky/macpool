@@ -179,9 +179,9 @@ public enum PoolClient {
     ///   ``PoolError/connection(path:reason:)`` when the connection fails or the host presents a
     ///   key that does not match the code, ``PoolError/daemonRefused(message:)`` when the host
     ///   refuses the code, ``PoolError/connectionClosed`` when the host closes the connection
-    ///   before it replies, or ``PoolError/malformedMessage(reason:)`` when the reply names another
-    ///   key. Another ``PoolError`` means that this Mac's key or the list of hosts cannot be read
-    ///   or written.
+    ///   before it replies, or ``PoolError/malformedMessage(reason:)`` when the reply is of another
+    ///   kind or names another key or a host name that this Mac does not accept. Another
+    ///   ``PoolError`` means that this Mac's key or the list of hosts cannot be read or written.
     public static func pair(
         using code: PairingCode,
         name: String,
@@ -233,12 +233,17 @@ public enum PoolClient {
             ))
             try hosts.save(to: directory)
             return host
+        case let .paired(host)? where host.key == hostKey:
+            throw .malformedMessage(reason: "the host's name has characters that macOS on this Mac does not accept. "
+                + "The host recorded this Mac. Change the host's name and pair again with a new code")
         case let .failure(message)?:
             throw .daemonRefused(message: message)
         case nil:
             throw .connectionClosed
         case let reply?:
-            throw .malformedMessage(reason: "the host replied to a pairing with \(reply)")
+            // The host chose the texts in the reply, and a terminal shows an error as it is. The error
+            // therefore names only the kind.
+            throw .malformedMessage(reason: "the host replied to a pairing with an unexpected \(reply.kind) reply")
         }
     }
 

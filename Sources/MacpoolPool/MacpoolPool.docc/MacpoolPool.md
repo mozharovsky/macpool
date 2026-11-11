@@ -134,8 +134,13 @@ scalars. It has no control, format, private-use, unassigned, or default-ignorabl
 line or paragraph separators. Format scalars include the controls that reverse the direction of
 text. Default-ignorable scalars include the characters that have no width and the Hangul fillers.
 A name also starts with a scalar that is not a mark. It has at least one letter, number,
-punctuation, or symbol other than the blank Braille pattern U+2800. A name therefore cannot hide
-part of itself or look empty when the pool shows it.
+punctuation, or symbol other than the blank Braille pattern U+2800 and the musical null notehead
+U+1D159. A name therefore cannot hide part of itself or look empty when the pool shows it.
+
+Each Mac checks names with the Unicode tables of its own macOS. If the host's name has a scalar
+that the client's macOS does not know, the host records the client and
+``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
+and pair again with a new code.
 
 ### Supervisors
 
