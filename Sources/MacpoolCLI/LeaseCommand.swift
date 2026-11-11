@@ -154,7 +154,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 if id == nil {
                     id = lease.id
                     Report.line("lease_id=\(lease.id)")
-                    Report.line("bundle=\(lease.bundle)")
+                    Report.line("bundle=\(lease.bundle ?? "")")
                 } else {
                     Report.line("starting")
                 }
@@ -319,7 +319,7 @@ struct LeaseCommand: AsyncParsableCommand {
     ) -> Task<Void, Never> {
         let environment = Environment.inherit.updating([
             "MACPOOL_LEASE_ID": lease.id.rawValue,
-            "MACPOOL_BUNDLE": lease.bundle,
+            "MACPOOL_BUNDLE": lease.bundle ?? "",
             "MACPOOL_ADDRESS": lease.address ?? "",
         ])
         let options = {

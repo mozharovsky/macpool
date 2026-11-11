@@ -279,6 +279,67 @@ struct LeaseLedgerTests {
         #expect(ledger.leases[id]?.restarts == 2)
     }
 
+    /// Shows a paired client its leases and requests by the source's name, without a clone or an
+    /// address, and replaces the reasons of failed VMs. The local user sees the paths and reasons.
+    @Test func showsPairedClientsNoHostPaths() throws {
+        var ledger = Self.ledger(slots: 1)
+        let alice = try Self.paired("a")
+        let requested = ledger.request(
+            Self.terms(),
+            from: Self.client(1),
+            owner: alice,
+            sourceName: "base",
+            now: Self.start,
+        )
+        let id = try #require(Self.launches(requested).first)
+        let ready = ledger.supervisorReported(
+            id,
+            SupervisorStatus(phase: .ready, address: "192.168.64.2"),
+            now: Self.at(1),
+        )
+        let record = try #require(ledger.leases[id])
+        let seen = ledger.summary(of: record, for: alice)
+        #expect(ready == [.notify(Self.client(1), .ready(seen))])
+        #expect([seen.source, seen.bundle, seen.address] == ["base", nil, nil])
+        let local = ledger.summary(of: record, for: .local)
+        #expect([local.source, local.bundle, local.address] == ["/vms/base", "/pool/leases/\(id)", "192.168.64.2"])
+        #expect(try ledger.renew(id, owner: alice, now: Self.at(2)).bundle == nil)
+
+        let restarting = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(3))
+        let hidden = try #require(ledger.leases[id].map { ledger.summary(of: $0, for: alice) })
+        #expect(restarting == [.notify(Self.client(1), .restarting(hidden, reason: MachineOutcome.hiddenFailure))])
+
+        _ = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.at(4))
+        _ = ledger.request(Self.terms(), from: Self.client(1), owner: alice, sourceName: "base", now: Self.at(4))
+        #expect(ledger.waitingRequests(of: alice) == 1)
+        #expect(ledger.waitingRequests(of: .local) == 1)
+        #expect(ledger.summary(for: alice).queue.map(\.source) == ["base"])
+        #expect(ledger.summary(for: .local).queue.map(\.source) == ["/vms/base", "/vms/base"])
+
+        _ = ledger.tick(now: Self.at(100))
+        _ = ledger.supervisorReported(id, SupervisorStatus(phase: .ready, address: "192.168.64.3"), now: Self.at(101))
+        _ = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(102))
+        _ = ledger.tick(now: Self.at(200))
+        let ended = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(201))
+        let reason = "\(MachineOutcome.hiddenFailure) after 2 restarts"
+        #expect(ended.first == .notify(Self.client(1), .ended(id, reason: reason)))
+        #expect(ledger.leases[id]?.endReason == "the disk at /vms/base failed after 2 restarts")
+
+        var booting = Self.ledger()
+        let request = booting.request(
+            Self.terms(),
+            from: Self.client(1),
+            owner: alice,
+            sourceName: "base",
+            now: Self.start,
+        )
+        let bootID = try #require(Self.launches(request).first)
+        #expect(booting.bootFailed(bootID, reason: "cannot clone /vms/base") == [
+            .notify(Self.client(1), .ended(bootID, reason: MachineOutcome.hiddenFailure)),
+            .discard(bootID),
+        ])
+    }
+
     /// Ends a lease without a restart when its boot cannot succeed, and keeps the supervisor's
     /// process identifier after a run ends.
     @Test func endsLeaseWhoseBootCannotSucceed() throws {

@@ -17,6 +17,14 @@ enum PeerLogLine: Hashable, Sendable {
 
     /// A paired client's request found the list of paired clients unreadable.
     case unreadableClientList
+
+    /// A paired client asked for an offered source whose settings cannot be read.
+    ///
+    /// The value is the source's name in ``PoolDaemon/Configuration/offeredSources``.
+    case unreadableSource(String)
+
+    /// A reply to a paired client named a host path, and the daemon sent a failure instead.
+    case hostPathInReply
 }
 
 /// The levels of log lines that Macs on the network can repeat.
@@ -25,9 +33,10 @@ enum PeerLogLine: Hashable, Sendable {
 /// writes each ``PeerLogLine`` at its full level at most once per ``interval``. In between, the
 /// line goes to the debug level.
 ///
-/// The daemon writes a line with a key only for a paired client. The rate keeps only the times
-/// of the last ``interval``. It therefore holds at most two times for each client that was paired
-/// in that time, and one for each other kind of line.
+/// The daemon writes a line with a key only for a paired client, and a line with a source only
+/// for an offered source. The rate keeps only the times of the last ``interval``. It therefore
+/// holds at most two times for each client that was paired in that time, one for each offered
+/// source, and one for each other kind of line.
 struct PeerLogRate {
     /// The shortest time between two lines of one kind at their full level, in seconds.
     static let interval: TimeInterval = 60

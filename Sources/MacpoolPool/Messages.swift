@@ -280,20 +280,27 @@ public enum LeasePhase: String, Codable, Sendable {
 }
 
 /// A lease as clients see it.
+///
+/// A summary for a paired client names no host path. It names the source by the name that the
+/// client sent, and it has no clone and no guest address.
 public struct LeaseSummary: Codable, Sendable, Equatable {
     /// The lease's identifier.
     public var id: LeaseID
 
-    /// The source bundle's path.
+    /// The source bundle's path, or the source's name in a summary for a paired client.
     public var source: String
 
-    /// The clone's bundle path, which `Scripts/ssh.sh` and `macpool ip` accept.
-    public var bundle: String
+    /// The clone's bundle path, or `nil` in a summary for a paired client.
+    ///
+    /// `Scripts/ssh.sh` and `macpool ip` accept the path.
+    public var bundle: String?
 
     /// The lease's stage.
     public var phase: LeasePhase
 
     /// The guest's IPv4 address while the VM is ready, otherwise `nil`.
+    ///
+    /// A summary for a paired client has no address.
     public var address: String?
 
     /// The time at which the lease expires, or `nil` before the VM is first ready.
@@ -336,7 +343,7 @@ public struct QueuedSummary: Codable, Sendable, Equatable {
     /// The request's place in the queue, starting at 1.
     public var position: Int
 
-    /// The source bundle's path.
+    /// The source bundle's path, or the source's name in a summary for a paired client.
     public var source: String
 
     /// The request's priority.

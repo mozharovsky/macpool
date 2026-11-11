@@ -30,7 +30,7 @@ import Synchronization
 /// every lease. A paired client from another Mac sees and changes only its own leases. It names a
 /// source by one of the names in ``Configuration/offeredSources``. It cannot share a host
 /// directory or ask for a priority above the ceiling in its record. At most ``PoolPolicy/slots``
-/// of its requests wait in the queue at once.
+/// of its requests wait in the queue at once. No reply to a paired client names a host path.
 ///
 /// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
 /// Mac's key only then. A key or a list of paired clients that cannot be loaded, or a port that
@@ -648,7 +648,10 @@ public actor PoolDaemon {
         watchdog.cancel()
         switch request {
         case let .pair(secret, name)?:
-            try? peer.channel.send(pair(peer.fingerprint, secret: secret, name: name))
+            try? peer.channel.send(visible(
+                pair(peer.fingerprint, secret: secret, name: name),
+                to: .client(peer.fingerprint),
+            ))
         case nil:
             break
         default:
@@ -826,9 +829,13 @@ public actor PoolDaemon {
             do {
                 request = try await channel.receive(PoolRequest.self)
             } catch {
+                // The error may repeat text from the line. If a paired Mac's line held a host path,
+                // visible(_:to:) would replace the reply, and the change would confirm the path. A
+                // paired Mac therefore gets a fixed reason.
+                let reason = owner == .local ? error.description : "the host could not read the request"
                 // The reply must leave before the connection closes, or the client sees only the
                 // closed connection.
-                try? channel.send(PoolReply.failure(error.description))
+                try? channel.send(PoolReply.failure(reason))
                 await channel.finish()
                 break
             }
@@ -862,10 +869,16 @@ public actor PoolDaemon {
             case let .lease(terms):
                 let admitted = try admit(terms, from: owner)
                 configuration.logger.info("Queued a lease request", metadata: [
-                    "source": "\(admitted.source)",
+                    "source": "\(admitted.terms.source)",
                     "owner": "\(owner)",
                 ])
-                perform(ledger.request(admitted, from: client, owner: owner, now: configuration.now()))
+                perform(ledger.request(
+                    admitted.terms,
+                    from: client,
+                    owner: owner,
+                    sourceName: admitted.sourceName,
+                    now: configuration.now(),
+                ))
             case let .attach(id):
                 try perform(ledger.attach(id, client: client, owner: owner))
             case let .release(id):
@@ -899,7 +912,70 @@ public actor PoolDaemon {
     ///   - reply: The reply.
     ///   - client: The receiving client.
     private func reply(_ reply: PoolReply, to client: ClientID) {
-        try? clients[client]?.channel.send(reply)
+        guard let connection = clients[client] else {
+            return
+        }
+        try? connection.channel.send(visible(reply, to: connection.owner))
+    }
+
+    /// Returns the reply that a client may receive.
+    ///
+    /// A reply to a paired client must not name the data directory, an offered source, the home
+    /// directory, a file URL, or a path that starts with `~/`. If one does, the daemon logs it
+    /// and returns a failure in its place. The replies to paired clients avoid these texts on
+    /// their own. This check catches a text that a later change adds.
+    ///
+    /// The check compares the UTF-8 bytes of canonically decomposed texts. A path therefore
+    /// matches in either Unicode normalization form, and also when a combining mark follows it.
+    ///
+    /// - Parameters:
+    ///   - reply: The reply to check.
+    ///   - owner: Who the receiving client acts for.
+    /// - Returns: The reply, or a failure that names no path.
+    private func visible(_ reply: PoolReply, to owner: LeaseOwner) -> PoolReply {
+        guard owner != .local else {
+            return reply
+        }
+        let forbidden = forbiddenTexts.map { Array($0.decomposedStringWithCanonicalMapping.utf8) }
+        let namesHostPath = reply.texts.contains { text in
+            let bytes = Array(text.decomposedStringWithCanonicalMapping.utf8)
+            return forbidden.contains { bytes.contains($0) }
+        }
+        guard namesHostPath else {
+            return reply
+        }
+        configuration.logger.log(
+            level: peerLogLevel(of: .hostPathInReply, full: .warning),
+            "A reply to a paired Mac named a host path",
+            metadata: ["reply": "\(reply)"],
+        )
+        return .failure("the host could not complete the request. The host's log has the reason")
+    }
+
+    /// The texts that no reply to a paired client may contain.
+    ///
+    /// The texts are the host paths, their percent-encoded forms, the `file://` prefix of every
+    /// file URL, and the `~/` prefix of every path in the home directory. A file URL encodes the
+    /// decomposed form of a path. The precomposed form is also encoded, because other code may
+    /// encode a path that way.
+    private var forbiddenTexts: [String] {
+        let directories = [configuration.directory.root, FileManager.default.homeDirectoryForCurrentUser]
+        let paths = directories.map { $0.path(percentEncoded: false) } + configuration.offeredSources.values
+        var texts = ["file://", "~/"]
+        for path in paths {
+            let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+            // A path of "/" alone would match every text with a slash.
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            texts.append(trimmed)
+            texts.append(URL(filePath: trimmed).path(percentEncoded: true))
+            if let encoded = trimmed.precomposedStringWithCanonicalMapping
+                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+                texts.append(encoded)
+            }
+        }
+        return texts
     }
 
     /// Applies an owner's limits to a lease request and checks that it can serve a lease.
@@ -914,34 +990,37 @@ public actor PoolDaemon {
     /// - Parameters:
     ///   - terms: The requested terms.
     ///   - owner: Who requests the lease.
-    /// - Returns: The terms with the source's path.
+    /// - Returns: The terms with the source's path, and the source's name for a paired client.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client names a source that
     ///   the host does not offer, asks for a shared directory or a priority above its ceiling, or
     ///   already has the most requests in the queue. The errors of ``pairedRecord(_:)``,
-    ///   ``LeaseTerms/validate()``, and ``checkSource(of:)`` propagate.
-    private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> LeaseTerms {
-        var terms = terms
-        if case let .client(key) = owner {
-            guard terms.sharedDirectory == nil else {
-                throw .invalidRequest(reason: "a paired client cannot share a host directory")
-            }
-            let ceiling = try pairedRecord(key).priorityCeiling
-            guard terms.priority <= ceiling else {
-                throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(ceiling)")
-            }
-            guard ledger.waitingRequests(of: owner) < configuration.policy.slots else {
-                throw .invalidRequest(
-                    reason: "this Mac already has as many requests in the queue as the host has slots",
-                )
-            }
-            guard let path = configuration.offeredSources[terms.source] else {
-                throw .invalidRequest(reason: "the host offers no source named \(terms.source)")
-            }
-            terms.source = path
+    ///   ``LeaseTerms/validate()``, and ``checkSource(of:named:)`` propagate.
+    private func admit(_ terms: LeaseTerms, from owner: LeaseOwner) throws(PoolError) -> AdmittedRequest {
+        guard case let .client(key) = owner else {
+            try terms.validate()
+            try checkSource(of: terms, named: nil)
+            return AdmittedRequest(terms: terms, sourceName: nil)
         }
-        try terms.validate()
-        try checkSource(of: terms)
-        return terms
+        guard terms.sharedDirectory == nil else {
+            throw .invalidRequest(reason: "a paired client cannot share a host directory")
+        }
+        let ceiling = try pairedRecord(key).priorityCeiling
+        guard terms.priority <= ceiling else {
+            throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(ceiling)")
+        }
+        guard ledger.waitingRequests(of: owner) < configuration.policy.slots else {
+            throw .invalidRequest(reason: "this Mac already has as many requests in the queue as the host has slots")
+        }
+        // The reason does not repeat the name. If the name were a host path, visible(_:to:) would
+        // replace the reply, and the change would confirm the path.
+        guard let path = configuration.offeredSources[terms.source] else {
+            throw .invalidRequest(reason: "the host does not offer the requested source")
+        }
+        var admitted = terms
+        admitted.source = path
+        try admitted.validate()
+        try checkSource(of: admitted, named: terms.source)
+        return AdmittedRequest(terms: admitted, sourceName: terms.source)
     }
 
     /// Reads the record of a paired client from the list of paired clients.
@@ -977,28 +1056,48 @@ public actor PoolDaemon {
     /// A request that fails these checks would only fail its boots, so it is refused before it
     /// takes a place in the queue.
     ///
-    /// - Parameter terms: The requested terms.
-    /// - Throws: ``PoolError/library(_:)`` when the source's settings cannot be read, its own
-    ///   credential rotation did not finish, or another process holds it, or
-    ///   ``PoolError/invalidRequest(reason:)`` when the source never booted, lies on another
-    ///   volume than the data directory, or the shared directory is missing.
-    private func checkSource(of terms: LeaseTerms) throws(PoolError) {
+    /// If `name` is set, every error names the source by it and names no host path. The daemon
+    /// then logs the error of settings that cannot be read.
+    ///
+    /// - Parameters:
+    ///   - terms: The requested terms with the source's path.
+    ///   - name: The name of the source that a paired client asked for, or `nil` for a local
+    ///     request.
+    /// - Throws: ``PoolError/library(_:)`` for a local request when the source's settings cannot
+    ///   be read, its own credential rotation did not finish, or another process holds it. A
+    ///   paired client's request gets ``PoolError/invalidRequest(reason:)`` for these instead.
+    ///   Every request gets ``PoolError/invalidRequest(reason:)`` when the source never booted,
+    ///   lies on another volume than the data directory, or the shared directory is missing.
+    private func checkSource(of terms: LeaseTerms, named name: String?) throws(PoolError) {
         let source = terms.source
+        let shown = name ?? source
         let bundle = VMBundle(root: URL(filePath: source))
         let settings: BundleSettings
         do {
             settings = try bundle.settings()
         } catch {
+            if let name {
+                configuration.logger.log(
+                    level: peerLogLevel(of: .unreadableSource(name), full: .warning),
+                    "An offered source cannot be read",
+                    metadata: ["source": "\(source)", "reason": "\(error)"],
+                )
+                throw .invalidRequest(reason: "the host cannot read the source \(shown)")
+            }
             throw .library(error)
         }
         guard settings.credentialRotation != .started else {
-            throw .library(.credentialRotationIncomplete(path: source))
+            throw name == nil
+                ? .library(.credentialRotationIncomplete(path: source))
+                : .invalidRequest(reason: "the source \(shown) did not finish its credential rotation")
         }
         guard settings.hasBooted != false else {
-            throw .invalidRequest(reason: "the source \(source) never booted, so its clones have no guest account")
+            throw .invalidRequest(reason: "the source \(shown) never booted, so its clones have no guest account")
         }
         guard !BundleLock.isHeld(on: bundle) else {
-            throw .library(.bundleInUse(path: source))
+            throw name == nil
+                ? .library(.bundleInUse(path: source))
+                : .invalidRequest(reason: "another process uses the source \(shown)")
         }
         let manager = FileManager.default
         let sourceVolume = try? manager.attributesOfItem(atPath: source)[.systemNumber] as? Int
@@ -1007,7 +1106,7 @@ public actor PoolDaemon {
         )[.systemNumber] as? Int
         guard sourceVolume == poolVolume else {
             throw .invalidRequest(
-                reason: "the source \(source) is not on the data directory's volume, so it cannot be cloned",
+                reason: "the source \(shown) is not on the data directory's volume, so it cannot be cloned",
             )
         }
         if let shared = terms.sharedDirectory {
@@ -1727,6 +1826,15 @@ public actor PoolDaemon {
     }
 }
 
+/// A lease request after the daemon applied its owner's limits.
+private struct AdmittedRequest {
+    /// The terms with the source's path.
+    let terms: LeaseTerms
+
+    /// The name of the source that a paired client asked for, or `nil` for a local request.
+    let sourceName: String?
+}
+
 /// Reads the list of paired clients during the handshakes of the listener for paired Macs.
 ///
 /// The reader logs a failure once until its reason changes or a read succeeds.
@@ -1770,5 +1878,38 @@ private final class ClientListReader: Sendable {
             }
             return nil
         }
+    }
+}
+
+/// The texts of replies, for the check that replies to paired clients name no host path.
+private extension PoolReply {
+    /// Every text in the reply.
+    var texts: [String] {
+        switch self {
+        case .queued, .released, .wrongCode:
+            []
+        case let .starting(lease), let .ready(lease), let .renewed(lease):
+            lease.texts
+        case let .restarting(lease, reason):
+            lease.texts + [reason]
+        case let .ended(_, reason):
+            [reason]
+        case let .status(pool):
+            pool.leases.flatMap(\.texts) + pool.queue.map(\.source)
+        case let .failure(message):
+            [message]
+        case let .invitation(code, _):
+            [code.description]
+        case let .paired(mac), let .alreadyPaired(mac):
+            [mac.name]
+        }
+    }
+}
+
+/// The texts of a lease summary.
+private extension LeaseSummary {
+    /// The source, the clone's path, and the address, without the missing ones.
+    var texts: [String] {
+        [source, bundle, address].compactMap(\.self)
     }
 }

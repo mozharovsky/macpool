@@ -79,6 +79,20 @@ public enum MachineOutcome: Sendable, Equatable, Codable, CustomStringConvertibl
             "the VM supervisor ended without a report"
         }
     }
+
+    /// The text that a paired client receives instead of a failure's reason.
+    static let hiddenFailure = "the VM failed on the host. The host's log has the reason"
+
+    /// A description without host paths, for replies to paired clients.
+    ///
+    /// A failure's reason may name host paths. This description replaces it with
+    /// ``hiddenFailure``.
+    var descriptionForPairedClients: String {
+        if case .failed = self {
+            return Self.hiddenFailure
+        }
+        return description
+    }
 }
 
 /// The stage of a supervised VM.

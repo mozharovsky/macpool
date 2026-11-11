@@ -41,6 +41,13 @@ paired client's waiting request by asking for a higher priority.
 The daemon reads the client's record again for every lease request. If the record is gone or
 blocked, the request fails.
 
+No reply to a paired client names a host path. The client sees its source by name and sees no
+clone and no guest address. When a VM fails, the client receives a fixed reason, and the host's
+log keeps the real one. Refusals do not repeat the client's text. Before a reply leaves, the
+daemon checks it for the data directory, the offered sources, the home directory, their
+percent-encoded forms, file URLs, and paths that start with `~/`. If one appears, the client
+receives a failure, and the host's log records the reply.
+
 ### Mac identity
 
 Each Mac has one P-256 key, which serves it as a host and as a client of other Macs. The key lives

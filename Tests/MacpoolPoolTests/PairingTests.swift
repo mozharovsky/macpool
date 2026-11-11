@@ -315,6 +315,23 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Sends a Mac that pairs a failure instead of a reply that names a host path. Here the host's
+    /// name for clients is the home directory.
+    @Test func keepsHostPathsFromMacsThatPair() async throws {
+        let host = try await PairingHost(name: FileManager.default.homeDirectoryForCurrentUser
+            .path(percentEncoded: false))
+        let invitation = try await host.invite()
+        let hidden = PoolError.daemonRefused(
+            message: "the host could not complete the request. The host's log has the reason",
+        )
+        await #expect(throws: hidden) {
+            try await PoolClient.pair(using: invitation.code, name: "runner", directory: host.clientDirectory())
+        }
+        #expect(!host.fixture.logs.entries("A reply to a paired Mac named a host path").isEmpty)
+        invitation.channel.close()
+        await host.stop()
+    }
+
     /// Refuses the pairing of a Mac that the host blocked after the Mac's greeting, and keeps the
     /// record blocked.
     @Test func refusesAMacBlockedAfterItsGreeting() async throws {
