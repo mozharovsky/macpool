@@ -78,6 +78,33 @@ struct ImageTests {
         await daemon.shutdown()
     }
 
+    /// Checks a queued image again before cloning it and ends the lease if it is no longer ready.
+    @Test func rechecksQueuedImageBeforeCloning() async throws {
+        let pool = try PoolFixture()
+        let image = try pool.makeImage(named: "xcode")
+        let imagePath = image.root.path(percentEncoded: false)
+        try image.writeImageRecord(ImageRecord(isReady: true))
+        let daemon = try await pool.start(slots: 1, offeredSources: ["xcode": imagePath])
+        let first = try await pool.readyLease(pool.terms())
+
+        let local = try await pool.requestLease(LeaseTerms(source: imagePath, timeToLive: 60))
+        #expect(try await next(local) == .queued(position: 1))
+        let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "xcode", timeToLive: 60)))
+        #expect(try await next(remote) == .queued(position: 2))
+        try image.writeImageRecord(ImageRecord(isReady: false))
+
+        first.client.close()
+        let reason = { (name: String) in
+            PoolError.invalidRequest(reason: "the image \(name) did not pass its checks, so it cannot be leased")
+                .description
+        }
+        #expect(try await endReason(of: local) == reason(imagePath))
+        #expect(try await endReason(of: remote) == reason("xcode"))
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        await daemon.shutdown()
+    }
+
     /// Lists every image directory by name, with the reason when its record cannot be read.
     @Test func listsImages() throws {
         let pool = try PoolFixture()
@@ -140,5 +167,18 @@ struct ImageTests {
         let data = try MessageCoding.encoder.encode(PoolSummary(slots: 1, leases: [], queue: [], images: [image]))
         #expect(String(decoding: data, as: UTF8.self).contains(#""ready":true"#))
         #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: data).images == [image])
+    }
+}
+
+/// Reads replies until the lease ends.
+///
+/// - Parameter client: The client that requested the lease.
+/// - Returns: The reason in the `ended` reply.
+/// - Throws: An error when no reply arrives in time.
+private func endReason(of client: MessageChannel) async throws -> String {
+    while true {
+        if case let .ended(_, reason) = try await next(client) {
+            return reason
+        }
     }
 }

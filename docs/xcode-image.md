@@ -56,13 +56,16 @@ with the image's path.
 8. Moves the clone to `images/NAME`.
 
 If a step or a check fails, or you press Control-C, the command stops the VM and deletes the
-clone. With `--keep-failed`, it keeps the clone as `images/NAME` with `ready` set to false. The
-daemon refuses to lease an image that isn't ready. Delete a failed image yourself before you build
-another one with the same name.
+clone. With `--keep-failed`, it keeps the clone as `images/NAME` with `ready` set to false. Delete
+a failed image yourself before you build another one with the same name.
+
+The daemon refuses to lease an image that isn't ready or a bundle in `images` without
+`image.json`. It checks when a request arrives and again right before it clones a queued request.
 
 ## Leasing the image
 
-`macpool list` shows each image with its readiness and builds. Lease an image by its path.
+`macpool list` shows each image with its readiness and builds. Paired Macs don't see images.
+Lease an image by its path.
 
 ```sh
 $macpool lease --from "$HOME/Library/Application Support/macpool/images/xcode" -- \

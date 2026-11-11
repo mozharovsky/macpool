@@ -984,10 +984,7 @@ public actor PoolDaemon {
     /// Checks that a request's source and shared directory can serve a lease.
     ///
     /// A request that fails these checks would only fail its boots, so it is refused before it
-    /// takes a place in the queue.
-    ///
-    /// A source in the data directory's `images` directory needs an image record that marks it
-    /// ready. A source elsewhere may have no record.
+    /// takes a place in the queue. See ``checkImage(at:offeredName:)`` for the image record.
     ///
     /// - Parameters:
     ///   - terms: The requested terms.
@@ -1013,25 +1010,7 @@ public actor PoolDaemon {
         guard settings.hasBooted != false else {
             throw .invalidRequest(reason: "the source \(source) never booted, so its clones have no guest account")
         }
-        // A paired Mac learns no paths on this Mac's disk.
-        let imageName = offeredName ?? source
-        let image: ImageRecord?
-        do {
-            image = try bundle.imageRecord()
-        } catch {
-            guard offeredName == nil else {
-                throw .invalidRequest(
-                    reason: "the image \(imageName) has an unreadable image.json, so it cannot be leased",
-                )
-            }
-            throw .library(error)
-        }
-        if image == nil, isInImagesDirectory(bundle) {
-            throw .invalidRequest(reason: "the image \(imageName) has no image.json, so it cannot be leased")
-        }
-        if let image, !image.isReady {
-            throw .invalidRequest(reason: "the image \(imageName) did not pass its checks, so it cannot be leased")
-        }
+        try checkImage(at: source, offeredName: offeredName)
         guard !BundleLock.isHeld(on: bundle) else {
             throw .library(.bundleInUse(path: source))
         }
@@ -1050,6 +1029,41 @@ public actor PoolDaemon {
             guard manager.fileExists(atPath: shared, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
             }
+        }
+    }
+
+    /// Checks that a source's image record lets the daemon lease it.
+    ///
+    /// A source in the data directory's `images` directory needs an image record that marks it
+    /// ready. A source elsewhere may have no record.
+    ///
+    /// - Parameters:
+    ///   - source: The source's path as the request named it.
+    ///   - offeredName: The name that a paired client used for the source, or `nil` for a local
+    ///     client. If it is set, the refusals name the source by it instead of its path.
+    /// - Throws: ``PoolError/library(_:)`` when a local client's image record cannot be read.
+    ///   ``PoolError/invalidRequest(reason:)`` when the source is an image without a readable
+    ///   record that marks it ready.
+    private func checkImage(at source: String, offeredName: String?) throws(PoolError) {
+        let bundle = VMBundle(root: URL(filePath: source))
+        // A paired Mac learns no paths on this Mac's disk.
+        let imageName = offeredName ?? source
+        let image: ImageRecord?
+        do {
+            image = try bundle.imageRecord()
+        } catch {
+            guard offeredName == nil else {
+                throw .invalidRequest(
+                    reason: "the image \(imageName) has an unreadable image.json, so it cannot be leased",
+                )
+            }
+            throw .library(error)
+        }
+        if image == nil, isInImagesDirectory(bundle) {
+            throw .invalidRequest(reason: "the image \(imageName) has no image.json, so it cannot be leased")
+        }
+        if let image, !image.isReady {
+            throw .invalidRequest(reason: "the image \(imageName) did not pass its checks, so it cannot be leased")
         }
     }
 
@@ -1216,8 +1230,8 @@ public actor PoolDaemon {
     /// - Parameters:
     ///   - id: The lease.
     ///   - terms: The lease's terms.
-    /// - Throws: ``PoolError`` when the old clone cannot be removed, or the source is in use or
-    ///   cannot be cloned.
+    /// - Throws: ``PoolError`` when the old clone cannot be removed, or the source is in use, is an
+    ///   image that is no longer ready, or cannot be cloned.
     private func prepareClone(_ id: LeaseID, terms: LeaseTerms) throws(PoolError) {
         let manager = FileManager.default
         let clone = configuration.directory.bundle(for: id)
@@ -1234,9 +1248,16 @@ public actor PoolDaemon {
         let partial = configuration.directory.partialBundle(for: id)
         try? manager.removeItem(at: partial)
         let source = VMBundle(root: URL(filePath: terms.source))
+        let sourceLock: BundleLock
+        do {
+            sourceLock = try BundleLock(bundle: source)
+        } catch {
+            throw .library(error)
+        }
+        defer { withExtendedLifetime(sourceLock) {} }
+        // The image may have changed while the request waited in the queue.
+        try checkImage(at: terms.source, offeredName: offeredName(of: id))
         do throws(MacpoolError) {
-            let sourceLock = try BundleLock(bundle: source)
-            defer { withExtendedLifetime(sourceLock) {} }
             let cloned = try source.clone(to: partial)
             do {
                 try cloned.assignIdentity()
@@ -1253,6 +1274,19 @@ public actor PoolDaemon {
             try? manager.removeItem(at: partial)
             throw .fileSystem("naming the clone", clone.root, error)
         }
+    }
+
+    /// Finds the name under which the host offers a lease's source to its paired client.
+    ///
+    /// - Parameter id: The lease.
+    /// - Returns: The first such name in sorted order, or `nil` for a lease of the local user.
+    private func offeredName(of id: LeaseID) -> String? {
+        guard let record = ledger.leases[id], case .client = record.owner else {
+            return nil
+        }
+        let names = configuration.offeredSources.filter { $0.value == record.terms.source }.map(\.key)
+        // The offered sources do not change while the daemon runs, so a paired lease has a name.
+        return names.min() ?? "that the host offered"
     }
 
     /// Connects to a new supervisor's socket, retrying until it listens.
