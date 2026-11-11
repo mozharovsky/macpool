@@ -144,7 +144,7 @@ struct ImageWorkspace {
             try clone.assignIdentity()
             try clone.writeImageRecord(ImageRecord(isReady: false))
         } catch {
-            discard()
+            removeIncompleteImage()
             throw .library(error)
         }
     }
@@ -300,8 +300,21 @@ struct ImageWorkspace {
         }
     }
 
-    /// Deletes ``inputs`` with the archive and runtime copies in it.
-    func removeInputs() {
-        try? FileManager.default.removeItem(at: inputs)
+    /// Deletes ``inputs`` with the archive and runtime copies in it, and reports a failure.
+    ///
+    /// - Returns: Whether ``inputs`` is gone.
+    @discardableResult
+    func removeInputs() -> Bool {
+        do {
+            try FileManager.default.removeItem(at: inputs)
+            return true
+        } catch {
+            guard FileManager.default.fileExists(atPath: inputs.path(percentEncoded: false)) else {
+                return true
+            }
+            let path = inputs.path(percentEncoded: false)
+            Report.line("could not remove \(path). Delete it before you build \(name) again")
+            return false
+        }
     }
 }

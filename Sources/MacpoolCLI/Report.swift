@@ -27,9 +27,13 @@ enum Report {
 
     /// Prints a line on standard output.
     ///
+    /// If standard output is closed, for example after the terminal closed, the line is lost and
+    /// the command continues.
+    ///
     /// - Parameter text: The line without a line break.
     static func line(_ text: String) {
-        FileHandle.standardOutput.write(Data((text + "\n").utf8))
+        // The non-throwing write raises an Objective-C exception on EIO. The exception ends the process.
+        try? FileHandle.standardOutput.write(contentsOf: Data((text + "\n").utf8))
     }
 
     /// Formats a duration in seconds with a fixed number of decimals.
