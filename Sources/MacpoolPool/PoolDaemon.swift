@@ -413,9 +413,11 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, and queue, as the local user sees them.
+    /// - Returns: The slots, leases, queue, and images, as the local user sees them.
     public func summary() -> PoolSummary {
-        ledger.summary(for: .local)
+        var summary = ledger.summary(for: .local)
+        summary.images = configuration.directory.images()
+        return summary
     }
 
     // MARK: Clients
@@ -565,7 +567,12 @@ public actor PoolDaemon {
                 perform([])
                 reply(.renewed(summary), to: client)
             case .status:
-                reply(.status(ledger.summary(for: owner)), to: client)
+                var summary = ledger.summary(for: owner)
+                // A paired Mac gets no paths on this Mac's disk.
+                if owner == .local {
+                    summary.images = configuration.directory.images()
+                }
+                reply(.status(summary), to: client)
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -621,10 +628,10 @@ public actor PoolDaemon {
     /// takes a place in the queue.
     ///
     /// - Parameter terms: The requested terms.
-    /// - Throws: ``PoolError/library(_:)`` when the source's settings cannot be read, its own
-    ///   credential rotation did not finish, or another process holds it, or
-    ///   ``PoolError/invalidRequest(reason:)`` when the source never booted, lies on another
-    ///   volume than the data directory, or the shared directory is missing.
+    /// - Throws: ``PoolError/library(_:)`` when the source's settings or image record cannot be
+    ///   read, its own credential rotation did not finish, or another process holds it.
+    ///   ``PoolError/invalidRequest(reason:)`` when the source never booted, is an image that is not
+    ///   ready, lies on another volume than the data directory, or the shared directory is missing.
     private func checkSource(of terms: LeaseTerms) throws(PoolError) {
         let source = terms.source
         let bundle = VMBundle(root: URL(filePath: source))
@@ -639,6 +646,15 @@ public actor PoolDaemon {
         }
         guard settings.hasBooted != false else {
             throw .invalidRequest(reason: "the source \(source) never booted, so its clones have no guest account")
+        }
+        let image: ImageRecord?
+        do {
+            image = try bundle.imageRecord()
+        } catch {
+            throw .library(error)
+        }
+        if let image, !image.isReady {
+            throw .invalidRequest(reason: "the image \(source) did not pass its checks, so it cannot be leased")
         }
         guard !BundleLock.isHeld(on: bundle) else {
             throw .library(.bundleInUse(path: source))

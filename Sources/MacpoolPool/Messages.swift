@@ -346,7 +346,55 @@ public struct QueuedSummary: Codable, Sendable, Equatable {
     public var since: Date
 }
 
-/// The pool's slots, leases, and queue, as clients see them.
+/// An image in the data directory, as clients see it.
+public struct ImageSummary: Codable, Sendable, Equatable {
+    /// The image's directory name.
+    public var name: String
+
+    /// The image's bundle path. Pass it to `lease --from`.
+    public var path: String
+
+    /// Whether the daemon leases clones of the image.
+    public var isReady: Bool
+
+    /// The build of each piece of software in the image, keyed by a name such as `xcode`.
+    public var builds: [String: String]
+
+    /// Why the image record cannot be read, or `nil` if it can.
+    public var problem: String?
+
+    /// Creates a summary.
+    ///
+    /// - Parameters:
+    ///   - name: The image's directory name.
+    ///   - path: The image's bundle path.
+    ///   - isReady: Whether the daemon leases clones of the image.
+    ///   - builds: The build of each piece of software in the image.
+    ///   - problem: Why the image record cannot be read.
+    public init(name: String, path: String, isReady: Bool, builds: [String: String] = [:], problem: String? = nil) {
+        self.name = name
+        self.path = path
+        self.isReady = isReady
+        self.builds = builds
+        self.problem = problem
+    }
+
+    /// The JSON keys of the summary.
+    private enum CodingKeys: String, CodingKey {
+        /// The `name` key.
+        case name
+        /// The `path` key.
+        case path
+        /// The `ready` key.
+        case isReady = "ready"
+        /// The `builds` key.
+        case builds
+        /// The `problem` key.
+        case problem
+    }
+}
+
+/// The pool's slots, leases, queue, and images, as clients see them.
 public struct PoolSummary: Codable, Sendable, Equatable {
     /// The number of VMs that the daemon runs at once.
     public var slots: Int
@@ -356,6 +404,51 @@ public struct PoolSummary: Codable, Sendable, Equatable {
 
     /// The requests that wait for a slot, in the order they will get one.
     public var queue: [QueuedSummary]
+
+    /// The images in the data directory, ordered by name.
+    ///
+    /// Only clients on this Mac receive images. A paired Mac receives an empty array.
+    public var images: [ImageSummary]
+
+    /// Creates a summary.
+    ///
+    /// - Parameters:
+    ///   - slots: The number of VMs that the daemon runs at once.
+    ///   - leases: The leases that hold a slot.
+    ///   - queue: The requests that wait for a slot.
+    ///   - images: The images in the data directory.
+    public init(slots: Int, leases: [LeaseSummary], queue: [QueuedSummary], images: [ImageSummary] = []) {
+        self.slots = slots
+        self.leases = leases
+        self.queue = queue
+        self.images = images
+    }
+
+    /// Decodes a summary and treats a missing `images` key as no images.
+    ///
+    /// A daemon from before images existed sends no such key.
+    ///
+    /// - Parameter decoder: The decoder.
+    /// - Throws: `DecodingError` when a key is missing or holds a value of the wrong type.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        slots = try container.decode(Int.self, forKey: .slots)
+        leases = try container.decode([LeaseSummary].self, forKey: .leases)
+        queue = try container.decode([QueuedSummary].self, forKey: .queue)
+        images = try container.decodeIfPresent([ImageSummary].self, forKey: .images) ?? []
+    }
+
+    /// The JSON keys of the summary.
+    private enum CodingKeys: String, CodingKey {
+        /// The `slots` key.
+        case slots
+        /// The `leases` key.
+        case leases
+        /// The `queue` key.
+        case queue
+        /// The `images` key.
+        case images
+    }
 }
 
 /// A request from a client to the daemon.

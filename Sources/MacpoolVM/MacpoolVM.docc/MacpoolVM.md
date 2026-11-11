@@ -15,6 +15,9 @@ of them writes. The clone starts with the source's guest account and SSH host ke
 ``CredentialRotation`` replaces both on the clone's first boot. The bundle then pins the new host
 key as a ``HostKey`` and records the progress as ``CredentialRotationState``.
 
+An ``ImageRecord`` in a stopped bundle marks it as an image. The record names the builds of the
+software inside and says whether the image passed its checks.
+
 A ``BundleLock`` marks a bundle in use. Commands hold it while a VM runs from the bundle or while
 they copy it, which keeps a clone from capturing a disk that a guest writes.
 
@@ -52,6 +55,7 @@ The library needs a Mac with Apple silicon and macOS 27. The process that create
 - ``GuestAccount``
 - ``BundleLock``
 - ``CredentialRotationState``
+- ``ImageRecord``
 
 ### Restore images
 
