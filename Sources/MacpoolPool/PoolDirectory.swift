@@ -60,7 +60,8 @@ public struct PoolDirectory: Sendable, Hashable {
     /// The check refuses a shared directory that is the data directory, contains it, or lies
     /// inside it. It also refuses one that is a source or contains one. If the guest can write the
     /// directory, the check also refuses it when it contains the executable. A share that holds a
-    /// symbolic link on the way to a source or the executable counts as containing it. The check
+    /// symbolic link on the way to a source or the executable counts as containing it. A shared
+    /// path that passes through a symbolic link inside the share is refused too. The check
     /// compares the paths after resolving symbolic links and firmlinks, and it ignores letter case
     /// and the Unicode normalization form.
     ///
@@ -108,7 +109,8 @@ public struct PoolDirectory: Sendable, Hashable {
         }
         // The guest could replace any symbolic link that the path passes through inside the share,
         // so the check follows the path one entry at a time and tests every entry it visits.
-        func isShared(_ path: String) throws(PoolError) -> Bool {
+        // With `strictly` set, an entry that is the share itself does not count.
+        func isShared(_ path: String, strictly: Bool = false) throws(PoolError) -> Bool {
             // A URL would resolve a relative link target against the current directory, so the
             // names come from splitting the text.
             var pending = path.split(separator: "/").map(String.init).reversed() as [String]
@@ -122,7 +124,8 @@ public struct PoolDirectory: Sendable, Hashable {
                     directory = URL(filePath: directory).deletingLastPathComponent().path(percentEncoded: false)
                     continue
                 }
-                if try (resolved(directory) + [PoolDaemon.caselessBytes(of: name)[...]]).starts(with: share) {
+                let visited = try resolved(directory) + [PoolDaemon.caselessBytes(of: name)[...]]
+                if visited.starts(with: share), !strictly || visited.count > share.count {
                     return true
                 }
                 let entry = URL(filePath: directory).appending(path: name).path(percentEncoded: false)
@@ -140,6 +143,12 @@ public struct PoolDirectory: Sendable, Hashable {
                 pending += target.split(separator: "/").map(String.init).reversed()
             }
             return false
+        }
+        if try isShared(shared, strictly: true) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) passes through a symbolic link inside itself. The guest could \
+            replace the link and change what a later boot shares. Share the directory by its real path.
+            """)
         }
         for source in sources where try isShared(source) {
             throw .invalidRequest(reason: """

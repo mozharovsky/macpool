@@ -59,6 +59,20 @@ struct ShareCheckTests {
             try FileManager.default.createDirectory(atPath: created, withIntermediateDirectories: true)
         }
         try directory.checkShare(beside, sources: [source])
+        // The request may spell the source in another case than the volume stores.
+        let typed = root.url.appending(path: "work/BASE").path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(source, sources: [typed])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
+        // A share named through a link inside itself could point elsewhere at a later boot.
+        try FileManager.default.createSymbolicLink(atPath: "\(source)/up", withDestinationPath: "..")
+        #expect {
+            try directory.checkShare("\(source)/up/base", sources: [])
+        } throws: { error in
+            "\(error)".contains("passes through a symbolic link inside itself")
+        }
         let work = root.url.appending(path: "work").path(percentEncoded: false)
         #expect {
             try directory.checkShare(work, sources: [beside + "/base", source])
