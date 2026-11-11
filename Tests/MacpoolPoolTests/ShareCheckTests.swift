@@ -69,7 +69,19 @@ struct ShareCheckTests {
         let link = root.url.appending(path: "poolside/base")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(filePath: source))
         let alias = link.path(percentEncoded: false)
-        #expect(throws: PoolError.self) { try directory.checkShare(beside, sources: [alias]) }
+        #expect {
+            try directory.checkShare(beside, sources: [alias])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
+        // A link in a parent directory is just as replaceable.
+        let through = root.url.appending(path: "poolside/work").path(percentEncoded: false)
+        try FileManager.default.createSymbolicLink(atPath: through, withDestinationPath: "../work")
+        #expect {
+            try directory.checkShare(beside, sources: ["\(through)/base"])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
     }
 
     /// Refuses a writable directory that includes the executable and accepts a read-only one.
@@ -93,6 +105,22 @@ struct ShareCheckTests {
         let link = bin.appending(path: "alias")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: tools.appending(path: "macpool"))
         let toolsPath = tools.path(percentEncoded: false)
-        #expect(throws: PoolError.self) { try directory.checkShare(toolsPath, executable: link) }
+        #expect {
+            try directory.checkShare(toolsPath, executable: link)
+        } throws: { error in
+            "\(error)".contains("includes the macpool executable")
+        }
+        // So is a link that the chain passes on the way to the file.
+        let hops = root.url.appending(path: "hops", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: hops, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: hops.appending(path: "hop"), withDestinationURL: link)
+        let chain = bin.appending(path: "chain")
+        try FileManager.default.createSymbolicLink(at: chain, withDestinationURL: hops.appending(path: "hop"))
+        let hopsPath = hops.path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(hopsPath, executable: chain)
+        } throws: { error in
+            "\(error)".contains("includes the macpool executable")
+        }
     }
 }

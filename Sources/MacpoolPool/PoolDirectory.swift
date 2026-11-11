@@ -59,9 +59,10 @@ public struct PoolDirectory: Sendable, Hashable {
     ///
     /// The check refuses a shared directory that is the data directory, contains it, or lies
     /// inside it. It also refuses one that is a source or contains one. If the guest can write the
-    /// directory, the check also refuses it when it contains the executable. It compares the paths
-    /// after resolving symbolic links and firmlinks, and it ignores letter case and the Unicode
-    /// normalization form.
+    /// directory, the check also refuses it when it contains the executable. A share that holds a
+    /// symbolic link on the way to a source or the executable counts as containing it. The check
+    /// compares the paths after resolving symbolic links and firmlinks, and it ignores letter case
+    /// and the Unicode normalization form.
     ///
     /// The check reads the paths once. The VM opens the shared directory by its path when it
     /// boots. If a directory on that path is replaced in between, the VM shares what the path
@@ -105,15 +106,38 @@ public struct PoolDirectory: Sendable, Hashable {
             \(reach) Share a directory outside it.
             """)
         }
-        // A path that ends in a symbolic link names the link and its target. The guest could
-        // replace either one, so the check covers both. The executable is a file, so only the
-        // directories on a path resolve and the last name stays as written.
+        // The guest could replace any symbolic link that the path passes through inside the share,
+        // so the check follows the path one entry at a time and tests every entry it visits.
         func isShared(_ path: String) throws(PoolError) -> Bool {
-            for url in [URL(filePath: path), URL(filePath: path).resolvingSymlinksInPath()] {
-                let parent = try resolved(url.deletingLastPathComponent().path(percentEncoded: false))
-                if (parent + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]).starts(with: share) {
+            // A URL would resolve a relative link target against the current directory, so the
+            // names come from splitting the text.
+            var pending = path.split(separator: "/").map(String.init).reversed() as [String]
+            var directory = "/"
+            var links = 0
+            while let name = pending.popLast() {
+                if name == "." {
+                    continue
+                }
+                if name == ".." {
+                    directory = URL(filePath: directory).deletingLastPathComponent().path(percentEncoded: false)
+                    continue
+                }
+                if try (resolved(directory) + [PoolDaemon.caselessBytes(of: name)[...]]).starts(with: share) {
                     return true
                 }
+                let entry = URL(filePath: directory).appending(path: name).path(percentEncoded: false)
+                guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: entry) else {
+                    directory = entry
+                    continue
+                }
+                links += 1
+                guard links <= MAXSYMLINKS else {
+                    throw .invalidRequest(reason: "macpool cannot follow the symbolic links in \(path)")
+                }
+                if target.hasPrefix("/") {
+                    directory = "/"
+                }
+                pending += target.split(separator: "/").map(String.init).reversed()
             }
             return false
         }
