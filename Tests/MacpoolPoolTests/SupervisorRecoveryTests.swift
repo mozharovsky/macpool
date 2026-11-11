@@ -359,7 +359,8 @@ struct SupervisorRecoveryTests {
             bootTimeout: 60,
         ))
 
-        let daemon = try await pool.start()
+        // On a busy runner the supervisor can take longer than half a second to exit after the stop.
+        let daemon = try await pool.start(signalGrace: .seconds(5))
         #expect(await eventually { !pool.launcher.isRunning(orphan) })
         #expect(await eventually { !FileManager.default.fileExists(atPath: clone.path(percentEncoded: false)) })
         #expect(pool.launcher.signals().isEmpty)
