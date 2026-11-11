@@ -21,7 +21,7 @@ A lease goes through the same steps before it reports `ready`. The `--timeout` o
 
 | State | What it means | What you do |
 | --- | --- | --- |
-| `pending` | The first login failed. The guest is unchanged. | Run the clone again. The next `run` tries again. |
+| `pending` | The step hasn't changed the guest yet. A new clone starts here, and a failed first login stays here. | Read the error. If the boot or the login timed out, run the clone again. If the source's `known_hosts` has no usable key, fix the source and clone it again. |
 | `started` | The step failed after the guest started to change. | Delete the clone and clone the source again. |
 | `finished` | The clone has its own credentials. | Nothing. |
 
@@ -41,8 +41,9 @@ Connecting to the source once with `Scripts/ssh.sh` or `Scripts/shutdown.sh` wri
 
 ## The window before `ready`
 
-Until the clone prints `ready`, it still accepts its source's password and host key. That usually
-lasts 11 to 69 seconds after SSH answers, and it can last until the timeout.
+Until the clone prints `ready`, it still accepts its source's password. For most of that time it
+also presents its source's host key, and the step replaces the key a moment before the password.
+The window usually lasts 11 to 69 seconds after SSH answers, and it can last until the timeout.
 
 Anyone with the source's password, in another guest or on the host, can log in during that window.
 They could leave access behind that `ready` doesn't reveal. Use a clone only after `ready`.
