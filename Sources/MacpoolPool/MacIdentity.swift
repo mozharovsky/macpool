@@ -22,6 +22,9 @@ struct MacIdentity: Sendable {
     /// The self-signed certificate that carries the public key.
     let certificate: SecCertificate
 
+    /// What the key file holds, for error messages.
+    private static let keyName = "this Mac's key"
+
     /// Builds the certificate for a key.
     ///
     /// - Parameters:
@@ -91,7 +94,8 @@ struct MacIdentity: Sendable {
         return identity
     }
 
-    /// Reads this Mac's identity, or creates the key when the data directory has none.
+    /// Reads this Mac's identity, or creates the key when the data directory has neither a key
+    /// nor a list of paired Macs.
     ///
     /// Processes that create the key at the same time end up with the same key, because only the
     /// first file takes the name.
@@ -101,15 +105,32 @@ struct MacIdentity: Sendable {
     /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when another user could control
     ///   or read the trust directory, ``PoolError/unusableIdentity(path:reason:)`` when the key
     ///   file is not a regular file of the current user, other users can reach it, it holds no
-    ///   P-256 key, or its certificate cannot be built, or
-    ///   ``PoolError/fileSystem(operation:path:reason:)`` when a file operation fails.
+    ///   P-256 key, or its certificate cannot be built,
+    ///   ``PoolError/missingIdentity(path:lists:)`` when the key file is missing and a list of
+    ///   paired Macs exists, or ``PoolError/fileSystem(operation:path:reason:)`` when a file
+    ///   operation fails.
     static func loadOrCreate(in directory: PoolDirectory) throws(PoolError) -> MacIdentity {
         try directory.prepareTrustDirectory()
         let file = directory.identityFile
         if let key = try readKey(at: file) {
             return try MacIdentity(privateKey: key, file: file)
         }
-        try createKey(at: file)
+        // A new key would leave every paired Mac refusing this one without saying why.
+        var lists: [String] = []
+        if TrustList<TrustedClient>.exists(in: directory) {
+            lists.append(TrustList<TrustedClient>.file(in: directory).path(percentEncoded: false))
+        }
+        if TrustList<TrustedHost>.exists(in: directory) {
+            lists.append(TrustList<TrustedHost>.file(in: directory).path(percentEncoded: false))
+        }
+        guard lists.isEmpty else {
+            throw .missingIdentity(path: file.path(percentEncoded: false), lists: lists)
+        }
+        try PrivateFile.create(
+            at: file,
+            contents: Data(P256.Signing.PrivateKey().pemRepresentation.utf8),
+            name: keyName,
+        )
         guard let key = try readKey(at: file) else {
             throw .unusableIdentity(path: file.path(percentEncoded: false), reason: "it vanished after it was created")
         }
@@ -144,116 +165,20 @@ struct MacIdentity: Sendable {
 
     /// Reads a private key from a file that only the current user can read.
     ///
-    /// The checks run on the open file, so the file cannot change between the check and the
-    /// read. The file opens without waiting, so a FIFO at its path fails the type check instead
-    /// of blocking until a writer appears.
-    ///
     /// - Parameter file: The key file.
     /// - Returns: The key, or `nil` when the file does not exist.
-    /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when the file is a symbolic link,
-    ///   not a regular file, owned by another user, open to other users through its permissions
-    ///   or a ``FileExposure``, or holds no P-256 key in PEM, or
+    /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when the file fails a check of
+    ///   ``PrivateFile/read(at:name:refusal:)`` or holds no P-256 key in PEM, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
     private static func readKey(at file: URL) throws(PoolError) -> P256.Signing.PrivateKey? {
         let path = file.path(percentEncoded: false)
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard descriptor >= 0 else {
-            switch errno {
-            case ENOENT:
-                return nil
-            case ELOOP:
-                throw .unusableIdentity(path: path, reason: "it is a symbolic link")
-            default:
-                throw .systemCall("opening", file)
-            }
-        }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        var status = stat()
-        guard fstat(descriptor, &status) == 0 else {
-            throw .systemCall("inspecting", file)
-        }
-        guard status.st_mode & S_IFMT == S_IFREG else {
-            throw .unusableIdentity(path: path, reason: "it is not a regular file")
-        }
-        guard status.st_uid == getuid() else {
-            throw .unusableIdentity(path: path, reason: "another user owns it")
-        }
-        guard status.st_mode & 0o077 == 0 else {
-            let mode = String(status.st_mode & 0o777, radix: 8)
-            throw .unusableIdentity(path: path, reason: "its permissions \(mode) let other users in")
-        }
-        if let exposure = try FileExposure.find(in: descriptor, of: file) {
-            throw .unusableIdentity(path: path, reason: exposure.reason)
-        }
-        let data: Data
-        do {
-            data = try handle.readToEnd() ?? Data()
-        } catch {
-            throw .fileSystem("reading this Mac's key", file, error)
+        let refusal = { (reason: String) in PoolError.unusableIdentity(path: path, reason: reason) }
+        guard let data = try PrivateFile.read(at: file, name: keyName, refusal: refusal) else {
+            return nil
         }
         guard let key = try? P256.Signing.PrivateKey(pemRepresentation: String(decoding: data, as: UTF8.self)) else {
-            throw .unusableIdentity(path: path, reason: "it holds no P-256 private key in PEM")
+            throw refusal("it holds no P-256 private key in PEM")
         }
         return key
-    }
-
-    /// Creates a new private key in a file that only the current user can read, unless the file
-    /// already exists.
-    ///
-    /// The key reaches the disk under a temporary name first. A hard link then gives it the final
-    /// name, which fails when another process created the file first and keeps that file. The
-    /// name reaches the disk before the call returns.
-    ///
-    /// - Parameter file: The key file.
-    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the key cannot be written,
-    ///   flushed, or named, or when its directory cannot be opened or flushed.
-    private static func createKey(at file: URL) throws(PoolError) {
-        let path = file.path(percentEncoded: false)
-        let temporary = file.deletingLastPathComponent()
-            .appending(path: ".\(file.lastPathComponent).\(getpid()).\(UUID().uuidString.prefix(8))")
-        let temporaryPath = temporary.path(percentEncoded: false)
-        let descriptor = open(temporaryPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else {
-            throw .systemCall("creating", temporary)
-        }
-        defer { unlink(temporaryPath) }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        do {
-            try handle.write(contentsOf: Data(P256.Signing.PrivateKey().pemRepresentation.utf8))
-        } catch {
-            throw .fileSystem("writing this Mac's key", temporary, error)
-        }
-        // The key reaches the disk before the link names it, and the name before the call returns.
-        // A power loss then leaves no key file or a complete one and keeps a key that a caller
-        // received.
-        guard flush(descriptor) else {
-            throw .systemCall("flushing this Mac's key", temporary)
-        }
-        guard link(temporaryPath, path) == 0 || errno == EEXIST else {
-            throw .systemCall("naming this Mac's key", file)
-        }
-        let directory = file.deletingLastPathComponent()
-        let directoryDescriptor = open(
-            directory.pathWithoutTrailingSlash,
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
-        )
-        guard directoryDescriptor >= 0 else {
-            throw .systemCall("opening", directory)
-        }
-        defer { close(directoryDescriptor) }
-        guard flush(directoryDescriptor) else {
-            throw .systemCall("flushing the name of this Mac's key in", directory)
-        }
-    }
-
-    /// Puts a file's contents or a directory's entries on the disk.
-    ///
-    /// A full flush also empties the drive's cache. A volume without full flushes gets `fsync`,
-    /// which reaches only that cache.
-    ///
-    /// - Parameter descriptor: An open descriptor of the file or directory.
-    /// - Returns: Whether a flush succeeded. After a failure, `errno` describes the last attempt.
-    private static func flush(_ descriptor: Int32) -> Bool {
-        fcntl(descriptor, F_FULLFSYNC) == 0 || fsync(descriptor) == 0
     }
 }

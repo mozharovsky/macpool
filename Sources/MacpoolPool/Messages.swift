@@ -520,6 +520,43 @@ struct HostGreeting: Codable, Sendable, Equatable {
     }
 }
 
+/// The first line that a client receives from a host.
+///
+/// If the host admits the client, it sends a ``HostGreeting``. If it refuses the connection after
+/// the handshake, it sends a failure reply with the reason and closes the connection.
+enum HostOpening: Decodable, Sendable, Equatable {
+    /// The host admitted the client.
+    ///
+    /// - Parameter greeting: The host's greeting.
+    case greeting(HostGreeting)
+
+    /// The host refused the connection.
+    ///
+    /// - Parameter reason: The host's description of the refusal.
+    case refusal(String)
+
+    /// The JSON keys that tell a refusal from a greeting.
+    private enum CodingKeys: String, CodingKey {
+        /// The kind of message.
+        case reply
+        /// The reason of a refusal.
+        case reason
+    }
+
+    /// Decodes a greeting or a refusal.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError` when the line is neither a greeting nor a failure reply.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if try container.decode(String.self, forKey: .reply) == "failure" {
+            self = try .refusal(container.decode(String.self, forKey: .reason))
+        } else {
+            self = try .greeting(HostGreeting(from: decoder))
+        }
+    }
+}
+
 /// A reply from the daemon to a client.
 ///
 /// Each reply is one JSON object on its own line, with the kind under the `reply` key.

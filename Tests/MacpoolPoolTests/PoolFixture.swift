@@ -55,12 +55,14 @@ final class PoolFixture {
     ///   - slots: The number of slots.
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
+    ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
     /// - Returns: The daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
     func daemon(
         slots: Int = 2,
         offeredSources: [String: String] = [:],
         peers: PeerSettings? = nil,
+        signalGrace: Duration = .milliseconds(500),
     ) throws(PoolError) -> PoolDaemon {
         let clock = clock
         let logs = logs
@@ -74,7 +76,7 @@ final class PoolFixture {
             tickInterval: nil,
             supervisorConnectTimeout: .seconds(10),
             reconnectWindow: .seconds(1),
-            signalGrace: .milliseconds(500),
+            signalGrace: signalGrace,
             releaseTimeout: .seconds(2),
             logger: Logger(label: "macpool.tests") { _ in RecordingLogHandler(recorder: logs) },
         ))
@@ -86,14 +88,16 @@ final class PoolFixture {
     ///   - slots: The number of slots.
     ///   - offeredSources: The source paths that paired clients may lease, keyed by name.
     ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
+    ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
     /// - Returns: The listening daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory or listen.
     func start(
         slots: Int = 2,
         offeredSources: [String: String] = [:],
         peers: PeerSettings? = nil,
+        signalGrace: Duration = .milliseconds(500),
     ) async throws(PoolError) -> PoolDaemon {
-        let daemon = try daemon(slots: slots, offeredSources: offeredSources, peers: peers)
+        let daemon = try daemon(slots: slots, offeredSources: offeredSources, peers: peers, signalGrace: signalGrace)
         try await daemon.start()
         return daemon
     }

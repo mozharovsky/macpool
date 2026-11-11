@@ -34,8 +34,8 @@ public enum PoolClient {
     ///   - protocols: The application protocols to offer, in order of preference.
     /// - Returns: A connection that is ready for requests.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails, the host
-    ///   presents another key, refuses this Mac's key, closes the connection or stays silent
-    ///   before its greeting, or greets with another protocol version or role, or
+    ///   presents another key, refuses this Mac's key or the connection, closes the connection or
+    ///   stays silent before its greeting, or greets with another protocol version or role, or
     ///   ``PoolError/unusableIdentity(path:reason:)`` when Security rejects this Mac's key.
     static func connect(
         to endpoint: NWEndpoint,
@@ -78,8 +78,8 @@ public enum PoolClient {
     ///   - place: The host's address, for error messages.
     ///   - timeout: The longest wait.
     /// - Returns: The greeting.
-    /// - Throws: ``PoolError/connection(path:reason:)`` when the host closes the connection,
-    ///   sends something else, or stays silent for `timeout`.
+    /// - Throws: ``PoolError/connection(path:reason:)`` when the host refuses or closes the
+    ///   connection, sends something else, or stays silent for `timeout`.
     private static func greeting(
         on channel: MessageChannel,
         from place: String,
@@ -94,9 +94,9 @@ public enum PoolClient {
             channel.close()
             return true
         }
-        let received: Result<HostGreeting?, PoolError>
+        let received: Result<HostOpening?, PoolError>
         do {
-            received = try await .success(channel.receive(HostGreeting.self))
+            received = try await .success(channel.receive(HostOpening.self))
         } catch {
             received = .failure(error)
         }
@@ -105,8 +105,11 @@ public enum PoolClient {
             throw .connection(path: place, reason: "the host sent no greeting within \(timeout)")
         }
         switch received {
-        case let .success(greeting?):
+        case let .success(.greeting(greeting)?):
             return greeting
+        case let .success(.refusal(reason)?):
+            channel.close()
+            throw .connection(path: place, reason: "the host refused the connection: \(reason)")
         case .success(nil):
             channel.close()
             throw .connection(

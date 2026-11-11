@@ -13,10 +13,9 @@ struct PeerConnectionTests {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
-        let trust = TrustList([clientKey])
-        let daemon = try await fixture.start(peers: trust.settings())
+        let hostKey = try pair([clientKey], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
-        let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
         let channel = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
         try channel.send(PoolRequest.status)
@@ -39,10 +38,9 @@ struct PeerConnectionTests {
     /// Refuses a Mac whose key the host does not trust.
     @Test func refusesAnUntrustedMac() async throws {
         let fixture = try PoolFixture()
-        let trust = try TrustList([KeyFingerprint(digest: makeIdentity().keyDigest)])
-        let daemon = try await fixture.start(peers: trust.settings())
+        let hostKey = try pair([randomKey()], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
-        let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
         let stranger = try makeIdentity()
         let reason = try #require(await refusal { () async throws(PoolError) in
@@ -53,10 +51,10 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
-    /// Admits nobody while the set of trusted keys is empty.
+    /// Admits nobody while no list of paired clients exists.
     @Test func admitsNobodyWithoutTrustedKeys() async throws {
         let fixture = try PoolFixture()
-        let daemon = try await fixture.start(peers: TrustList().settings())
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
         let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
@@ -74,9 +72,9 @@ struct PeerConnectionTests {
     @Test func refusesAnotherHostKey() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: client.keyDigest)]).settings())
+        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
-        let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
         let pinned = try KeyFingerprint(digest: makeIdentity().keyDigest)
 
         let reason = try #require(await refusal { () async throws(PoolError) in
@@ -91,9 +89,9 @@ struct PeerConnectionTests {
     @Test func refusesAnotherProtocolVersion() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: client.keyDigest)]).settings())
+        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
-        let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
         // Without ALPN the handshake succeeds, so the host refuses after it.
         for protocols in [["macpool/2"], []] {
@@ -115,7 +113,8 @@ struct PeerConnectionTests {
     @Test func refusesTLS12() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
-        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: client.keyDigest)]).settings())
+        try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
         let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { _ in true }
@@ -135,7 +134,8 @@ struct PeerConnectionTests {
     @Test func refusesATrustedCertificateAfterTheFirst() async throws {
         let fixture = try PoolFixture()
         let trusted = try makeIdentity()
-        let daemon = try await fixture.start(peers: TrustList([KeyFingerprint(digest: trusted.keyDigest)]).settings())
+        try pair([KeyFingerprint(digest: trusted.keyDigest)], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
 
         let stranger = try makeIdentity()
@@ -179,34 +179,39 @@ struct PeerConnectionTests {
         #expect(reason == "the host presented the key \(impostorKey) instead of \(hostKey)")
     }
 
-    /// Checks the trusted keys during every handshake, so a change applies to the next connection.
+    /// Reads the list of paired clients during every handshake, so a change applies to the next
+    /// connection. A blocked client is refused like one that the list leaves out.
     @Test func readsTrustedKeysAtEveryHandshake() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
-        let trust = TrustList([clientKey])
-        let daemon = try await fixture.start(peers: trust.settings())
+        let hostKey = try pair([clientKey], with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
         let endpoint = try await loopback(listeningPort(of: daemon))
-        let hostKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: fixture.directory).keyDigest)
 
         try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
-        trust.replace(with: [])
-        #expect(await refusal { () async throws(PoolError) in
-            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
-        } != nil)
-        trust.replace(with: [clientKey])
+        for blocked in [true, false] {
+            try pair(blocked ? [clientKey] : [], with: fixture.directory, blocked: [clientKey])
+            #expect(await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+            } != nil, "blocked: \(blocked)")
+        }
+        try pair([clientKey], with: fixture.directory)
         try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
         #expect(fixture.logs.entries("A paired Mac connected").count == 2)
         await daemon.shutdown()
     }
 
-    /// Keeps serving the local socket while this Mac's key cannot be read, and listens once it
-    /// can.
+    /// Keeps serving the local socket while this Mac's key cannot be used. A missing key stays
+    /// missing while a list of paired clients exists, and the listener starts once the key is
+    /// back.
     @Test func keepsTheLocalSocketWithAnUnusableKey() async throws {
         let fixture = try PoolFixture()
-        let daemon = try fixture.daemon(peers: TrustList().settings())
-        try fixture.directory.prepareTrustDirectory()
+        let daemon = try fixture.daemon(peers: loopbackSettings())
+        try pair([randomKey()], with: fixture.directory)
         let keyFile = fixture.directory.identityFile.path(percentEncoded: false)
+        let key = try Data(contentsOf: URL(filePath: keyFile))
+        try FileManager.default.removeItem(atPath: keyFile)
         #expect(FileManager.default.createFile(
             atPath: keyFile,
             contents: Data("not a key\n".utf8),
@@ -218,18 +223,98 @@ struct PeerConnectionTests {
             Issue.record("the local socket did not answer")
             return
         }
-        #expect(await eventually { !fixture.logs.entries("The listener for paired Macs cannot start").isEmpty })
+        let failures = { fixture.logs.entries("The listener for paired Macs cannot start") }
+        #expect(await eventually { !failures().isEmpty })
         // Several attempts fail the same way and log once.
         try await Task.sleep(for: .milliseconds(400))
-        #expect(fixture.logs.entries("The listener for paired Macs cannot start").count == 1)
+        #expect(failures().count == 1)
         #expect(await daemon.peerPort == nil)
 
         try FileManager.default.removeItem(atPath: keyFile)
-        _ = try await listeningPort(of: daemon)
-        #expect(fixture.logs.entries("Listening for paired Macs").count == 1)
+        let missing = PoolError.missingIdentity(
+            path: keyFile,
+            lists: [TrustList<TrustedClient>.file(in: fixture.directory).path(percentEncoded: false)],
+        )
+        #expect(await eventually { failures().count == 2 })
+        #expect(failures().last?.metadata["reason"] == missing.description)
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(failures().count == 2)
+        #expect(!FileManager.default.fileExists(atPath: keyFile))
+        #expect(await daemon.peerPort == nil)
         guard case .status = try await PoolClient.send(.status, to: fixture.directory) else {
             Issue.record("the local socket did not answer")
             return
+        }
+
+        #expect(FileManager.default.createFile(atPath: keyFile, contents: key, attributes: [.posixPermissions: 0o600]))
+        _ = try await listeningPort(of: daemon)
+        #expect(fixture.logs.entries("Listening for paired Macs").count == 1)
+        #expect(try Data(contentsOf: URL(filePath: keyFile)) == key)
+        await daemon.shutdown()
+    }
+
+    /// Starts no listener while the list of paired clients cannot be read, and admits nobody
+    /// while the list cannot be read later.
+    @Test func admitsNobodyWithAnUnreadableList() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let hostKey = try pair([KeyFingerprint(digest: client.keyDigest)], with: fixture.directory)
+        let list = TrustList<TrustedClient>.file(in: fixture.directory).path(percentEncoded: false)
+        let unusable = PoolError.unusableTrustList(path: list, reason: "its permissions 644 let other users in")
+        #expect(chmod(list, 0o644) == 0)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+
+        #expect(await eventually {
+            fixture.logs.entries("The listener for paired Macs cannot start").last?.metadata["reason"]
+                == unusable.description
+        })
+        #expect(await daemon.peerPort == nil)
+        #expect(chmod(list, 0o600) == 0)
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+
+        #expect(chmod(list, 0o644) == 0)
+        for _ in 0 ..< 2 {
+            #expect(await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+            } != nil)
+        }
+        let unreadable = fixture.logs.entries("The list of paired clients cannot be read, so no paired Mac can connect")
+        #expect(unreadable.map { $0.metadata["reason"] } == [unusable.description])
+        #expect(chmod(list, 0o600) == 0)
+        try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+        await daemon.shutdown()
+    }
+
+    /// Refuses a connection beyond the most that one paired Mac may hold, before the greeting.
+    /// Another Mac still connects, and the first Mac connects again once one of its connections
+    /// closes.
+    @Test func limitsConnectionsPerMac() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let other = try makeIdentity()
+        let hostKey = try pair([client, other].map { KeyFingerprint(digest: $0.keyDigest) }, with: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let connect = { (mac: MacIdentity) async -> String? in
+            await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: endpoint, as: mac, hostKey: hostKey)
+            }
+        }
+
+        var channels: [MessageChannel] = []
+        for _ in 0 ..< PoolDaemon.connectionsPerPeer {
+            try await channels.append(PoolClient.connect(to: endpoint, as: client, hostKey: hostKey))
+        }
+        #expect(await connect(client) == "the host refused the connection: this Mac already has 4 connections "
+            + "to the host, the most it may have")
+        #expect(fixture.logs.entries("A paired Mac has too many connections").count == 1)
+        #expect(await connect(other) == nil)
+
+        channels.removeFirst().close()
+        #expect(await eventually { await connect(client) == nil })
+        for channel in channels {
+            channel.close()
         }
         await daemon.shutdown()
     }
@@ -239,7 +324,7 @@ struct PeerConnectionTests {
     @Test func keepsTheLocalSocketWithABusyPort() async throws {
         let fixture = try PoolFixture()
         let holder = try await LoopbackListener()
-        let daemon = try await fixture.start(peers: TrustList().settings(port: holder.port))
+        let daemon = try await fixture.start(peers: loopbackSettings(port: holder.port))
 
         guard case .status = try await PoolClient.send(.status, to: fixture.directory) else {
             Issue.record("the local socket did not answer")
@@ -257,21 +342,71 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Closes a new connection while the most handshakes run. A handshake that fails or runs out
+    /// of time frees its place.
+    @Test func limitsHandshakesThatRunAtOnce() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            trustedKeys: { [clientKey] },
+            handshakeTimeout: .seconds(3),
+            handshakeLimit: 2,
+        )
+        defer { listener.close() }
+        let endpoint = try loopback(listener.port)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+
+        // The host closes a stranger's connection only after the failed handshake left its place.
+        for _ in 0 ..< 3 {
+            let stranger = try makeIdentity()
+            let strangerParameters = try PeerSecurity.parameters(identity: stranger, isServer: false) { _ in true }
+            let channel = try await MessageChannel.connect(to: endpoint, using: strangerParameters)
+            #expect(await (try? channel.receive(HostGreeting.self)) == nil)
+            channel.close()
+        }
+        // The client may see the end of its connection just before the host's handler for the
+        // failed handshake runs.
+        try await Task.sleep(for: .milliseconds(200))
+        let silent = try await [
+            MessageChannel.connect(to: endpoint, using: .tcp),
+            MessageChannel.connect(to: endpoint, using: .tcp),
+        ]
+        await #expect(throws: PoolError.self) {
+            try await MessageChannel.connect(to: endpoint, using: parameters)
+        }
+        for channel in silent {
+            #expect(await finishes(within: .seconds(10)) { _ = try? await channel.receive(HostGreeting.self) })
+            channel.close()
+        }
+        let channel = try await MessageChannel.connect(to: endpoint, using: parameters)
+        var connections = listener.connections.makeAsyncIterator()
+        let peer = try #require(await connections.next())
+        #expect(peer.fingerprint == clientKey)
+        peer.channel.close()
+        channel.close()
+    }
+
     /// Delivers the bytes and the end of the stream over TLS by closing the connection.
     @Test func finishesSendingOverTLS() async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
         let listener = try await PeerListener(
             identity: host,
-            settings: TrustList([KeyFingerprint(digest: client.keyDigest)]).settings(),
+            settings: loopbackSettings(),
+            trustedKeys: { [clientKey] },
         )
         defer { listener.close() }
         let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
         let channel = try await MessageChannel.connect(to: loopback(listener.port), using: parameters)
         var connections = listener.connections.makeAsyncIterator()
         let peer = try #require(await connections.next())
-        #expect(peer.fingerprint == KeyFingerprint(digest: client.keyDigest))
+        #expect(peer.fingerprint == clientKey)
 
         let clientStream = try channel.takeStream()
         let serverStream = try peer.channel.takeStream()
@@ -330,39 +465,42 @@ struct PeerConnectionTests {
     }
 }
 
-/// Keys that a test trusts.
+/// Creates settings that listen on 127.0.0.1 and retry quickly.
 ///
-/// The test may change them while a listener runs.
-private final class TrustList: Sendable {
-    /// The trusted keys.
-    private let keys: Mutex<Set<KeyFingerprint>>
+/// - Parameter port: The port, or 0 for a free one.
+/// - Returns: The settings.
+private func loopbackSettings(port: UInt16 = 0) -> PeerSettings {
+    PeerSettings(address: "127.0.0.1", port: port, retryInterval: .milliseconds(100))
+}
 
-    /// Creates a list.
-    ///
-    /// - Parameter keys: The keys that are trusted at first.
-    init(_ keys: Set<KeyFingerprint> = []) {
-        self.keys = Mutex(keys)
+/// Creates the host's key unless it exists, and replaces the host's list of paired clients.
+///
+/// The key comes first, because the pool creates no key while a list of paired Macs exists.
+///
+/// - Parameters:
+///   - keys: The fingerprints of the clients' keys.
+///   - directory: The host's data directory.
+///   - blocked: The keys that the host refuses.
+/// - Returns: The fingerprint of the host's key.
+/// - Throws: ``PoolError`` when the key or the list cannot be written.
+@discardableResult
+private func pair(
+    _ keys: [KeyFingerprint],
+    with directory: PoolDirectory,
+    blocked: Set<KeyFingerprint> = [],
+) throws(PoolError) -> KeyFingerprint {
+    let host = try MacIdentity.loadOrCreate(in: directory)
+    var clients = TrustList<TrustedClient>()
+    for key in keys {
+        clients.insert(TrustedClient(
+            key: key,
+            name: "client",
+            pairedAt: Date(),
+            isBlocked: blocked.contains(key),
+        ))
     }
-
-    /// Replaces the trusted keys.
-    ///
-    /// - Parameter keys: The keys that are trusted from now on.
-    func replace(with keys: Set<KeyFingerprint>) {
-        self.keys.withLock { $0 = keys }
-    }
-
-    /// Creates settings that listen on 127.0.0.1 with this list and retry quickly.
-    ///
-    /// - Parameter port: The port, or 0 for a free one.
-    /// - Returns: The settings.
-    func settings(port: UInt16 = 0) -> PeerSettings {
-        PeerSettings(
-            address: "127.0.0.1",
-            port: port,
-            trustedKeys: { self.keys.withLock { $0 } },
-            retryInterval: .milliseconds(100),
-        )
-    }
+    try clients.save(to: directory)
+    return KeyFingerprint(digest: host.keyDigest)
 }
 
 /// A listener on 127.0.0.1 that holds a port or stands in for a host.
