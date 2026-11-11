@@ -1,8 +1,8 @@
 # Commands
 
-This page lists the commands that prepare, boot, and clone VMs, and the scripts that reach a
-guest. The daemon's commands are in [Leases and the daemon](leases.md), and `image xcode` is in
-[Xcode images](xcode-image.md).
+This page lists the commands that prepare, boot, and clone VMs, the commands that list paired
+Macs, and the scripts that reach a guest. The daemon's commands are in
+[Leases and the daemon](leases.md), and `image xcode` is in [Xcode images](xcode-image.md).
 
 `macpool --help` lists the commands, and `macpool help COMMAND` shows a command's options.
 `macpool --version` prints the version. The examples keep images and bundles in the ignored
@@ -106,6 +106,36 @@ Scripts/shutdown.sh .cache/vms/job1
 
 `Scripts/shutdown.sh` returns before the guest stops. Wait until `run` exits, and then delete the
 clone with `rm -rf .cache/vms/job1`.
+
+## host list
+
+`macpool host list` prints the Macs that paired with this Mac as clients. It reads
+`trust/clients.json` in the data directory and needs no running daemon. Without paired clients it
+prints `no paired clients`.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory that holds the list. |
+| `--json` | off | Prints the records as one JSON array. |
+
+Each row shows when the client paired, whether this Mac blocks it, its priority ceiling, and its
+name with its short key, such as `runner (mzxw-6ytb-oi2d-k3lq)`. Names aren't unique, so compare
+the short key.
+
+The other Mac chose its name. The table shows each control, format, line separator, and paragraph
+separator character as an escape such as `\u{202E}`, and a backslash as two. It also puts the name
+between the invisible isolates U+2068 and U+2069. Right-to-left letters then don't reorder the
+columns. Scripts should read `--json`. It keeps the exact names and the full keys.
+
+## pool list
+
+`macpool pool list` prints the hosts that this Mac paired with. It reads `trust/hosts.json` in the
+data directory and needs no running daemon. Without paired hosts it prints `no paired hosts`. It
+takes the same `--data-dir` and `--json` options as `host list`.
+
+Each row shows when this Mac paired, the host's address and port from the pairing code, and the
+host's name with its short key. The host chose its name and its address. The table escapes and
+isolates both like a client's name in `host list`.
 
 ## Scripts
 

@@ -61,6 +61,11 @@ waits for a slot, prints the clone's lease identifier, bundle, and address, and 
 until Control-C, the end of a command after `--`, or `--detach` hands it to the daemon.
 `macpool release`, `macpool renew`, and `macpool list` act on leases by their identifiers.
 
+`macpool host list` prints the clients that paired with this Mac, and `macpool pool list` prints
+the hosts that this Mac paired with. Both read the lists in the data directory without the daemon.
+Another Mac chose the names and addresses in these lists. ``PeerText`` escapes them before a
+terminal shows them.
+
 The daemon boots each lease through the hidden `macpool supervise` subcommand, which runs a
 ``MachineSession`` in a process of its own. `run` uses the same session for a bundle that a person
 names.
@@ -94,6 +99,10 @@ lease one that is not ready.
 - ``ReleaseCommand``
 - ``RenewCommand``
 - ``ListCommand``
+- ``HostCommand``
+- ``HostListCommand``
+- ``PoolCommand``
+- ``PoolListCommand``
 - ``SuperviseCommand``
 
 ### Image commands
@@ -115,6 +124,7 @@ lease one that is not ready.
 - ``MachineSession``
 - ``PoolOptions``
 - ``LeaseOutput``
+- ``PeerText``
 - ``Executable``
 - ``StopFlag``
 - ``SignalWatch``
