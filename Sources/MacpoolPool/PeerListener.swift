@@ -77,9 +77,6 @@ final class PeerListener: Sendable {
 
         /// The protocol version that ALPN chose.
         let version: Int
-
-        /// The Mac's IP address without the port.
-        let address: String
     }
 
     /// The underlying listener.
@@ -211,11 +208,6 @@ final class PeerListener: Sendable {
     ) {
         let outcome = HandshakeOutcome(handshakes)
         let peer = "\(connection.endpoint)"
-        let address = if case let .hostPort(host, _) = connection.endpoint {
-            "\(host)"
-        } else {
-            peer
-        }
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
@@ -229,7 +221,7 @@ final class PeerListener: Sendable {
                     return
                 }
                 let channel = MessageChannel(connection: connection, peer: peer, start: false)
-                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version, address: address)
+                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version)
                 if case .terminated = continuation.yield(admitted) {
                     channel.close()
                 }

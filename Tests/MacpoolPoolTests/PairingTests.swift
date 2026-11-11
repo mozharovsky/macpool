@@ -357,7 +357,8 @@ struct PairingTests {
     }
 
     /// Lets a Mac that the host does not know send only one pairing request, refuses it after a
-    /// silent wait, and limits how many such Macs connect at once.
+    /// silent wait, and limits how many such Macs connect at once. The warning about the limit
+    /// reaches the warning level once a minute.
     @Test func limitsMacsThatPair() async throws {
         let host = try await PairingHost()
         _ = try await host.invite()
@@ -382,6 +383,35 @@ struct PairingTests {
             channel.close()
         }
         #expect(ContinuousClock.now - start >= .seconds(4))
+
+        // Filling the freed places again does not bring the warning back within a minute.
+        let warnings = { host.fixture.logs.entries("Too many Macs pair at once").count { $0.level == .warning } }
+        let refused = {
+            await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: host.endpoint, as: extra, hostKey: host.key)
+            } != nil
+        }
+        #expect(warnings() == 1)
+        silent = []
+        for _ in 0 ..< PoolDaemon.pairingConnectionLimit {
+            let identity = try makeIdentity()
+            #expect(await eventually {
+                guard let channel = try? await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+                else {
+                    return false
+                }
+                silent.append(channel)
+                return true
+            })
+        }
+        #expect(await refused())
+        #expect(warnings() == 1)
+        host.fixture.clock.advance(by: PeerLogRate.interval)
+        #expect(await refused())
+        #expect(warnings() == 2)
+        for channel in silent {
+            channel.close()
+        }
         await host.stop()
     }
 

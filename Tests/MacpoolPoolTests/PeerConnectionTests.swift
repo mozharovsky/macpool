@@ -289,7 +289,7 @@ struct PeerConnectionTests {
 
     /// Refuses a connection beyond the most that one paired Mac may hold, before the greeting.
     /// Another Mac still connects, and the first Mac connects again once one of its connections
-    /// closes.
+    /// closes. The warning about the limit reaches the warning level once a minute.
     @Test func limitsConnectionsPerMac() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
@@ -313,21 +313,28 @@ struct PeerConnectionTests {
         #expect(await connect(client) == "the host refused the connection: this Mac already has 4 connections "
             + "to the host, the most it may have")
         #expect(await connect(client) != nil)
-        let warning = "A paired Mac has too many connections"
-        #expect(fixture.logs.entries(warning).count == 1)
+        let warnings = {
+            fixture.logs.entries("A paired Mac has too many connections").count { $0.level == .warning }
+        }
+        #expect(warnings() == 1)
         #expect(await connect(other) == nil)
 
-        // The daemon warns again only after a connection of the Mac closed.
-        channels.removeFirst().close()
-        #expect(await eventually {
-            guard let channel = try? await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey) else {
-                return false
-            }
-            channels.append(channel)
-            return true
-        })
+        // Freeing a place and filling it again does not bring the warning back within a minute.
+        for _ in 0 ..< 3 {
+            channels.removeFirst().close()
+            #expect(await eventually {
+                guard let channel = try? await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey) else {
+                    return false
+                }
+                channels.append(channel)
+                return true
+            })
+            #expect(await connect(client) != nil)
+        }
+        #expect(warnings() == 1)
+        fixture.clock.advance(by: PeerLogRate.interval)
         #expect(await connect(client) != nil)
-        #expect(fixture.logs.entries(warning).count == 2)
+        #expect(warnings() == 2)
         for channel in channels {
             channel.close()
         }
@@ -463,8 +470,8 @@ struct PeerConnectionTests {
         channel.close()
     }
 
-    /// Writes one info line per minute about the connections of one paired Mac from one address,
-    /// and debug lines in between.
+    /// Writes one info line per minute about the connections of one paired Mac, and debug lines
+    /// in between.
     @Test func limitsConnectionLines() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
@@ -476,10 +483,37 @@ struct PeerConnectionTests {
             try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
         }
         #expect(await eventually { levels() == [.info, .debug] })
-        fixture.clock.advance(by: PoolDaemon.connectionLogInterval)
+        fixture.clock.advance(by: PeerLogRate.interval)
         try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
         #expect(await eventually { levels() == [.info, .debug, .info] })
         await daemon.shutdown()
+    }
+
+    /// Writes a line at its full level once a minute and at the debug level in between. Each kind
+    /// of line and each key has its own time, and the rate forgets times older than a minute.
+    @Test func ratesPeerLogLines() throws {
+        let key = try #require(KeyFingerprint(String(repeating: "0123456789abcdef", count: 4)))
+        let other = try #require(KeyFingerprint(String(repeating: "fedcba9876543210", count: 4)))
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let interval = PeerLogRate.interval
+        var rate = PeerLogRate()
+        #expect(rate.level(of: .connected(key), full: .info, at: start) == .info)
+        #expect(rate.level(of: .connected(key), full: .info, at: start + interval - 1) == .debug)
+        #expect(rate.level(of: .connected(other), full: .info, at: start + interval - 1) == .info)
+        #expect(rate.level(of: .tooManyConnections(key), full: .warning, at: start + interval - 1) == .warning)
+        #expect(rate.level(of: .connected(key), full: .info, at: start + interval) == .info)
+        #expect(rate.times.count == 3)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start + 3 * interval) == .warning)
+        #expect(rate.times.keys.elementsEqual([.tooManyPairings]))
+    }
+
+    /// Writes a line at its full level again after the clock went back.
+    @Test func ratesPeerLogLinesAfterTheClockWentBack() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        var rate = PeerLogRate()
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start) == .warning)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start - 3600) == .warning)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start - 3599) == .debug)
     }
 
     /// Cancels the timer of a handshake when the outcome settles, in either order, and frees the

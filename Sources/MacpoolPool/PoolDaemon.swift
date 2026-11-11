@@ -253,26 +253,8 @@ public actor PoolDaemon {
     /// The connections of Macs that pair.
     private var pairingConnections = 0
 
-    /// Whether the log already has a warning that ``pairingConnectionLimit`` Macs pair.
-    ///
-    /// The daemon logs the limit once until a place frees. Macs that connect again and again
-    /// therefore cannot fill the log.
-    private var hasLoggedPairingLimit = false
-
-    /// The keys of paired Macs that the log already warned about for ``connectionsPerPeer``.
-    ///
-    /// A key leaves the set when one of its connections closes.
-    private var keysAtConnectionLimit: Set<KeyFingerprint> = []
-
-    /// The shortest time between two info lines about connections of one paired Mac from one
-    /// address, in seconds.
-    ///
-    /// The LaunchAgent runs the daemon at the info level, and nothing rotates its log. If a Mac
-    /// reconnects in a loop, the daemon logs the connections in between at the debug level.
-    static let connectionLogInterval: TimeInterval = 60
-
-    /// When the daemon last logged a connection of each paired Mac and address at the info level.
-    private var connectionLogTimes: [ConnectionLogKey: Date] = [:]
+    /// The levels of the log lines that Macs on the network can repeat.
+    private var peerLogRate = PeerLogRate()
 
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
@@ -592,12 +574,11 @@ public actor PoolDaemon {
     private func acceptPairedMac(_ peer: PeerListener.Peer) {
         let owner = LeaseOwner.client(peer.fingerprint)
         guard clients.values.count(where: { $0.owner == owner }) < Self.connectionsPerPeer else {
-            if keysAtConnectionLimit.insert(peer.fingerprint).inserted {
-                configuration.logger.warning("A paired Mac has too many connections", metadata: [
-                    "key": "\(peer.fingerprint)",
-                    "address": "\(peer.channel.peer)",
-                ])
-            }
+            let level = peerLogLevel(of: .tooManyConnections(peer.fingerprint), full: .warning)
+            configuration.logger.log(level: level, "A paired Mac has too many connections", metadata: [
+                "key": "\(peer.fingerprint)",
+                "address": "\(peer.channel.peer)",
+            ])
             try? peer.channel.send(PoolReply.failure(
                 "this Mac already has \(Self.connectionsPerPeer) connections to the host, the most it may have",
             ))
@@ -605,13 +586,7 @@ public actor PoolDaemon {
             return
         }
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
-        let now = configuration.now()
-        connectionLogTimes = connectionLogTimes.filter { now.timeIntervalSince($0.value) < Self.connectionLogInterval }
-        let logKey = ConnectionLogKey(key: peer.fingerprint, address: peer.address)
-        let level: Logger.Level = connectionLogTimes[logKey] == nil ? .info : .debug
-        if level == .info {
-            connectionLogTimes[logKey] = now
-        }
+        let level = peerLogLevel(of: .connected(peer.fingerprint), full: .info)
         configuration.logger.log(level: level, "A paired Mac connected", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
@@ -627,13 +602,11 @@ public actor PoolDaemon {
     /// - Parameter peer: A connection whose handshake proved a key that the host does not know.
     private func acceptPairingMac(_ peer: PeerListener.Peer) {
         guard pairingConnections < Self.pairingConnectionLimit else {
-            if !hasLoggedPairingLimit {
-                hasLoggedPairingLimit = true
-                configuration.logger.warning("Too many Macs pair at once", metadata: [
-                    "key": "\(peer.fingerprint)",
-                    "address": "\(peer.channel.peer)",
-                ])
-            }
+            let level = peerLogLevel(of: .tooManyPairings, full: .warning)
+            configuration.logger.log(level: level, "Too many Macs pair at once", metadata: [
+                "key": "\(peer.fingerprint)",
+                "address": "\(peer.channel.peer)",
+            ])
             try? peer.channel.send(PoolReply.failure("other Macs are pairing with the host, so try again shortly"))
             Task { await peer.channel.finish() }
             return
@@ -647,6 +620,16 @@ public actor PoolDaemon {
             "address": "\(peer.channel.peer)",
         ])
         Task { await self.servePairing(peer) }
+    }
+
+    /// Returns the level of a log line that Macs on the network can repeat.
+    ///
+    /// - Parameters:
+    ///   - line: The kind of line.
+    ///   - full: The level of the line when it is due.
+    /// - Returns: `full` at most once per ``PeerLogRate/interval`` for the line, or `.debug`.
+    private func peerLogLevel(of line: PeerLogLine, full: Logger.Level) -> Logger.Level {
+        peerLogRate.level(of: line, full: full, at: configuration.now())
     }
 
     /// Reads the one request of a Mac that pairs, replies to it, and closes the connection.
@@ -672,7 +655,6 @@ public actor PoolDaemon {
         }
         await peer.channel.finish()
         pairingConnections -= 1
-        hasLoggedPairingLimit = false
     }
 
     /// Checks a pairing request against the open invitation and records a new paired client.
@@ -844,9 +826,6 @@ public actor PoolDaemon {
         channel.close()
         if let closed = invitation.close(for: client) {
             invitationEnded(closed)
-        }
-        if case let .client(key) = owner {
-            keysAtConnectionLimit.remove(key)
         }
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
@@ -1679,15 +1658,6 @@ public actor PoolDaemon {
             }
         }
     }
-}
-
-/// A paired Mac's key and address, for the rate of connection lines in the log.
-private struct ConnectionLogKey: Hashable {
-    /// The fingerprint of the Mac's key.
-    let key: KeyFingerprint
-
-    /// The Mac's IP address without the port.
-    let address: String
 }
 
 /// Reads the list of paired clients during the handshakes of the listener for paired Macs.
