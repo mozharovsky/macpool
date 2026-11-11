@@ -205,17 +205,16 @@ struct XcodeImageCommand: AsyncParsableCommand {
             builds = value
         case let .failure(error):
             stop.set()
-            let ending = await running.value
-            // A cancelled step means only that the VM stopped. The session's ending says why.
-            guard error == .library(.guestCommandCancelled) else {
-                throw error
-            }
-            switch ending {
-            case let .failure(stopError):
-                throw stopError
+            // A VM that stopped by itself explains a failed step better than the step's ssh does.
+            // The session ends with `.stopped` only after this stop request or a signal.
+            switch await running.value {
+            case let .failure(.stopped(event)):
+                throw .stopped(event)
             case .success(.guestStopped):
                 throw .stopped(.guestStopped)
-            case .success(.stopped):
+            case let .failure(stopError) where error == .library(.guestCommandCancelled):
+                throw stopError
+            case .failure, .success(.stopped):
                 throw error
             }
         }
