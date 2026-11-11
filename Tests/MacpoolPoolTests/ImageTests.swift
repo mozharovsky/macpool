@@ -37,6 +37,47 @@ struct ImageTests {
         await daemon.shutdown()
     }
 
+    /// Refuses a bundle in the images directory without a record and leases one elsewhere.
+    @Test func refusesImageWithoutRecord() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let image = try pool.makeImage(named: "xcode")
+        let imagePath = image.root.path(percentEncoded: false)
+
+        let missing = PoolError
+            .invalidRequest(reason: "the image \(imagePath) has no image.json, so it cannot be leased")
+        await #expect(throws: PoolError.daemonRefused(message: missing.description)) {
+            try await PoolClient.send(.lease(LeaseTerms(source: imagePath, timeToLive: 60)), to: pool.directory)
+        }
+        let granted = try await pool.readyLease(pool.terms())
+        #expect(granted.lease.source == pool.source)
+        await daemon.shutdown()
+    }
+
+    /// Names an image by its offered name, without a path, when it refuses a paired client.
+    @Test func hidesImagePathsFromPairedClients() async throws {
+        let pool = try PoolFixture()
+        let image = try pool.makeImage(named: "xcode")
+        let daemon = try await pool.start(offeredSources: [
+            "base": pool.source,
+            "xcode": image.root.path(percentEncoded: false),
+        ])
+        let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        let source = VMBundle(root: URL(filePath: pool.source))
+        let refuse = { (name: String, reason: String) async throws in
+            try remote.send(PoolRequest.lease(LeaseTerms(source: name, timeToLive: 60)))
+            let reply = try await next(remote)
+            #expect(reply == .failure(PoolError.invalidRequest(reason: "the image \(name) \(reason)").description))
+        }
+
+        try await refuse("xcode", "has no image.json, so it cannot be leased")
+        try source.writeImageRecord(ImageRecord(isReady: false))
+        try await refuse("base", "did not pass its checks, so it cannot be leased")
+        try Data(#"{"version": 2, "ready": true}"#.utf8).write(to: source.imageFile)
+        try await refuse("base", "has an unreadable image.json, so it cannot be leased")
+        await daemon.shutdown()
+    }
+
     /// Lists every image directory by name, with the reason when its record cannot be read.
     @Test func listsImages() throws {
         let pool = try PoolFixture()
