@@ -193,16 +193,27 @@ struct XcodeImageSteps {
 
     /// Asks the guest to shut down a second after the command returns.
     ///
+    /// If the task is cancelled during the command, the method returns without an error. The build
+    /// cancels its steps only after the VM stops, and it then judges the build by how the VM
+    /// stopped.
+    ///
     /// - Throws: ``CommandError/imageStep(step:reason:)`` when the command fails, or
     ///   ``CommandError/library(_:)`` when it cannot run or outlasts its time limit.
     func shutDown() async throws(CommandError) {
-        // The delay lets ssh report the status before the guest drops the connection.
-        try await step(
-            "shutting down the guest",
-            "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
-            asRoot: true,
-            timeLimit: .seconds(60),
-        )
+        do {
+            // The delay lets ssh report the status before the guest drops the connection.
+            try await step(
+                "shutting down the guest",
+                "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+                asRoot: true,
+                timeLimit: .seconds(60),
+            )
+        } catch {
+            // A guest that stopped before ssh returned has done what the command asked.
+            guard Task.isCancelled else {
+                throw error
+            }
+        }
     }
 
     /// Runs one command and requires that it succeed.

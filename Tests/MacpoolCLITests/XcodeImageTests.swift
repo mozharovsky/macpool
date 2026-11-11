@@ -473,7 +473,8 @@ struct XcodeImageTests {
         #expect((stopped?.count ?? 0) < 4 << 20)
     }
 
-    /// Names the step that a stopped VM ended, and asks the guest to shut down as root.
+    /// Names the step that a stopped VM ended, and accepts a shutdown that stops the VM before its
+    /// command returns.
     @Test func namesStepThatTheVMStopped() async throws {
         let stopped = XcodeImageSteps(guest: ScriptedGuest(replies: ["xip --expand": .cancelled]), deviceName: nil)
         await #expect(throws: CommandError.imageStep(step: "expanding Xcode", reason: "the VM stopped")) {
@@ -495,6 +496,23 @@ struct XcodeImageTests {
             timeLimit: .seconds(60),
         )
         #expect(await guest.calls == [shutdown])
+
+        // The build cancels the steps once the VM stops, and a guest that shut down that early
+        // still did what the step asked.
+        let early = XcodeImageSteps(guest: ScriptedGuest(replies: ["shutdown -h": .cancelled]), deviceName: nil)
+        let cancelled = await Task { () async -> CommandError? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do throws(CommandError) {
+                try await early.shutDown()
+                return nil
+            } catch {
+                return error
+            }
+        }.value
+        #expect(cancelled == nil)
+        await #expect(throws: CommandError.imageStep(step: "shutting down the guest", reason: "the VM stopped")) {
+            try await early.shutDown()
+        }
     }
 
     /// Stops a copy after a failed write instead of letting `copyfile` write again.
