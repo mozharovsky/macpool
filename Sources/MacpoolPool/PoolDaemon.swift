@@ -266,6 +266,13 @@ public actor PoolDaemon {
     /// The levels of the log lines that Macs on the network can repeat.
     private var peerLogRate = PeerLogRate()
 
+    /// The keys of revoked Macs whose block the daemon could not save.
+    ///
+    /// The daemon refuses these keys like blocked records until it restarts. It removes a key
+    /// when a later revocation saves the block. It also removes the key when a person deletes the
+    /// Mac's record and the Mac pairs again with a new code.
+    private(set) var unsavedBlocks: Set<KeyFingerprint> = []
+
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
 
@@ -576,7 +583,7 @@ public actor PoolDaemon {
             return
         }
         if let record = clients[peer.fingerprint] {
-            if record.isBlocked {
+            if isBlocked(record) {
                 peer.channel.close()
             } else {
                 acceptPairedMac(peer)
@@ -744,7 +751,7 @@ public actor PoolDaemon {
         do throws(PoolError) {
             var clients = try TrustList<TrustedClient>.load(from: configuration.directory)
             if let known = clients[key] {
-                guard !known.isBlocked else {
+                guard !isBlocked(known) else {
                     configuration.logger.warning("A blocked Mac used a pairing code", metadata: ["key": "\(key)"])
                     reply(.failure("a blocked Mac used the code and ended the invitation"), to: inviter)
                     return .failure("the host blocked this Mac")
@@ -755,6 +762,8 @@ public actor PoolDaemon {
             }
             clients.insert(client)
             try clients.save(to: configuration.directory)
+            // A new code from the host's user ends a block that the daemon kept only in memory.
+            unsavedBlocks.remove(key)
         } catch {
             configuration.logger.error("The host cannot record a paired Mac", metadata: [
                 "key": "\(key)",
@@ -978,23 +987,60 @@ public actor PoolDaemon {
 
     /// Blocks a paired Mac, closes its connections, and ends its leases that need a client.
     ///
-    /// If `endLeases` is set, the daemon also ends the Mac's detached leases. The daemon saves the
-    /// block before it closes the connections. If the list cannot be read or saved, the Mac keeps
-    /// its connections and leases.
+    /// If `endLeases` is set, the daemon also ends the Mac's detached leases. If the first save of
+    /// the block fails, the daemon saves it once more after it closed the connections. If that
+    /// save also fails, the daemon keeps the block in ``unsavedBlocks`` and reports the failure.
+    ///
+    /// If the list cannot be read or has no record of the key, the daemon looks for the key among
+    /// the connected Macs and the owners of leases. It closes that Mac's connections and ends its
+    /// leases. When the list cannot be read, the daemon also keeps the block in ``unsavedBlocks``.
+    /// It reports either case as a failure.
     ///
     /// - Parameters:
     ///   - text: The Mac's short key or full fingerprint.
     ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
     /// - Returns: The reply to the local user.
-    /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key or when a
-    ///   short key names more than one Mac. The errors of ``TrustList/load(from:)`` and
-    ///   ``TrustList/save(to:)`` propagate.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key, when a short
+    ///   key names more than one Mac, or when the daemon closed the connections without saving a
+    ///   block. The errors of ``TrustList/load(from:)`` propagate when no connected Mac or owner of
+    ///   a lease has the key.
     private func revoke(_ text: String, endLeases: Bool) throws(PoolError) -> PoolReply {
-        var list = try TrustList<TrustedClient>.load(from: configuration.directory)
-        let record = try Self.onlyMatch(of: text, in: list.records.filter { $0.key.isNamed(by: text) })
-        list.block(record.key)
-        try list.save(to: configuration.directory)
+        let list: TrustList<TrustedClient>
+        do throws(PoolError) {
+            list = try TrustList<TrustedClient>.load(from: configuration.directory)
+        } catch {
+            guard let key = activeKey(namedBy: text) else {
+                throw error
+            }
+            let ended = cutOff(key, endLeases: endLeases, reason: Self.revocationReason)
+            unsavedBlocks.insert(key)
+            logUnblocked(key, ended, reason: "\(error)")
+            throw .invalidRequest(reason: "the host closed the Mac's connections, but it cannot read its list of "
+                + "paired Macs to block the Mac: \(error). \(Self.revokeAgain)")
+        }
+        let matches = list.records.filter { $0.key.isNamed(by: text) }
+        if matches.isEmpty, let key = activeKey(namedBy: text) {
+            let ended = cutOff(key, endLeases: endLeases, reason: Self.revocationReason)
+            logUnblocked(key, ended, reason: "the list has no record of the key")
+            throw .invalidRequest(reason: "the host closed the Mac's connections, but its list of paired Macs has "
+                + "no record of the Mac to block. The Mac can pair again with a new code")
+        }
+        let record = try Self.onlyMatch(of: text, in: matches)
+        var blocked = list
+        blocked.block(record.key)
+        var saveError = save(blocked)
         let ended = cutOff(record.key, endLeases: endLeases, reason: Self.revocationReason)
+        if saveError != nil {
+            // A failure that does not repeat then still leaves the Mac blocked.
+            saveError = save(blocked)
+        }
+        if let saveError {
+            unsavedBlocks.insert(record.key)
+            logUnblocked(record.key, ended, reason: "\(saveError)")
+            throw .invalidRequest(reason: "the host closed the Mac's connections, but it cannot record that the Mac "
+                + "is blocked: \(saveError). \(Self.revokeAgain)")
+        }
+        unsavedBlocks.remove(record.key)
         configuration.logger.notice("Revoked a paired Mac", metadata: [
             "key": "\(record.key)",
             "name": "\(record.name)",
@@ -1010,6 +1056,62 @@ public actor PoolDaemon {
 
     /// The reason of the leases that a revocation ends.
     private static let revocationReason = "the host revoked this Mac"
+
+    /// The advice in a revocation's failure when the daemon could not save the block.
+    private static let revokeAgain = "The Mac stays blocked until the daemon restarts. Revoke it again once the list "
+        + "can be saved"
+
+    /// Reports whether the daemon refuses a paired client.
+    ///
+    /// - Parameter record: The client's record in the list of paired clients.
+    /// - Returns: `true` when the record is blocked or the daemon keeps an unsaved block of its key.
+    private func isBlocked(_ record: TrustedClient) -> Bool {
+        record.isBlocked || unsavedBlocks.contains(record.key)
+    }
+
+    /// Finds the one connected Mac or owner of a lease with a key that a person's text names.
+    ///
+    /// - Parameter text: The short key or full fingerprint that the person gave.
+    /// - Returns: The key, or `nil` when no key or more than one key matches.
+    private func activeKey(namedBy text: String) -> KeyFingerprint? {
+        let owners = Set(clients.values.map(\.owner) + ledger.leases.values.map(\.owner))
+        let keys = owners.compactMap { owner in
+            if case let .client(key) = owner, key.isNamed(by: text) {
+                key
+            } else {
+                nil
+            }
+        }
+        return try? Self.onlyMatch(of: text, in: keys)
+    }
+
+    /// Saves the list of paired clients.
+    ///
+    /// - Parameter list: The list to save.
+    /// - Returns: The error of a failed save, or `nil` after the list was saved.
+    private func save(_ list: TrustList<TrustedClient>) -> PoolError? {
+        do throws(PoolError) {
+            try list.save(to: configuration.directory)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// Logs a revocation that closed a Mac's connections but could not block the Mac.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the Mac's key.
+    ///   - ended: The connections and leases that the revocation ended.
+    ///   - reason: Why the daemon could not block the Mac.
+    private func logUnblocked(_ key: KeyFingerprint, _ ended: CutOff, reason: String) {
+        configuration.logger.error("The host closed a revoked Mac's connections but cannot block it", metadata: [
+            "key": "\(key)",
+            "connections": "\(ended.connections)",
+            "leases": "\(ended.leases)",
+            "reason": "\(reason)",
+        ])
+    }
 
     /// The connections and leases that ``cutOff(_:endLeases:reason:)`` ended.
     private struct CutOff {
@@ -1241,7 +1343,7 @@ public actor PoolDaemon {
             )
             throw .invalidRequest(reason: "the host cannot read its list of paired Macs")
         }
-        guard let record = clients[key], !record.isBlocked else {
+        guard let record = clients[key], !isBlocked(record) else {
             return nil
         }
         return record

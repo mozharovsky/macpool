@@ -607,6 +607,32 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Refuses new connections of a revoked Mac while the daemon keeps a block that it could not
+    /// save.
+    @Test func refusesAMacWithAnUnsavedBlock() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let open = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        try RevocationTests.setImmutable(true, listIn: fixture.directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: fixture.directory) }
+
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: clientKey.shortKey), to: fixture.directory)
+        }
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
+        try RevocationTests.setImmutable(false, listIn: fixture.directory)
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        } != nil)
+        #expect(try TrustList<TrustedClient>.load(from: fixture.directory)[clientKey]?.isBlocked == false)
+        await daemon.shutdown()
+    }
+
     /// Admits nobody while the list of paired clients or its directory has an access control
     /// list, and leaves the list in place.
     @Test func admitsNobodyWhileTheListHasAnAccessControlList() async throws {
