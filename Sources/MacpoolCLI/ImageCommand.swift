@@ -137,8 +137,8 @@ struct XcodeImageCommand: AsyncParsableCommand {
     ///   - device: The simulator to boot once, or `nil` for the first available iPhone.
     ///   - interrupted: The flag that a signal sets. Once it is set, the VM stops.
     /// - Returns: The builds of Xcode and of the simulator runtime.
-    /// - Throws: ``CommandError`` when the VM does not become ready, a step fails, the guest does
-    ///   not shut down, or a signal stops the VM.
+    /// - Throws: ``CommandError`` when the VM does not become ready, a step fails, the VM stops
+    ///   during a step, the guest does not shut down, or a signal stops the VM.
     private func buildInGuest(
         _ building: VMBundle,
         inputs: URL,
@@ -175,28 +175,38 @@ struct XcodeImageCommand: AsyncParsableCommand {
             }
             throw .invalidValue("the VM stopped before it was ready")
         }
-        let builds: XcodeImageBuilds
-        do throws(CommandError) {
-            let guest = try library { () throws(MacpoolError) in
-                try GuestSession(bundle: building, address: address)
+        let steps = Task { () async -> Result<XcodeImageBuilds, CommandError> in
+            do throws(CommandError) {
+                return try await .success(runSteps(building, address: address, device: device))
+            } catch {
+                return .failure(error)
             }
-            builds = try await XcodeImageSteps(guest: guest, deviceName: device).run()
-            Report.line("step: shutting down the guest")
-            // The delay lets ssh report the status before the guest drops the connection.
-            let shutdown = try await library { () async throws(MacpoolError) in
-                try await guest.runStep(
-                    "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
-                    asRoot: true,
-                    timeLimit: .seconds(60),
-                )
-            }
-            guard shutdown.succeeded else {
-                throw .imageStep(step: "shutting down the guest", reason: shutdown.failureSummary)
-            }
-        } catch {
-            stop.set()
+        }
+        // The VM stops within a second of a signal. Without this cancel, the running step's ssh
+        // would notice the stop only through its keepalive.
+        Task {
             _ = await running.value
-            throw error
+            steps.cancel()
+        }
+        let builds: XcodeImageBuilds
+        switch await steps.value {
+        case let .success(value):
+            builds = value
+        case let .failure(error):
+            stop.set()
+            let ending = await running.value
+            // A cancelled step means only that the VM stopped. The session's ending says why.
+            guard error == .library(.guestCommandCancelled) else {
+                throw error
+            }
+            switch ending {
+            case let .failure(stopError):
+                throw stopError
+            case .success(.guestStopped):
+                throw .stopped(.guestStopped)
+            case .success(.stopped):
+                throw error
+            }
         }
         let watchdog = Task {
             try? await Task.sleep(for: Self.shutdownTimeout)
@@ -212,6 +222,35 @@ struct XcodeImageCommand: AsyncParsableCommand {
         case let .failure(error):
             throw error
         }
+    }
+
+    /// Runs the build's steps in the guest and asks the guest to shut down.
+    ///
+    /// - Parameters:
+    ///   - building: The clone of the base.
+    ///   - address: The guest's address.
+    ///   - device: The simulator to boot once, or `nil` for the first available iPhone.
+    /// - Returns: The builds of Xcode and of the simulator runtime.
+    /// - Throws: ``CommandError`` when a step fails or the shutdown command fails.
+    private func runSteps(_ building: VMBundle, address: String, device: String?) async throws(CommandError)
+        -> XcodeImageBuilds {
+        let guest = try library { () throws(MacpoolError) in
+            try GuestSession(bundle: building, address: address)
+        }
+        let builds = try await XcodeImageSteps(guest: guest, deviceName: device).run()
+        Report.line("step: shutting down the guest")
+        // The delay lets ssh report the status before the guest drops the connection.
+        let shutdown = try await library { () async throws(MacpoolError) in
+            try await guest.runStep(
+                "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+                asRoot: true,
+                timeLimit: .seconds(60),
+            )
+        }
+        guard shutdown.succeeded else {
+            throw .imageStep(step: "shutting down the guest", reason: shutdown.failureSummary)
+        }
+        return builds
     }
 
     /// The longest wait for the guest to stop after the shutdown command.

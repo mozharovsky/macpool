@@ -331,6 +331,33 @@ struct XcodeImageTests {
         #expect(left.isEmpty)
     }
 
+    /// Stops a data copy once a signal arrives, and copies the whole file without one.
+    @Test func stopsCopyOnSignal() throws {
+        let folder = try ImageFolder()
+        let directory = folder.base.root.deletingLastPathComponent()
+        let source = directory.appending(path: "large.xip")
+        try Data(repeating: 7, count: 4 << 20).write(to: source)
+        // Without COPYFILE_CLONE the copy writes data, as it does across volumes.
+        let flags = copyfile_flags_t(COPYFILE_DATA)
+        let whole = directory.appending(path: "whole.xip")
+        try ImageWorkspace.copy(source, to: whole, flags: flags, interrupted: StopFlag())
+        #expect(FileManager.default.contents(atPath: whole.path(percentEncoded: false))?.count == 4 << 20)
+
+        let interrupted = StopFlag()
+        interrupted.set()
+        #expect(throws: CommandError.interrupted) {
+            try ImageWorkspace.copy(
+                source,
+                to: directory.appending(path: "stopped.xip"),
+                flags: flags,
+                interrupted: interrupted,
+            )
+        }
+        let stopped = FileManager.default
+            .contents(atPath: directory.appending(path: "stopped.xip").path(percentEncoded: false))
+        #expect((stopped?.count ?? 0) < 4 << 20)
+    }
+
     /// Publishes a ready image with the builds of the guest and the base.
     @Test func buildsImage() async throws {
         let folder = try ImageFolder()

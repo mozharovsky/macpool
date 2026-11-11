@@ -211,13 +211,14 @@ struct ImageWorkspace {
     ///
     /// The method copies the target of a symbolic link, because the guest cannot follow a link out
     /// of the shared directory. On the same APFS volume the files are clones and take no space. On
-    /// another volume they are copies, and a signal takes effect only after the current copy.
+    /// another volume they are copies in the data directory until the build ends.
     ///
     /// - Parameters:
     ///   - xcode: The Xcode archive.
     ///   - runtime: The simulator runtime disk image.
-    ///   - interrupted: The flag that a signal sets. The method checks it before each copy.
-    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before a copy.
+    ///   - interrupted: The flag that a signal sets. Once it is set, no copy starts and a running
+    ///     copy stops.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before or during a copy.
     ///   ``CommandError/library(_:)`` when the directory or a file cannot be created.
     func stageInputs(xcode: URL, runtime: URL, interrupted: StopFlag) throws(CommandError) {
         do {
@@ -235,17 +236,71 @@ struct ImageWorkspace {
         }
         for (link, name) in [(xcode, "Xcode.xip"), (runtime, "Runtime.dmg")] {
             try Self.check(interrupted)
-            let source = link.resolvingSymlinksInPath()
-            let destination = inputs.appending(path: name).path(percentEncoded: false)
             // COPYFILE_CLONE clones when the volume allows it and copies otherwise.
-            guard copyfile(source.path(percentEncoded: false), destination, nil, copyfile_flags_t(COPYFILE_CLONE)) == 0
-            else {
-                throw .library(.fileSystem(
-                    operation: "copying \(source.path(percentEncoded: false)) to",
-                    path: destination,
-                    reason: String(cString: strerror(errno)),
-                ))
+            try Self.copy(
+                link.resolvingSymlinksInPath(),
+                to: inputs.appending(path: name),
+                flags: copyfile_flags_t(COPYFILE_CLONE),
+                interrupted: interrupted,
+            )
+        }
+    }
+
+    /// Copies a file with `copyfile` and stops the copy once a signal arrives.
+    ///
+    /// A clone ends at once and calls no callback. A data copy calls the status callback after
+    /// each write, and the callback stops the copy once `interrupted` is set. If the copy stops,
+    /// its partial file stays at `destination`.
+    ///
+    /// - Parameters:
+    ///   - source: The file to copy.
+    ///   - destination: The new file. It must not exist.
+    ///   - flags: The `copyfile` flags.
+    ///   - interrupted: The flag that a signal sets.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set during the copy.
+    ///   ``CommandError/library(_:)`` when the copy fails.
+    static func copy(
+        _ source: URL,
+        to destination: URL,
+        flags: copyfile_flags_t,
+        interrupted: StopFlag,
+    ) throws(CommandError) {
+        let sourcePath = source.path(percentEncoded: false)
+        let destinationPath = destination.path(percentEncoded: false)
+        let failure = { (reason: String) -> CommandError in
+            .library(.fileSystem(operation: "copying \(sourcePath) to", path: destinationPath, reason: reason))
+        }
+        guard let state: copyfile_state_t = copyfile_state_alloc() else {
+            throw failure("no copy state")
+        }
+        defer { copyfile_state_free(state) }
+        let callback: copyfile_callback_t = { _, _, _, _, _, context in
+            guard let context else {
+                return COPYFILE_CONTINUE
             }
+            let interrupted = Unmanaged<StopFlag>.fromOpaque(context).takeUnretainedValue()
+            return interrupted.isSet ? COPYFILE_QUIT : COPYFILE_CONTINUE
+        }
+        let status = withExtendedLifetime(interrupted) {
+            copyfile_state_set(
+                state,
+                UInt32(COPYFILE_STATE_STATUS_CB),
+                unsafeBitCast(callback, to: UnsafeRawPointer.self),
+            )
+            copyfile_state_set(
+                state,
+                UInt32(COPYFILE_STATE_STATUS_CTX),
+                UnsafeRawPointer(Unmanaged.passUnretained(interrupted).toOpaque()),
+            )
+            return copyfile(sourcePath, destinationPath, state, flags)
+        }
+        let code = errno
+        guard status == 0 else {
+            // COPYFILE_QUIT leaves errno unchanged at some stages. The flag decides instead.
+            if interrupted.isSet {
+                throw .interrupted
+            }
+            throw failure(String(cString: strerror(code)))
         }
     }
 
