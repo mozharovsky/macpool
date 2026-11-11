@@ -52,7 +52,7 @@ $macpool fetch --download
 The line `measure ipsw_path=` names the file. Its name is the macOS build, as in
 `.cache/ipsw/BUILD.ipsw`. If the download breaks off, run the command again to continue it.
 
-Install macOS into a new VM. Replace `BUILD` with the name from `measure ipsw_path=`.
+Install macOS into a new VM. Replace `BUILD` with the value of `measure restore_build=`.
 
 ```sh
 $macpool create --ipsw .cache/ipsw/BUILD.ipsw --bundle .cache/vms/base
@@ -227,10 +227,10 @@ busy, it prints `queued position=N` and waits. A higher `--priority` gets a slot
 default is 0. Requests with equal priority wait in the order they arrived. Once the clone is ready,
 `lease` prints `lease_id=`, `bundle=`, `address=`, `expires_at=`, and `ready`.
 
-The daemon refuses a source that is running, has never booted, or lies on another volume. It also
-refuses a `--share` directory that does not exist. `lease` takes `--share` and `--share-read-only`
-as `run` does. `--boot-timeout` limits the wait for each boot of the clone and defaults to 900
-seconds.
+The daemon refuses a source that is running, has never booted, lies on another volume, or did not
+finish replacing its credentials. It also refuses a `--share` directory that does not exist.
+`lease` takes `--share` and `--share-read-only` as `run` does. `--boot-timeout` limits the wait for
+each boot of the clone and defaults to 900 seconds.
 
 Without `--detach`, the lease lasts as long as `lease` runs, and Control-C releases it. A command
 after `--` runs with `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS` in its
@@ -257,8 +257,9 @@ $macpool daemon uninstall
 `--restart` decides when the daemon boots a leased VM again. With the default `on-failure`, the
 daemon boots the same clone again if the VM stops unexpectedly. With `always`, it also does so
 after the guest shuts itself down. With `never`, the lease ends at the first stop. A lease gets at
-most three such boots, after 5, 10, and 20 seconds, and the next stop ends it. `lease` prints
-`restarting reason=` and later `ready` again.
+most three such boots, after 5, 10, and 20 seconds, and the next stop ends it. If the clone's
+credential replacement stopped halfway, the daemon boots a fresh clone instead, and the old clone's
+data is lost. `lease` prints `restarting reason=` and later `ready` again.
 
 ### Output
 
@@ -322,10 +323,10 @@ The default is 128 GB. Xcode with an iOS simulator runtime does not fit on a 64 
 
 You will also meet these limits.
 
-- A clone accepts its source's password and host key for about 11 to 69 seconds after SSH
-  answers, until its first `run` prints `ready`. Anyone with the source's password, in another
-  guest or on the host, can log in during that time and leave access behind that `ready` does not
-  reveal.
+- Until a clone's first `run` prints `ready`, the clone accepts its source's password and host key.
+  That usually lasts 11 to 69 seconds after SSH answers and can last until the `--timeout`
+  deadline, and anyone with the source's password, in another guest or on the host, can log in
+  during that time and leave access behind that `ready` does not reveal.
 - Locks are advisory. They coordinate macpool commands and do not stop other tools from changing a
   bundle.
 - The daemon counts only its own VMs. A `run` or `create` beside it can take a VM that macOS
