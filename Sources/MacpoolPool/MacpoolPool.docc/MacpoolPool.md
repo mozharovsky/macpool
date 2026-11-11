@@ -50,7 +50,8 @@ clone and no guest address. When a VM fails, the client receives a fixed reason,
 log keeps the real one. Refusals do not repeat the client's text. Before a reply leaves, the
 daemon checks it for the data directory, the offered sources, the home directory, their
 percent-encoded forms, file URLs, and paths that start with `~/`. If one appears, the client
-receives a failure, and the host's log records the reply.
+receives a failure, and the host's log records the reply. The daemon opens no invitation while the
+host's name for clients contains one of these texts.
 
 ### Mac identity
 

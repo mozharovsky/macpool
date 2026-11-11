@@ -789,7 +789,7 @@ public actor PoolDaemon {
     /// - Returns: The reply with the code.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client invites, the address
     ///   cannot be part of a code, the ceiling is below 0, the daemon does not listen for paired
-    ///   Macs, or the host's name for clients is not a valid name.
+    ///   Macs, or the host's name for clients is not a valid name or contains a host path.
     private func invite(
         address: String,
         priorityCeiling: Int,
@@ -811,8 +811,16 @@ public actor PoolDaemon {
             throw .invalidRequest(reason: "the host does not listen for paired Macs"
                 + (peerListenerFailure.map { ": \($0)" } ?? ""))
         }
-        guard PairedMac.isValidName(configuration.peers?.name ?? "") else {
+        let hostName = configuration.peers?.name ?? ""
+        guard PairedMac.isValidName(hostName) else {
             throw .invalidRequest(reason: "the host's name for clients must have \(PairedMac.nameRule)")
+        }
+        // Every Mac that pairs receives the host's name. If the name held a host path, the check
+        // of the reply would replace it after the host had recorded the Mac.
+        guard !namesHostPath([hostName]) else {
+            throw .invalidRequest(
+                reason: "the host's name for clients contains a path on this Mac. Choose another name",
+            )
         }
         let opened = invitation.open(for: client, priorityCeiling: priorityCeiling, at: configuration.now())
         if let replaced = opened.replaced {
@@ -947,23 +955,12 @@ public actor PoolDaemon {
     /// and returns a failure in its place. The replies to paired clients avoid these texts on
     /// their own. This check catches a text that a later change adds.
     ///
-    /// The check compares the UTF-8 bytes of canonically decomposed texts. A path therefore
-    /// matches in either Unicode normalization form, and also when a combining mark follows it.
-    ///
     /// - Parameters:
     ///   - reply: The reply to check.
     ///   - owner: Who the receiving client acts for.
     /// - Returns: The reply, or a failure that names no path.
     func visible(_ reply: PoolReply, to owner: LeaseOwner) -> PoolReply {
-        guard owner != .local else {
-            return reply
-        }
-        let forbidden = forbiddenTexts.map { Array($0.decomposedStringWithCanonicalMapping.utf8) }
-        let namesHostPath = reply.texts.contains { text in
-            let bytes = Array(text.decomposedStringWithCanonicalMapping.utf8)
-            return forbidden.contains { bytes.contains($0) }
-        }
-        guard namesHostPath else {
+        guard owner != .local, namesHostPath(reply.texts) else {
             return reply
         }
         configuration.logger.log(
@@ -972,6 +969,21 @@ public actor PoolDaemon {
             metadata: ["reply": "\(reply)"],
         )
         return .failure("the host could not complete the request. The host's log has the reason")
+    }
+
+    /// Reports whether any of the texts contains one of ``forbiddenTexts``.
+    ///
+    /// The check compares the UTF-8 bytes of canonically decomposed texts. A path therefore
+    /// matches in either Unicode normalization form, and also when a combining mark follows it.
+    ///
+    /// - Parameter texts: The texts of a reply, or the host's name for clients.
+    /// - Returns: `true` if a text names a host path.
+    private func namesHostPath(_ texts: [String]) -> Bool {
+        let forbidden = forbiddenTexts.map { Array($0.decomposedStringWithCanonicalMapping.utf8) }
+        return texts.contains { text in
+            let bytes = Array(text.decomposedStringWithCanonicalMapping.utf8)
+            return forbidden.contains { bytes.contains($0) }
+        }
     }
 
     /// The texts that no reply to a paired client may contain.

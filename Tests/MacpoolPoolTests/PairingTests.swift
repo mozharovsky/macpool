@@ -315,29 +315,22 @@ struct PairingTests {
         await host.stop()
     }
 
-    /// Sends a Mac that pairs a failure instead of a reply that names a host path. Here the host's
-    /// name for clients is the home directory. The Mac pairs once before and once after the host
-    /// records it.
-    @Test func keepsHostPathsFromMacsThatPair() async throws {
-        let host = try await PairingHost(name: FileManager.default.homeDirectoryForCurrentUser
-            .path(percentEncoded: false))
-        let directory = try host.clientDirectory()
-        let first = try await host.invite()
-        let hidden = "the host could not complete the request. The host's log has the reason"
-        await #expect(throws: PoolError.daemonRefused(message: hidden)) {
-            try await PoolClient.pair(using: first.code, name: "runner", directory: directory)
+    /// Opens no invitation while the host's name for clients holds the home directory or a path
+    /// that starts with `~/`. Every Mac that pairs would receive the name.
+    @Test func opensNoInvitationWhileTheHostNameHoldsAPath() async throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+        let refusal = PoolError.invalidRequest(
+            reason: "the host's name for clients contains a path on this Mac. Choose another name",
+        )
+        for name in [home, "build~/mac"] {
+            let host = try await PairingHost(name: name)
+            let channel = try await PoolClient.connect(to: host.fixture.directory)
+            try channel.send(PoolRequest.invite(address: "127.0.0.1"))
+            #expect(try await next(channel) == .failure(refusal.description), "\(name)")
+            #expect(host.fixture.logs.entries("Opened an invitation").isEmpty, "\(name)")
+            channel.close()
+            await host.stop()
         }
-        // The host recorded the Mac. The second request therefore arrives on a paired connection.
-        let second = try await host.invite()
-        let identity = try MacIdentity.loadOrCreate(in: directory)
-        let channel = try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
-        try channel.send(PoolRequest.pair(secret: Base32.encode(second.code.secret), name: "runner"))
-        #expect(try await next(channel) == .failure(hidden))
-        #expect(host.fixture.logs.entries("A reply to a paired Mac named a host path").count == 2)
-        channel.close()
-        first.channel.close()
-        second.channel.close()
-        await host.stop()
     }
 
     /// Refuses the pairing of a Mac that the host blocked after the Mac's greeting, and keeps the
