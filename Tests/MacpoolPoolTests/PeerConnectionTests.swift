@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Logging
 @testable import MacpoolPool
 import Network
 import Synchronization
@@ -288,7 +289,7 @@ struct PeerConnectionTests {
 
     /// Refuses a connection beyond the most that one paired Mac may hold, before the greeting.
     /// Another Mac still connects, and the first Mac connects again once one of its connections
-    /// closes.
+    /// closes. The warning about the limit reaches the warning level once a minute.
     @Test func limitsConnectionsPerMac() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
@@ -311,11 +312,29 @@ struct PeerConnectionTests {
         }
         #expect(await connect(client) == "the host refused the connection: this Mac already has 4 connections "
             + "to the host, the most it may have")
-        #expect(fixture.logs.entries("A paired Mac has too many connections").count == 1)
+        #expect(await connect(client) != nil)
+        let warnings = {
+            fixture.logs.entries("A paired Mac has too many connections").count { $0.level == .warning }
+        }
+        #expect(warnings() == 1)
         #expect(await connect(other) == nil)
 
-        channels.removeFirst().close()
-        #expect(await eventually { await connect(client) == nil })
+        // Freeing a place and filling it again does not bring the warning back within a minute.
+        for _ in 0 ..< 3 {
+            channels.removeFirst().close()
+            #expect(await eventually {
+                guard let channel = try? await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey) else {
+                    return false
+                }
+                channels.append(channel)
+                return true
+            })
+            #expect(await connect(client) != nil)
+        }
+        #expect(warnings() == 1)
+        fixture.clock.advance(by: PeerLogRate.interval)
+        #expect(await connect(client) != nil)
+        #expect(warnings() == 2)
         for channel in channels {
             channel.close()
         }
@@ -449,6 +468,152 @@ struct PeerConnectionTests {
         #expect(peer.fingerprint == clientKey)
         peer.channel.close()
         channel.close()
+    }
+
+    /// Writes one info line per minute about the connections of one paired Mac, and debug lines
+    /// in between.
+    @Test func limitsConnectionLines() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let levels = { fixture.logs.entries("A paired Mac connected").map(\.level) }
+        for _ in 0 ..< 2 {
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+        }
+        #expect(await eventually { levels() == [.info, .debug] })
+        fixture.clock.advance(by: PeerLogRate.interval)
+        try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey).close()
+        #expect(await eventually { levels() == [.info, .debug, .info] })
+        await daemon.shutdown()
+    }
+
+    /// Writes a line at its full level once a minute and at the debug level in between. Each kind
+    /// of line and each key has its own time, and the rate forgets times older than a minute.
+    @Test func ratesPeerLogLines() throws {
+        let key = try #require(KeyFingerprint(String(repeating: "0123456789abcdef", count: 4)))
+        let other = try #require(KeyFingerprint(String(repeating: "fedcba9876543210", count: 4)))
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let interval = PeerLogRate.interval
+        var rate = PeerLogRate()
+        #expect(rate.level(of: .connected(key), full: .info, at: start) == .info)
+        #expect(rate.level(of: .connected(key), full: .info, at: start + interval - 1) == .debug)
+        #expect(rate.level(of: .connected(other), full: .info, at: start + interval - 1) == .info)
+        #expect(rate.level(of: .tooManyConnections(key), full: .warning, at: start + interval - 1) == .warning)
+        #expect(rate.level(of: .connected(key), full: .info, at: start + interval) == .info)
+        #expect(rate.times.count == 3)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start + 3 * interval) == .warning)
+        #expect(rate.times.keys.elementsEqual([.tooManyPairings]))
+    }
+
+    /// Writes a line at its full level again after the clock went back.
+    @Test func ratesPeerLogLinesAfterTheClockWentBack() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        var rate = PeerLogRate()
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start) == .warning)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start - 3600) == .warning)
+        #expect(rate.level(of: .tooManyPairings, full: .warning, at: start - 3599) == .debug)
+    }
+
+    /// Cancels the timer of a handshake when the outcome settles, in either order, and frees the
+    /// handshake's place once.
+    @Test func settlesAHandshakeOnce() {
+        let count = HandshakeCount(limit: 1)
+        #expect(count.begin())
+        let armedFirst = HandshakeOutcome(count)
+        let timer = Task { _ = try? await Task.sleep(for: .seconds(60)) }
+        armedFirst.arm(timer)
+        #expect(!timer.isCancelled)
+        #expect(armedFirst.settle())
+        #expect(timer.isCancelled)
+        #expect(!armedFirst.settle())
+
+        #expect(count.begin())
+        let settledFirst = HandshakeOutcome(count)
+        #expect(settledFirst.settle())
+        let late = Task { _ = try? await Task.sleep(for: .seconds(60)) }
+        settledFirst.arm(late)
+        #expect(late.isCancelled)
+        #expect(count.begin())
+        #expect(!count.begin())
+    }
+
+    /// Frees a handshake's place when the handshake succeeds, while its connection stays open.
+    @Test func freesAPlaceWhenAHandshakeSucceeds() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            admits: { $0 == clientKey },
+            handshakeLimit: 2,
+        )
+        defer { listener.close() }
+        let endpoint = try loopback(listener.port)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        var connections = listener.connections.makeAsyncIterator()
+        var channels: [MessageChannel] = []
+        for _ in 0 ..< 3 {
+            try await channels.append(MessageChannel.connect(to: endpoint, using: parameters))
+            let peer = try #require(await connections.next())
+            channels.append(peer.channel)
+        }
+        for channel in channels {
+            channel.close()
+        }
+    }
+
+    /// Keeps a connection open after its key is blocked and refuses the key's new connections.
+    @Test func keepsAnOpenConnectionOfABlockedKey() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let open = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+
+        try listClients([clientKey], in: fixture.directory, blocked: [clientKey])
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        } != nil)
+        try open.send(PoolRequest.status)
+        guard case .status? = try await open.receive(PoolReply.self) else {
+            Issue.record("the open connection did not answer")
+            return
+        }
+        open.close()
+        await daemon.shutdown()
+    }
+
+    /// Admits nobody while the list of paired clients or its directory has an access control
+    /// list, and leaves the list in place.
+    @Test func admitsNobodyWhileTheListHasAnAccessControlList() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let connect = {
+            await refusal { () async throws(PoolError) in
+                try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+            }
+        }
+        let file = TrustList<TrustedClient>.file(in: fixture.directory)
+        let trust = fixture.directory.trustDirectory
+
+        #expect(await connect() == nil)
+        for place in [file, trust] {
+            try await MacIdentityTests.changeMode("+a", "everyone allow read", place.pathWithoutTrailingSlash)
+            #expect(await connect() != nil, "\(place)")
+            #expect(try accessControlList(at: place) == .accessControlList, "\(place)")
+            try await MacIdentityTests.changeMode("-N", place.pathWithoutTrailingSlash)
+            #expect(await connect() == nil, "\(place)")
+        }
+        await daemon.shutdown()
     }
 
     /// Delivers the bytes and the end of the stream over TLS by closing the connection.
@@ -750,6 +915,20 @@ func listeningPort(of daemon: PoolDaemon, within timeout: Duration = .seconds(10
         port = await daemon.peerPort
     }
     return try #require(port)
+}
+
+/// Finds what lets other users reach a file or directory.
+///
+/// - Parameter place: The file or directory.
+/// - Returns: The exposure, or `nil` when there is none.
+/// - Throws: ``PoolError`` when the file cannot be opened or inspected.
+private func accessControlList(at place: URL) throws(PoolError) -> FileExposure? {
+    let descriptor = open(place.pathWithoutTrailingSlash, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else {
+        throw .systemCall("opening", place)
+    }
+    defer { close(descriptor) }
+    return try FileExposure.find(in: descriptor, of: place)
 }
 
 /// Connects and returns why the connection failed.

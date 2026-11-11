@@ -253,6 +253,9 @@ public actor PoolDaemon {
     /// The connections of Macs that pair.
     private var pairingConnections = 0
 
+    /// The levels of the log lines that Macs on the network can repeat.
+    private var peerLogRate = PeerLogRate()
+
     /// The connected clients.
     private var clients: [ClientID: ClientConnection] = [:]
 
@@ -571,7 +574,8 @@ public actor PoolDaemon {
     private func acceptPairedMac(_ peer: PeerListener.Peer) {
         let owner = LeaseOwner.client(peer.fingerprint)
         guard clients.values.count(where: { $0.owner == owner }) < Self.connectionsPerPeer else {
-            configuration.logger.warning("A paired Mac has too many connections", metadata: [
+            let level = peerLogLevel(of: .tooManyConnections(peer.fingerprint), full: .warning)
+            configuration.logger.log(level: level, "A paired Mac has too many connections", metadata: [
                 "key": "\(peer.fingerprint)",
                 "address": "\(peer.channel.peer)",
             ])
@@ -582,7 +586,8 @@ public actor PoolDaemon {
             return
         }
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
-        configuration.logger.info("A paired Mac connected", metadata: [
+        let level = peerLogLevel(of: .connected(peer.fingerprint), full: .info)
+        configuration.logger.log(level: level, "A paired Mac connected", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
         ])
@@ -597,7 +602,8 @@ public actor PoolDaemon {
     /// - Parameter peer: A connection whose handshake proved a key that the host does not know.
     private func acceptPairingMac(_ peer: PeerListener.Peer) {
         guard pairingConnections < Self.pairingConnectionLimit else {
-            configuration.logger.warning("Too many Macs pair at once", metadata: [
+            let level = peerLogLevel(of: .tooManyPairings, full: .warning)
+            configuration.logger.log(level: level, "Too many Macs pair at once", metadata: [
                 "key": "\(peer.fingerprint)",
                 "address": "\(peer.channel.peer)",
             ])
@@ -607,11 +613,23 @@ public actor PoolDaemon {
         }
         pairingConnections += 1
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
-        configuration.logger.info("A Mac connected to pair", metadata: [
+        // Any key passes the handshake while an invitation is open. Only the outcome of a pairing
+        // reaches the info level.
+        configuration.logger.debug("A Mac connected to pair", metadata: [
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
         ])
         Task { await self.servePairing(peer) }
+    }
+
+    /// Returns the level of a log line that Macs on the network can repeat.
+    ///
+    /// - Parameters:
+    ///   - line: The kind of line.
+    ///   - full: The level of the line when it is due.
+    /// - Returns: `full` at most once per ``PeerLogRate/interval`` for the line, or `.debug`.
+    private func peerLogLevel(of line: PeerLogLine, full: Logger.Level) -> Logger.Level {
+        peerLogRate.level(of: line, full: full, at: configuration.now())
     }
 
     /// Reads the one request of a Mac that pairs, replies to it, and closes the connection.

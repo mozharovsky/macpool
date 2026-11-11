@@ -56,8 +56,12 @@ People compare a key by its ``KeyFingerprint/shortKey``, the first 80 bits of th
 base32. Logs name a paired client by the same text.
 
 Permission bits alone do not keep other users out. The pool also refuses the key and the `trust`
-directory on a volume that ignores ownership and when either has an access control list. The
-`trust` directory is excluded from backups, which Time Machine honors.
+directory on a volume that ignores ownership or is not local, and when either has an access control
+list. The data directory may have an access control list that denies access or allows reading, such
+as the `group:everyone deny delete` that macOS puts on `~/Library`. The pool refuses one that lets
+other users add, delete, or rename its entries, because they could then move `trust` away. The pool
+accepts an entry that allows these writes only to the current user. The `trust` directory is
+excluded from backups, which Time Machine honors.
 
 The pool builds a self-signed certificate that carries the key in TLS each time it loads the key.
 The SHA-256 digest of the key's SubjectPublicKeyInfo names the Mac, so its peers check the key and

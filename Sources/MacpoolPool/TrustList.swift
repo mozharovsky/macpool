@@ -95,6 +95,9 @@ struct TrustedHost: TrustRecord {
 /// Only the current user may read the file, and its directory gets the checks of
 /// ``PoolDirectory/checkTrustDirectory()``. A save replaces the whole file, so a reader sees the
 /// old list or the new one.
+///
+/// A new field that restricts a paired Mac raises ``formatVersion``. A build that reads the old
+/// version skips unknown fields and would admit the Mac without the restriction.
 struct TrustList<Record: TrustRecord>: Sendable, Equatable {
     /// The format version that this build reads and writes.
     static var formatVersion: Int {

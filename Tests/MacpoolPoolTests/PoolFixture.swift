@@ -710,6 +710,9 @@ struct LogEntry: Sendable {
 
     /// The metadata of the message, merged with the logger's metadata, as text.
     let metadata: [String: String]
+
+    /// The level of the message.
+    let level: Logger.Level
 }
 
 /// The messages that a test's loggers wrote.
@@ -765,6 +768,10 @@ struct RecordingLogHandler: LogHandler {
     /// - Parameter event: The message with its level and metadata.
     func log(event: LogEvent) {
         let merged = metadata.merging(event.metadata ?? [:]) { $1 }
-        recorder.record(LogEntry(message: event.message.description, metadata: merged.mapValues(\.description)))
+        recorder.record(LogEntry(
+            message: event.message.description,
+            metadata: merged.mapValues(\.description),
+            level: event.level,
+        ))
     }
 }
