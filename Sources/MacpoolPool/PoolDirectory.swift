@@ -68,11 +68,20 @@ public struct PoolDirectory: Sendable, Hashable {
     /// - Parameters:
     ///   - shared: The absolute path of the shared directory.
     ///   - source: The absolute path of the bundle that the lease clones, or `nil` for none.
-    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the check refuses the directory. The
-    ///   reason names the paths and a way out.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the check refuses the directory or
+    ///   cannot resolve one of the paths. The reason names the paths and a way out.
     public func checkShare(_ shared: String, source: String? = nil) throws(PoolError) {
-        let share = Self.physicalComponents(of: shared)
-        let data = Self.physicalComponents(of: root.path(percentEncoded: false))
+        func resolved(_ path: String) throws(PoolError) -> [ArraySlice<UInt8>] {
+            guard let components = Self.physicalComponents(of: path) else {
+                throw .invalidRequest(reason: """
+                macpool cannot open \(path) to check the shared directory \(shared). \
+                Share a directory that you can open.
+                """)
+            }
+            return components
+        }
+        let share = try resolved(shared)
+        let data = try resolved(root.path(percentEncoded: false))
         let reach = "The guest could change the images, clones, and pool state in it."
         if data.starts(with: share) {
             throw .invalidRequest(reason: """
@@ -86,7 +95,7 @@ public struct PoolDirectory: Sendable, Hashable {
             \(reach) Share a directory outside it.
             """)
         }
-        if let source, Self.physicalComponents(of: source).starts(with: share) {
+        if let source, try resolved(source).starts(with: share) {
             throw .invalidRequest(reason: """
             the shared directory \(shared) includes the source \(source). The guest could change the source, \
             and later clones would copy the change. Share a narrower directory.
@@ -98,27 +107,32 @@ public struct PoolDirectory: Sendable, Hashable {
     ///
     /// The kernel names an open directory by its path on its volume, in the letter case and
     /// normalization form that the volume stores. The components then pass through
-    /// ``PoolDaemon/caselessBytes(of:)`` for volumes that keep the spelling of a request. The
-    /// components after the longest existing prefix stay as written.
+    /// ``PoolDaemon/caselessBytes(of:)`` for volumes that keep the spelling of a request. If the
+    /// path does not exist, the components after its longest existing prefix stay as written.
     ///
     /// - Parameter path: An absolute path.
-    /// - Returns: The components as case-folded, decomposed UTF-8 bytes.
-    private static func physicalComponents(of path: String) -> [ArraySlice<UInt8>] {
-        let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        if descriptor >= 0 {
-            defer { close(descriptor) }
-            var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
-            if fcntl(descriptor, F_GETPATH_NOFIRMLINK, &buffer) != -1 {
-                let resolved = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
-                return PoolDaemon.caselessBytes(of: resolved).split(separator: UInt8(ascii: "/"))
+    /// - Returns: The components as case-folded, decomposed UTF-8 bytes, or `nil` if the path
+    ///   exists but cannot be opened as a directory.
+    private static func physicalComponents(of path: String) -> [ArraySlice<UInt8>]? {
+        // Search permission is enough to open a directory this way, so a directory that the user
+        // cannot read still resolves.
+        let descriptor = open(path, O_SEARCH | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let failure = errno
+            let url = URL(filePath: path)
+            let parent = url.deletingLastPathComponent().path(percentEncoded: false)
+            guard failure == ENOENT, parent.count < path.count, let resolved = physicalComponents(of: parent) else {
+                return nil
             }
+            return resolved + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]
         }
-        let url = URL(filePath: path)
-        let parent = url.deletingLastPathComponent().path(percentEncoded: false)
-        guard parent.count < path.count else {
-            return PoolDaemon.caselessBytes(of: path).split(separator: UInt8(ascii: "/"))
+        defer { close(descriptor) }
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH_NOFIRMLINK, &buffer) != -1 else {
+            return nil
         }
-        return physicalComponents(of: parent) + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]
+        let resolved = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        return PoolDaemon.caselessBytes(of: resolved).split(separator: UInt8(ascii: "/"))
     }
 
     /// The default data directory, `~/Library/Application Support/macpool`.

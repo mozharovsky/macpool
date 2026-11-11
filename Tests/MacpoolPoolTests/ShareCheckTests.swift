@@ -11,6 +11,12 @@ struct ShareCheckTests {
         let manager = FileManager.default
         try manager.createDirectory(at: directory.leasesDirectory, withIntermediateDirectories: true)
         try manager.createSymbolicLink(at: root.url.appending(path: "link"), withDestinationURL: directory.root)
+        // A directory that the user can search but not read still resolves.
+        let leases = directory.leasesDirectory.path(percentEncoded: false)
+        try manager.setAttributes([.posixPermissions: 0o300], ofItemAtPath: leases)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: leases) }
+        let hidden = root.url.appending(path: "hidden")
+        try manager.createSymbolicLink(at: hidden, withDestinationURL: directory.leasesDirectory)
         let parent = try #require(realpath(root.url.path(percentEncoded: false), nil))
         defer { free(parent) }
         let path = String(cString: parent)
@@ -22,6 +28,7 @@ struct ShareCheckTests {
             ("/System/Volumes/Data\(path)", "includes"),
             ("/System/Volumes/Data", "includes"),
             ("\(path)/pool/leases", "lies inside"),
+            ("\(path)/hidden", "lies inside"),
         ]
         for (shared, relation) in refusals {
             #expect {
