@@ -650,8 +650,7 @@ public actor PoolDaemon {
     /// - Returns: The reply to the Mac that pairs.
     private func pair(_ key: KeyFingerprint, secret: String, name: String) -> PoolReply {
         guard PairedMac.isValidName(name) else {
-            return .failure("the name of this Mac must have 1 to \(PairedMac.maximumNameLength) characters "
-                + "without control characters")
+            return .failure("the name of this Mac must have \(PairedMac.nameRule)")
         }
         guard let hostKey = peerListener?.hostKey, let hostName = configuration.peers?.name else {
             return .failure("the host stopped listening for Macs")
@@ -700,7 +699,8 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     /// - Returns: The reply with the code.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when a paired client invites, the address
-    ///   cannot be part of a code, or the daemon does not listen for paired Macs.
+    ///   cannot be part of a code, the daemon does not listen for paired Macs, or the host's name
+    ///   for clients is not a valid name.
     private func invite(address: String, from client: ClientID, owner: LeaseOwner) throws(PoolError) -> PoolReply {
         guard owner == .local else {
             throw .invalidRequest(reason: "only the host's own user can invite Macs")
@@ -711,6 +711,9 @@ public actor PoolDaemon {
         guard let listener = peerListener else {
             throw .invalidRequest(reason: "the host does not listen for paired Macs"
                 + (peerListenerFailure.map { ": \($0)" } ?? ""))
+        }
+        guard PairedMac.isValidName(configuration.peers?.name ?? "") else {
+            throw .invalidRequest(reason: "the host's name for clients must have \(PairedMac.nameRule)")
         }
         let opened = invitation.open(for: client, at: configuration.now())
         if let replaced = opened.replaced {

@@ -50,12 +50,26 @@ struct PairingTests {
         }
     }
 
-    /// Accepts names that people can read and rejects empty, blank, long, and control text.
+    /// Accepts names that people can read and rejects empty, blank, long, control, format,
+    /// separator, and private-use text.
     @Test func checksNames() {
-        #expect(PairedMac.isValidName("Build Mac 2"))
-        #expect(PairedMac.isValidName(String(repeating: "é", count: 64)))
-        for name in ["", "   ", String(repeating: "a", count: 65), "line\nbreak", "bell\u{7}"] {
-            #expect(!PairedMac.isValidName(name), "\(name)")
+        for name in ["Build Mac 2", "Студия 🚀", String(repeating: "\u{E9}", count: 64)] {
+            #expect(PairedMac.isValidName(name), "\(name)")
+        }
+        let rejected = [
+            "",
+            "   ",
+            String(repeating: "a", count: 65),
+            String(repeating: "e\u{301}", count: 33),
+            "line\nbreak",
+            "bell\u{7}",
+            "abc\u{202E}fed",
+            "zero\u{200B}width",
+            "line\u{2028}separator",
+            "private\u{E000}",
+        ]
+        for name in rejected {
+            #expect(!PairedMac.isValidName(name), "\(name.unicodeScalars.map(\.value))")
         }
     }
 
@@ -264,6 +278,14 @@ struct PairingTests {
             try await PoolClient.send(.invite(address: "127.0.0.1"), to: quiet.directory)
         }
         await daemon.shutdown()
+
+        let unnamed = try await PairingHost(name: "studio\u{202E}")
+        await #expect(throws: PoolError.daemonRefused(
+            message: "the host's name for clients must have \(PairedMac.nameRule)",
+        )) {
+            try await PoolClient.send(.invite(address: "127.0.0.1"), to: unnamed.fixture.directory)
+        }
+        await unnamed.stop()
     }
 
     /// Refuses a host whose key does not match the code, before this Mac sends the secret.
@@ -307,10 +329,11 @@ private final class PairingHost {
 
     /// Starts the daemon and waits until it listens.
     ///
+    /// - Parameter name: The host's name for clients.
     /// - Throws: An error when the daemon does not start or listen.
-    init() async throws {
+    init(name: String = "studio") async throws {
         fixture = try PoolFixture()
-        let settings = PeerSettings(name: "studio", address: "127.0.0.1", port: 0, retryInterval: .milliseconds(100))
+        let settings = PeerSettings(name: name, address: "127.0.0.1", port: 0, retryInterval: .milliseconds(100))
         daemon = try await fixture.start(peers: settings)
         port = try await listeningPort(of: daemon)
         endpoint = try loopback(port)

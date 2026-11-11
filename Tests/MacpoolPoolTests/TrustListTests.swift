@@ -131,6 +131,38 @@ struct TrustListTests {
         }
     }
 
+    /// Refuses to read or write a list file larger than the limit.
+    @Test func limitsTheSizeOfLists() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try TrustList<TrustedClient>().save(to: directory)
+        let file = TrustList<TrustedClient>.file(in: directory)
+        let path = file.path(percentEncoded: false)
+        let limit = TrustList<TrustedClient>.byteLimit
+        let empty = #"{"version":1,"macs":[]}"#
+        let full = empty + String(repeating: " ", count: limit - empty.utf8.count)
+
+        try Data(full.utf8).write(to: file)
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        try Data((full + " ").utf8).write(to: file)
+        #expect(throws: PoolError.unusableTrustList(
+            path: path,
+            reason: "it has more than \(limit) bytes, the most that the pool reads",
+        )) {
+            try TrustList<TrustedClient>.load(from: directory)
+        }
+
+        try TrustList<TrustedClient>().save(to: directory)
+        var list = TrustList<TrustedClient>()
+        while list.records.count < 2000 {
+            list.insert(client(String(repeating: "n", count: PairedMac.maximumNameLength)))
+        }
+        #expect(throws: PoolError.self) {
+            try list.save(to: directory)
+        }
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+    }
+
     /// Shows the first 80 bits of a fingerprint in base32. Logs name a paired client by the same
     /// text.
     @Test func showsAShortKey() throws {

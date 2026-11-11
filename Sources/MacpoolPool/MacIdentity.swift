@@ -25,6 +25,9 @@ struct MacIdentity: Sendable {
     /// What the key file holds, for error messages.
     private static let keyName = "this Mac's key"
 
+    /// The most bytes that the pool reads from the key file. A P-256 key in PEM has about 250.
+    private static let keyByteLimit = 16 * 1024
+
     /// Builds the certificate for a key.
     ///
     /// - Parameters:
@@ -168,12 +171,12 @@ struct MacIdentity: Sendable {
     /// - Parameter file: The key file.
     /// - Returns: The key, or `nil` when the file does not exist.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when the file fails a check of
-    ///   ``PrivateFile/read(at:name:refusal:)`` or holds no P-256 key in PEM, or
+    ///   ``PrivateFile/read(at:name:limit:refusal:)`` or holds no P-256 key in PEM, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
     private static func readKey(at file: URL) throws(PoolError) -> P256.Signing.PrivateKey? {
         let path = file.path(percentEncoded: false)
         let refusal = { (reason: String) in PoolError.unusableIdentity(path: path, reason: reason) }
-        guard let data = try PrivateFile.read(at: file, name: keyName, refusal: refusal) else {
+        guard let data = try PrivateFile.read(at: file, name: keyName, limit: keyByteLimit, refusal: refusal) else {
             return nil
         }
         guard let key = try? P256.Signing.PrivateKey(pemRepresentation: String(decoding: data, as: UTF8.self)) else {

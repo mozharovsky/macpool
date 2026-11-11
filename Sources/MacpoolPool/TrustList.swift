@@ -101,6 +101,14 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
         1
     }
 
+    /// The most bytes that a list's file may have.
+    ///
+    /// The host reads the list of paired clients during every handshake. The limit bounds the
+    /// work that one connection causes.
+    static var byteLimit: Int {
+        256 * 1024
+    }
+
     /// The paired Macs in the order they were added.
     private(set) var records: [Record] = []
 
@@ -152,7 +160,7 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
     /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the trust directory fails the
     ///   checks of ``PoolDirectory/checkTrustDirectory()``,
     ///   ``PoolError/unusableTrustList(path:reason:)`` when the file fails a check of
-    ///   ``PrivateFile/read(at:name:refusal:)``, holds no list, has another format version, or
+    ///   ``PrivateFile/read(at:name:limit:refusal:)``, holds no list, has another format version, or
     ///   lists a key twice, or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot
     ///   be read.
     static func load(from directory: PoolDirectory) throws(PoolError) -> TrustList {
@@ -163,7 +171,8 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
         let file = file(in: directory)
         let path = file.path(percentEncoded: false)
         let refusal = { (reason: String) in PoolError.unusableTrustList(path: path, reason: reason) }
-        guard let data = try PrivateFile.read(at: file, name: Record.listName, refusal: refusal) else {
+        guard let data = try PrivateFile.read(at: file, name: Record.listName, limit: byteLimit, refusal: refusal)
+        else {
             return TrustList()
         }
         let header: StoredHeader
@@ -194,7 +203,8 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
     /// Replaces the list's file with this list.
     ///
     /// - Parameter directory: The data directory.
-    /// - Throws: The errors of ``PoolDirectory/prepareTrustDirectory()``, or
+    /// - Throws: ``PoolError/unusableTrustList(path:reason:)`` when the encoded list has more
+    ///   than ``byteLimit`` bytes, the errors of ``PoolDirectory/prepareTrustDirectory()``, or
     ///   ``PoolError/fileSystem(operation:path:reason:)`` when the list cannot be encoded or the
     ///   file cannot be replaced.
     func save(to directory: PoolDirectory) throws(PoolError) {
@@ -207,6 +217,12 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
             data = try encoder.encode(StoredList(version: Self.formatVersion, macs: records)) + Data("\n".utf8)
         } catch {
             throw .fileSystem("encoding \(Record.listName) for", file, error)
+        }
+        guard data.count <= Self.byteLimit else {
+            throw .unusableTrustList(
+                path: file.path(percentEncoded: false),
+                reason: "it would have \(data.count) bytes, and the pool reads at most \(Self.byteLimit)",
+            )
         }
         try PrivateFile.replace(at: file, contents: data, name: Record.listName)
     }

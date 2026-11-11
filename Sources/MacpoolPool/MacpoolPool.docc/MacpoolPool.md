@@ -48,6 +48,10 @@ host lists its clients in `clients.json`, and a client lists its hosts in `hosts
 is missing while either list exists, the pool refuses to start the listener for paired Macs. The
 error names the lists. Put the key file back, or delete the lists and pair the Macs again.
 
+The pool reads and writes a list of at most 256 KiB. The host reads its list during every
+handshake, so the limit bounds the work of one connection. A pairing that would make the list
+larger fails.
+
 People compare a key by its ``KeyFingerprint/shortKey``, the first 80 bits of the digest in
 base32. Logs name a paired client by the same text.
 
@@ -61,11 +65,12 @@ not the certificate's names or dates.
 
 ### Connections between Macs
 
-With ``PoolDaemon/Configuration/peers`` set, the daemon also listens on TCP for paired Macs. Both
-sides present their key in a TLS 1.3 handshake with the application protocol `macpool/1`. Each
-side checks only the key in the first certificate that the other side sends, and the system's
-trust evaluation never runs. Session resumption and session tickets are off, so every connection
-runs a full handshake.
+With ``PoolDaemon/Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It
+binds to the one numeric address in ``PeerSettings/address``. For a host name, Network would bind
+to every interface, so the listener refuses names. Both sides present their key in a TLS 1.3
+handshake with the application protocol `macpool/1`. Each side checks only the key in the first
+certificate that the other side sends, and the system's trust evaluation never runs. Session
+resumption and session tickets are off, so every connection runs a full handshake.
 
 The host reads `trust/clients.json` during every handshake and admits the keys of clients that are
 not blocked. While an invitation is open, it also admits keys that the list does not name, so that
@@ -111,6 +116,11 @@ A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`
 10 minutes, after 5 wrong secrets, when a newer invitation replaces it, or when the inviting
 connection closes. The daemon keeps only the SHA-256 digest of the secret, and only in memory. A
 restart of the daemon therefore ends the invitation. A blocked client cannot pair again.
+
+Each Mac gives the other its name, and both names follow the same rule. A name has 1 to 64 Unicode
+scalars and not only whitespace. It has no control, format, private-use, or unassigned scalars and
+no line or paragraph separators. Format scalars include the controls that reverse the direction of
+text, so a name cannot hide part of itself when the pool shows it.
 
 ### Supervisors
 

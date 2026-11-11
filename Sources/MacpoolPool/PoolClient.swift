@@ -189,8 +189,7 @@ public enum PoolClient {
         timeout: Duration = .seconds(10),
     ) async throws(PoolError) -> PairedMac {
         guard PairedMac.isValidName(name) else {
-            throw .invalidRequest(reason: "the name must have 1 to \(PairedMac.maximumNameLength) characters "
-                + "without control characters")
+            throw .invalidRequest(reason: "the name must have \(PairedMac.nameRule)")
         }
         guard let port = NWEndpoint.Port(rawValue: code.port) else {
             throw .invalidRequest(reason: "the code names port \(code.port)")

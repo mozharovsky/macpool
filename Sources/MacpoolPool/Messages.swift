@@ -799,18 +799,39 @@ public struct PairedMac: Sendable, Equatable, Codable {
         self.key = key
     }
 
-    /// The most characters in a Mac's name.
+    /// The most Unicode scalars in a Mac's name.
     static let maximumNameLength = 64
+
+    /// The rule for a Mac's name in the words of error messages.
+    static let nameRule = "1 to \(maximumNameLength) printable characters and not only spaces"
 
     /// Reports whether a Mac's name can be shown to people as it is.
     ///
+    /// A name may not contain format characters, because they include the controls that
+    /// reverse the direction of text and the characters that have no width.
+    ///
     /// - Parameter name: A name that a Mac gave for itself.
-    /// - Returns: Whether the name has 1 to 64 characters, at least one of them visible, and no
-    ///   control characters.
+    /// - Returns: Whether the name has 1 to 64 Unicode scalars, at least one of them not
+    ///   whitespace, and no control, format, line or paragraph separator, private-use, surrogate,
+    ///   or unassigned scalar.
     static func isValidName(_ name: String) -> Bool {
         let scalars = name.unicodeScalars
-        return (1 ... maximumNameLength).contains(name.count)
-            && !scalars.contains { $0.properties.generalCategory == .control }
+        return (1 ... maximumNameLength).contains(scalars.count)
+            && scalars.allSatisfy(isPrintable)
             && scalars.contains { !$0.properties.isWhitespace }
+    }
+
+    /// Reports whether a scalar may appear in a Mac's name.
+    ///
+    /// - Parameter scalar: A scalar of the name.
+    /// - Returns: Whether the scalar's general category is not a control, format, separator of
+    ///   lines or paragraphs, private-use, surrogate, or unassigned category.
+    private static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
+            false
+        default:
+            true
+        }
     }
 }

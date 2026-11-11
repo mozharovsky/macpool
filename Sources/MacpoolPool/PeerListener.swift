@@ -7,10 +7,12 @@ public struct PeerSettings: Sendable {
     /// The host's name that a client Mac receives when it pairs.
     public var name: String
 
-    /// The local address to listen on, such as `127.0.0.1`.
+    /// The numeric IPv4 or IPv6 address to listen on, such as `127.0.0.1` or `::1`.
     ///
     /// The listener binds only to this address. It has no default, so a caller never opens every
-    /// interface by accident.
+    /// interface by accident. Network binds to every interface for a host name or an unspecified
+    /// address. The listener therefore refuses a host name, `0.0.0.0`, and `::`. It also refuses
+    /// an IPv6 zone such as `%en0` and a shortened IPv4 address such as `127.1`.
     public var address: String
 
     /// The TCP port, or 0 for a free port that the system picks.
@@ -23,9 +25,10 @@ public struct PeerSettings: Sendable {
     /// Creates listener settings.
     ///
     /// - Parameters:
-    ///   - name: The host's name for clients, or `nil` for this Mac's name in Sharing settings,
-    ///     cut to 64 characters.
-    ///   - address: The local address to listen on.
+    ///   - name: The host's name for clients, or `nil` for the first 64 Unicode scalars of this
+    ///     Mac's name in Sharing settings. If that name has characters that a pairing rejects, the
+    ///     default is `Mac`.
+    ///   - address: The numeric IP address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - retryInterval: The wait before another attempt to listen.
     public init(
@@ -34,10 +37,20 @@ public struct PeerSettings: Sendable {
         port: UInt16,
         retryInterval: Duration = .seconds(10),
     ) {
-        self.name = name ?? String((Host.current().localizedName ?? "Mac").prefix(PairedMac.maximumNameLength))
+        self.name = name ?? Self.computerName()
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
+    }
+
+    /// Returns this Mac's name in Sharing settings in a form that a pairing accepts.
+    ///
+    /// - Returns: The first 64 Unicode scalars of the name, or `Mac` when they are not a valid
+    ///   name.
+    private static func computerName() -> String {
+        let scalars = (Host.current().localizedName ?? "").unicodeScalars.prefix(PairedMac.maximumNameLength)
+        let name = String(String.UnicodeScalarView(scalars))
+        return PairedMac.isValidName(name) ? name : "Mac"
     }
 }
 
@@ -93,8 +106,8 @@ final class PeerListener: Sendable {
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
     ///   - handshakeLimit: The most handshakes that run at once.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
-    ///   ``PoolError/connection(path:reason:)`` when the listener cannot start, for example
-    ///   because another process holds the port.
+    ///   ``PoolError/connection(path:reason:)`` when ``PeerSettings/address`` breaks its rules or
+    ///   the listener cannot start, for example because another process holds the port.
     init(
         identity: MacIdentity,
         settings: PeerSettings,
@@ -102,10 +115,17 @@ final class PeerListener: Sendable {
         handshakeTimeout: Duration = .seconds(5),
         handshakeLimit: Int = 16,
     ) async throws(PoolError) {
+        let place = "\(settings.address):\(settings.port)"
+        guard let host = Self.host(settings.address) else {
+            throw .connection(
+                path: place,
+                reason: "the listener needs a numeric IP address, "
+                    + "such as 192.168.1.20, that is not 0.0.0.0 or :: and has no zone",
+            )
+        }
         let parameters = try PeerSecurity.parameters(identity: identity, isServer: true, admits: admits)
         let port = NWEndpoint.Port(rawValue: settings.port) ?? .any
-        let place = "\(settings.address):\(settings.port)"
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(settings.address), port: port)
+        parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
         let listener: NWListener
         do {
             listener = try NWListener(using: parameters)
@@ -151,6 +171,24 @@ final class PeerListener: Sendable {
         hostKey = KeyFingerprint(digest: identity.keyDigest)
         self.connections = connections
         self.continuation = continuation
+    }
+
+    /// Reads the address that the listener binds to.
+    ///
+    /// Network accepts shortened IPv4 forms such as `127.1`. The listener takes only the dotted
+    /// form. The address in errors and logs is then the address that it binds.
+    ///
+    /// - Parameter address: The address from ``PeerSettings``.
+    /// - Returns: The host, or `nil` when the address is a host name, an unspecified address, an
+    ///   IPv6 address with a zone, or an IPv4 address in another form than four dotted numbers.
+    private static func host(_ address: String) -> NWEndpoint.Host? {
+        if let ipv4 = IPv4Address(address) {
+            return ipv4 != .any && address == "\(ipv4)" ? .ipv4(ipv4) : nil
+        }
+        if let ipv6 = IPv6Address(address), !address.contains("%") {
+            return ipv6 != .any && ipv6.asIPv4 != .any ? .ipv6(ipv6) : nil
+        }
+        return nil
     }
 
     /// Runs a connection's handshake and passes the connection on once the peer proved its key.

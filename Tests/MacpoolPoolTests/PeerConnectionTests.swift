@@ -345,6 +345,33 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Binds to the one address in the settings and refuses other addresses before it binds.
+    @Test func bindsToOneAddress() async throws {
+        let host = try makeIdentity()
+        for address in ["127.0.0.1", "::1"] {
+            let listener = try await PeerListener(
+                identity: host,
+                settings: PeerSettings(address: address, port: 0),
+                admits: { _ in false },
+            )
+            #expect(boundAddresses(port: listener.port) == [address])
+            listener.close()
+        }
+        for address in ["localhost", "studio.local", "0.0.0.0", "::", "::ffff:0.0.0.0", "127.1", "fe80::1%lo0"] {
+            await #expect(throws: PoolError.connection(
+                path: "\(address):0",
+                reason: "the listener needs a numeric IP address, such as 192.168.1.20, that is not 0.0.0.0 or :: "
+                    + "and has no zone",
+            )) {
+                _ = try await PeerListener(
+                    identity: host,
+                    settings: PeerSettings(address: address, port: 0),
+                    admits: { _ in false },
+                )
+            }
+        }
+    }
+
     /// Closes a new connection while the most handshakes run. A handshake that fails or runs out
     /// of time frees its place.
     @Test func limitsHandshakesThatRunAtOnce() async throws {
@@ -466,6 +493,66 @@ struct PeerConnectionTests {
         client.close()
         await daemon.shutdown()
     }
+}
+
+/// Lists the local addresses of this process's unconnected TCP sockets on a port.
+///
+/// The test reads the sockets themselves, because the settings say only what the listener asked
+/// for. Darwin has no `SO_ACCEPTCONN`. A socket without a peer therefore stands for a listening
+/// one.
+///
+/// - Parameter port: The TCP port.
+/// - Returns: The numeric addresses, in the order of the file descriptors.
+func boundAddresses(port: UInt16) -> [String] {
+    var addresses: [String] = []
+    for descriptor in 0 ..< getdtablesize() {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFSOCK else {
+            continue
+        }
+        var type: Int32 = 0
+        var size = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &size) == 0, type == SOCK_STREAM else {
+            continue
+        }
+        var storage = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var service = [CChar](repeating: 0, count: Int(NI_MAXSERV))
+        let converted = withUnsafeMutablePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                var peerLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                guard getpeername(descriptor, address, &peerLength) != 0,
+                      getsockname(descriptor, address, &length) == 0
+                else {
+                    return false
+                }
+                let flags = NI_NUMERICHOST | NI_NUMERICSERV
+                return getnameinfo(
+                    address,
+                    length,
+                    &host,
+                    socklen_t(host.count),
+                    &service,
+                    socklen_t(service.count),
+                    flags,
+                ) == 0
+            }
+        }
+        guard converted, text(of: service) == "\(port)" else {
+            continue
+        }
+        addresses.append(text(of: host))
+    }
+    return addresses
+}
+
+/// Converts a NUL-terminated C string in a buffer to a string.
+///
+/// - Parameter buffer: The buffer.
+/// - Returns: The text before the first NUL.
+private func text(of buffer: [CChar]) -> String {
+    String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
 /// Creates settings that listen on 127.0.0.1 and retry quickly.
