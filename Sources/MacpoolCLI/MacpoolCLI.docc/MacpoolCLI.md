@@ -65,6 +65,14 @@ The daemon boots each lease through the hidden `macpool supervise` subcommand, w
 ``MachineSession`` in a process of its own. `run` uses the same session for a bundle that a person
 names.
 
+### Images
+
+`macpool image xcode` clones a stopped base into the data directory's `images` directory and
+installs Xcode and an iOS simulator runtime in the clone. ``XcodeImageSteps`` runs the guest
+commands, and ``ImageWorkspace`` owns the files of the build. When every check passes, the image
+gets an `image.json` record that marks it ready. `list` shows images, and the daemon refuses to
+lease one that is not ready.
+
 ## Topics
 
 ### Commands
@@ -87,6 +95,14 @@ names.
 - ``RenewCommand``
 - ``ListCommand``
 - ``SuperviseCommand``
+
+### Image commands
+
+- ``ImageCommand``
+- ``XcodeImageCommand``
+- ``XcodeImageSteps``
+- ``ImageWorkspace``
+- ``ImageGuest``
 
 ### Support
 

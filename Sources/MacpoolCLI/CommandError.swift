@@ -78,6 +78,13 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: Why the lease ended.
     case leaseEnded(id: String, reason: String)
 
+    /// A step of an image build failed.
+    ///
+    /// - Parameters:
+    ///   - step: What the build was doing.
+    ///   - reason: Why the step failed.
+    case imageStep(step: String, reason: String)
+
     /// A supervised VM's boot or run failed.
     ///
     /// - Parameter reason: The failure.
@@ -118,6 +125,8 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             "lease \(id) ended: \(reason)"
         case let .supervisedRunFailed(reason):
             reason
+        case let .imageStep(step, reason):
+            "building the image failed while \(step): \(reason)"
         }
     }
 }
