@@ -195,9 +195,10 @@ that key and ends the same leases. The request then fails, and the client can pa
 code.
 
 A paired client asks the host to forget it with ``PoolRequest/forget(endLeases:)``. If it holds
-leases and `endLeases` is not set, the request fails. Otherwise the daemon removes the record, ends
-the leases, and closes every connection of the client. The daemon refuses this request from a
-blocked client. A blocked record therefore stays.
+leases and `endLeases` is not set, the request fails. Otherwise the daemon first saves the list
+without the record. It then ends the leases and closes every connection of the client. If the list
+cannot be read or saved, the request fails and the daemon changes nothing. The daemon refuses this
+request from a blocked client. A blocked record therefore stays.
 
 ### Supervisors
 

@@ -533,9 +533,12 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// Asks the host to forget the sending Mac.
     ///
     /// Only a paired Mac may send this request. If the Mac has leases and `endLeases` is not set,
-    /// the daemon refuses the request. Otherwise it ends the leases, removes the Mac's record,
+    /// the daemon refuses the request. Otherwise it removes the Mac's record, ends the leases,
     /// replies with ``PoolReply/forgotten(leases:)``, and closes every connection of the Mac. The
     /// Mac can then return only with a new pairing code.
+    ///
+    /// If the daemon cannot read or save its list of paired Macs, it refuses the request and
+    /// changes nothing.
     ///
     /// - Parameter endLeases: Whether the daemon ends the Mac's leases.
     case forget(endLeases: Bool = false)
