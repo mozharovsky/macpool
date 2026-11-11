@@ -356,7 +356,8 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
-    /// Binds to the one address in the settings and refuses other addresses before it binds.
+    /// Binds only to the loopback address in the settings. If `listeningHost(for:)` rejects the
+    /// address, the listener throws before it binds.
     @Test func bindsToOneAddress() async throws {
         let host = try makeIdentity()
         for address in ["127.0.0.1", "::1"] {
@@ -368,18 +369,48 @@ struct PeerConnectionTests {
             #expect(boundAddresses(port: listener.port) == [address])
             listener.close()
         }
-        for address in ["localhost", "studio.local", "0.0.0.0", "::", "::ffff:0.0.0.0", "127.1", "fe80::1%lo0"] {
-            await #expect(throws: PoolError.connection(
-                path: "\(address):0",
-                reason: "the listener needs a numeric IP address, such as 192.168.1.20, that is not 0.0.0.0 or :: "
-                    + "and has no zone",
-            )) {
-                _ = try await PeerListener(
-                    identity: host,
-                    settings: PeerSettings(address: address, port: 0),
-                    admits: { _ in false },
-                )
-            }
+        // If the listener skipped the parser, `127.1` would still bind only to the loopback address.
+        await #expect(throws: PoolError.connection(
+            path: "127.1:0",
+            reason: "the listener needs a numeric IP address, such as 192.0.2.20, that is not 0.0.0.0 or :: "
+                + "and has no zone",
+        )) {
+            _ = try await PeerListener(
+                identity: host,
+                settings: PeerSettings(address: "127.1", port: 0),
+                admits: { _ in false },
+            )
+        }
+    }
+
+    /// Accepts numeric addresses and normalizes IPv6 addresses. Rejects host names, unspecified
+    /// addresses, IPv6 zones, and IPv4 addresses that differ from their canonical dotted form.
+    @Test func readsListenerAddresses() {
+        let accepted = [
+            "127.0.0.1": "127.0.0.1",
+            "::1": "::1",
+            "192.0.2.20": "192.0.2.20",
+            "2001:db8::20": "2001:db8::20",
+            "2001:DB8:0:0:0:0:0:20": "2001:db8::20",
+        ]
+        for (address, host) in accepted {
+            #expect(PeerListener.listeningHost(for: address).map { "\($0)" } == host, "\(address)")
+        }
+        for address in [
+            "",
+            " 127.0.0.1",
+            "localhost",
+            "example.local",
+            "0.0.0.0",
+            "::",
+            "0:0:0:0:0:0:0:0",
+            "::ffff:0.0.0.0",
+            "127.1",
+            "1",
+            "127.000.000.001",
+            "fe80::1%lo0",
+        ] {
+            #expect(PeerListener.listeningHost(for: address) == nil, "\(address)")
         }
     }
 

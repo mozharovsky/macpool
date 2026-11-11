@@ -116,11 +116,11 @@ final class PeerListener: Sendable {
         handshakeLimit: Int = 16,
     ) async throws(PoolError) {
         let place = "\(settings.address):\(settings.port)"
-        guard let host = Self.host(settings.address) else {
+        guard let host = Self.listeningHost(for: settings.address) else {
             throw .connection(
                 path: place,
                 reason: "the listener needs a numeric IP address, "
-                    + "such as 192.168.1.20, that is not 0.0.0.0 or :: and has no zone",
+                    + "such as 192.0.2.20, that is not 0.0.0.0 or :: and has no zone",
             )
         }
         let parameters = try PeerSecurity.parameters(identity: identity, isServer: true, admits: admits)
@@ -175,13 +175,14 @@ final class PeerListener: Sendable {
 
     /// Reads the address that the listener binds to.
     ///
-    /// Network accepts shortened IPv4 forms such as `127.1`. The listener takes only the dotted
-    /// form. The address in errors and logs is then the address that it binds.
+    /// Network accepts shortened IPv4 forms such as `127.1`. The listener takes only the
+    /// canonical dotted form. An IPv4 address in errors and logs is then the address that the
+    /// listener binds.
     ///
     /// - Parameter address: The address from ``PeerSettings``.
     /// - Returns: The host, or `nil` when the address is a host name, an unspecified address, an
-    ///   IPv6 address with a zone, or an IPv4 address in another form than four dotted numbers.
-    private static func host(_ address: String) -> NWEndpoint.Host? {
+    ///   IPv6 address with a zone, or an IPv4 address that differs from its canonical dotted form.
+    static func listeningHost(for address: String) -> NWEndpoint.Host? {
         if let ipv4 = IPv4Address(address) {
             return ipv4 != .any && address == "\(ipv4)" ? .ipv4(ipv4) : nil
         }

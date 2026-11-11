@@ -19,7 +19,7 @@ public struct PairingCode: Sendable, Equatable, Codable, CustomStringConvertible
     /// The number of bytes of a secret.
     static let secretBytes = 16
 
-    /// The host's address, such as `studio.local` or `192.168.1.20`.
+    /// The host's address, such as `example.local` or `192.0.2.20`.
     public let address: String
 
     /// The TCP port on which the host listens for paired Macs.
@@ -51,7 +51,8 @@ public struct PairingCode: Sendable, Equatable, Codable, CustomStringConvertible
     /// characters follow the last two colons.
     ///
     /// - Parameter text: The code. Spaces and line breaks around it are ignored.
-    /// - Returns: `nil` when the text is not a code of this format.
+    /// - Returns: `nil` when the text is not a code of this format. The address must have 1 to 253
+    ///   ASCII letters, digits, dots, hyphens, colons, or percent signs.
     public init?(_ text: String) {
         let fields = text.trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: ":", omittingEmptySubsequences: false)
@@ -62,7 +63,9 @@ public struct PairingCode: Sendable, Equatable, Codable, CustomStringConvertible
             return nil
         }
         let address = fields[1 ..< fields.count - 2].joined(separator: ":")
-        guard !address.isEmpty else {
+        // Error messages and the list of hosts show the address. A code therefore must not carry
+        // terminal escapes in it.
+        guard Self.isValidAddress(address) else {
             return nil
         }
         self.address = address
