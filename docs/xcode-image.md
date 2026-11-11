@@ -30,7 +30,7 @@ first. Without `--accept-xcode-license`, the command stops before it touches any
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--from SOURCE` | required | The stopped source to build on. The command doesn't change it. |
-| `--name NAME` | required | The image's name. It takes letters, digits, `.`, `-`, and `_`. |
+| `--name NAME` | required | The image's name, with 1 to 64 ASCII letters, digits, `.`, `-`, and `_` that start with a letter or digit. |
 | `--xcode FILE` | required | The Xcode archive. |
 | `--runtime FILE` | required | The iOS simulator runtime disk image. |
 | `--accept-xcode-license` | off | Accepts the Xcode license in the guest. The command needs it. |

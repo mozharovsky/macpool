@@ -86,7 +86,7 @@ struct XcodeImageCommand: AsyncParsableCommand {
         }
         guard ImageWorkspace.isValidName(name) else {
             throw ValidationError("""
-            --name takes 1 to 64 letters, digits, dots, hyphens, and underscores, \
+            --name takes 1 to 64 ASCII letters, digits, dots, hyphens, and underscores, \
             starting with a letter or digit.
             """)
         }
