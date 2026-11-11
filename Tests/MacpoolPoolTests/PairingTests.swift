@@ -315,6 +315,24 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Opens no invitation while the host's name for clients holds the home directory, also in
+    /// capital letters, or a path that starts with `~/`. Every Mac that pairs would receive the name.
+    @Test func opensNoInvitationWhileTheHostNameHoldsAPath() async throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+        let refusal = PoolError.invalidRequest(
+            reason: "the host's name for clients contains a path on this Mac. Choose another name",
+        )
+        for name in [home, home.uppercased(), "build~/mac"] {
+            let host = try await PairingHost(name: name)
+            let channel = try await PoolClient.connect(to: host.fixture.directory)
+            try channel.send(PoolRequest.invite(address: "127.0.0.1"))
+            #expect(try await next(channel) == .failure(refusal.description), "\(name)")
+            #expect(host.fixture.logs.entries("Opened an invitation").isEmpty, "\(name)")
+            channel.close()
+            await host.stop()
+        }
+    }
+
     /// Refuses the pairing of a Mac that the host blocked after the Mac's greeting, and keeps the
     /// record blocked.
     @Test func refusesAMacBlockedAfterItsGreeting() async throws {

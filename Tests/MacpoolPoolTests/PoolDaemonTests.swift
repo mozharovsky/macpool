@@ -12,9 +12,10 @@ struct PoolDaemonTests {
         let daemon = try await pool.start()
         let granted = try await pool.readyLease(pool.terms())
         let lease = granted.lease
+        let bundle = try #require(lease.bundle)
         #expect(lease.address == "192.168.64.2")
         #expect(lease.expiresAt == pool.clock.now.addingTimeInterval(3600))
-        let clone = try VMBundle(root: URL(filePath: lease.bundle)).settings()
+        let clone = try VMBundle(root: URL(filePath: bundle)).settings()
         #expect(clone.macAddress != PoolFixture.sourceMACAddress)
         #expect(clone.credentialRotation == .pending)
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.map(\.id) == [lease.id])
@@ -22,7 +23,7 @@ struct PoolDaemonTests {
         #expect(try await PoolClient.send(.release(lease.id), to: pool.directory) == .released(lease.id))
         #expect(try await next(granted.client) == .ended(lease.id, reason: "released by a client"))
         #expect(await eventually { await daemon.summary().leases.isEmpty })
-        #expect(!FileManager.default.fileExists(atPath: lease.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         #expect(!pool.launcher.isRunning(lease.id))
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.isEmpty)
         await daemon.shutdown()
@@ -34,6 +35,7 @@ struct PoolDaemonTests {
         let daemon = try await pool.start()
         let granted = try await pool.readyLease(pool.terms())
         let lease = granted.lease
+        let bundle = try #require(lease.bundle)
         // A read-only data directory makes every write of the state fail.
         let root = pool.directory.root.path(percentEncoded: false)
         #expect(chmod(root, 0o500) == 0)
@@ -43,14 +45,14 @@ struct PoolDaemonTests {
         try await Task.sleep(for: .milliseconds(300))
         #expect(pool.launcher.isRunning(lease.id))
         #expect(await daemon.summary().leases.map(\.phase) == [.stopping])
-        #expect(FileManager.default.fileExists(atPath: lease.bundle))
+        #expect(FileManager.default.fileExists(atPath: bundle))
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.map(\.phase) == [.ready])
 
         #expect(chmod(root, 0o700) == 0)
         await daemon.tick()
         #expect(await eventually { !pool.launcher.isRunning(lease.id) })
         #expect(await eventually { await daemon.summary().leases.isEmpty })
-        #expect(!FileManager.default.fileExists(atPath: lease.bundle))
+        #expect(!FileManager.default.fileExists(atPath: bundle))
         #expect(try PoolStore(file: pool.directory.stateFile).load().leases.isEmpty)
         await daemon.shutdown()
     }
@@ -108,7 +110,7 @@ struct PoolDaemonTests {
         #expect(try await next(high).lease?.phase == .starting)
         #expect(try await next(high).lease?.phase == .ready)
         #expect(try await next(low) == .queued(position: 1))
-        #expect(!FileManager.default.fileExists(atPath: first.lease.bundle))
+        #expect(try !FileManager.default.fileExists(atPath: #require(first.lease.bundle)))
         await daemon.shutdown()
     }
 
@@ -268,7 +270,8 @@ struct PoolDaemonTests {
     }
 
     /// Limits a paired client to its own leases, to the sources that the host offers, and to
-    /// leases without a shared directory or a priority above its ceiling.
+    /// leases without a shared directory or a priority above its ceiling. Shows the client the
+    /// source by its name, without a clone or an address.
     @Test func limitsPairedClients() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start(offeredSources: ["base": pool.source])
@@ -277,8 +280,8 @@ struct PoolDaemonTests {
         let remote = try await pool.pairedClient(of: daemon, owner: alice)
 
         let refusals = [
-            (LeaseTerms(source: pool.source, timeToLive: 60), "the host offers no source named \(pool.source)"),
-            (LeaseTerms(source: "other", timeToLive: 60), "the host offers no source named other"),
+            (LeaseTerms(source: pool.source, timeToLive: 60), "the host does not offer the requested source"),
+            (LeaseTerms(source: "other", timeToLive: 60), "the host does not offer the requested source"),
             (
                 LeaseTerms(source: "base", timeToLive: 60, sharedDirectory: pool.root.url.path(percentEncoded: false)),
                 "a paired client cannot share a host directory",
@@ -302,9 +305,13 @@ struct PoolDaemonTests {
 
         try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
         let starting = try await next(remote)
-        #expect(starting.lease?.source == pool.source)
+        #expect(starting.lease?.source == "base")
+        #expect(starting.lease?.bundle == nil)
         let ready = try #require(await next(remote).lease)
         #expect(ready.phase == .ready)
+        #expect(ready.source == "base")
+        #expect(ready.bundle == nil)
+        #expect(ready.address == nil)
         try remote.send(PoolRequest.status)
         #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [ready], queue: [])))
         let stored = try PoolStore(file: pool.directory.stateFile).load().leases

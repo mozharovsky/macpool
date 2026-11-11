@@ -79,6 +79,8 @@ struct ImageTests {
     }
 
     /// Checks a queued image again before cloning it and ends the lease if it is no longer ready.
+    ///
+    /// A paired client receives the hidden failure, and a local client receives the reason.
     @Test func rechecksQueuedImageBeforeCloning() async throws {
         let pool = try PoolFixture()
         let image = try pool.makeImage(named: "xcode")
@@ -100,7 +102,7 @@ struct ImageTests {
                 .description
         }
         #expect(try await endReason(of: local) == reason(imagePath))
-        #expect(try await endReason(of: remote) == reason("xcode"))
+        #expect(try await endReason(of: remote) == MachineOutcome.hiddenFailure)
         #expect(await eventually { await daemon.summary().leases.isEmpty })
         await daemon.shutdown()
     }

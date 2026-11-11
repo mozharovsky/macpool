@@ -105,6 +105,9 @@ struct LeaseRecord: Codable, Sendable, Equatable {
     /// The terms from the request.
     let terms: LeaseTerms
 
+    /// The name of the source that a paired client asked for, or `nil` for a local request.
+    let sourceName: String?
+
     /// The lease's stage.
     var phase: LeasePhase
 
@@ -137,6 +140,8 @@ struct LeaseRecord: Codable, Sendable, Equatable {
         case owner
         /// The `terms` key.
         case terms
+        /// The `source_name` key.
+        case sourceName = "source_name"
         /// The `phase` key.
         case phase
         /// The `address` key.
@@ -193,6 +198,7 @@ extension LeaseRecord {
             id: container.decode(LeaseID.self, forKey: .id),
             owner: owner,
             terms: container.decode(LeaseTerms.self, forKey: .terms),
+            sourceName: container.decodeIfPresent(String.self, forKey: .sourceName),
             phase: container.decode(LeasePhase.self, forKey: .phase),
             address: container.decodeIfPresent(String.self, forKey: .address),
             grantedAt: container.decode(Date.self, forKey: .grantedAt),
@@ -239,6 +245,9 @@ struct QueuedRequest: Sendable, Equatable {
 
     /// The requested terms.
     let terms: LeaseTerms
+
+    /// The name of the source that a paired client asked for, or `nil` for a local request.
+    let sourceName: String?
 
     /// The arrival time.
     let since: Date
@@ -334,15 +343,25 @@ struct LeaseLedger {
     ///   - terms: The requested terms, which the caller already validated.
     ///   - client: The client that waits for the lease.
     ///   - owner: Who requests the lease and later acts on it.
+    ///   - sourceName: The name of the source that a paired client asked for, or `nil` for a
+    ///     local request.
     ///   - now: The current time.
     /// - Returns: The replies and launches that follow.
     mutating func request(
         _ terms: LeaseTerms,
         from client: ClientID,
         owner: LeaseOwner,
+        sourceName: String? = nil,
         now: Date,
     ) -> [LedgerAction] {
-        let request = QueuedRequest(ticket: nextTicket, client: client, owner: owner, terms: terms, since: now)
+        let request = QueuedRequest(
+            ticket: nextTicket,
+            client: client,
+            owner: owner,
+            terms: terms,
+            sourceName: sourceName,
+            since: now,
+        )
         nextTicket += 1
         let index = queue.firstIndex { $0.terms.priority < terms.priority } ?? queue.endIndex
         queue.insert(request, at: index)
@@ -440,7 +459,7 @@ struct LeaseLedger {
             record.expiresAt = now.addingTimeInterval(TimeInterval(record.terms.timeToLive))
             leases[id] = record
         }
-        return summary(of: record)
+        return summary(of: record, for: owner)
     }
 
     /// Records the process of a lease's new supervisor.
@@ -516,8 +535,13 @@ struct LeaseLedger {
         }
         let allowed = PoolPolicy.restarts(record.terms.restartPolicy, after: outcome)
         guard allowed, record.restarts < policy.maximumRestarts else {
-            let reason = allowed ? "\(outcome) after \(record.restarts) restarts" : outcome.description
-            return end(id, reason: reason, machineExited: true)
+            let suffix = allowed ? " after \(record.restarts) restarts" : ""
+            return end(
+                id,
+                reason: outcome.description + suffix,
+                pairedClientReason: outcome.descriptionForPairedClients + suffix,
+                machineExited: true,
+            )
         }
         record.phase = .restarting
         record.restartAt = now.addingTimeInterval(policy.restartDelay(after: record.restarts) / .seconds(1))
@@ -526,7 +550,8 @@ struct LeaseLedger {
         guard let client = clients[id] else {
             return []
         }
-        return [.notify(client, .restarting(summary(of: record), reason: outcome.description))]
+        let reason = record.owner == .local ? outcome.description : outcome.descriptionForPairedClients
+        return [.notify(client, .restarting(summary(of: record), reason: reason))]
     }
 
     /// Ends a lease whose boot cannot succeed, without a restart.
@@ -534,12 +559,15 @@ struct LeaseLedger {
     /// A failure to prepare the clone does not go away on its own, so restarting would only keep
     /// the slot busy.
     ///
+    /// A paired client receives ``MachineOutcome/hiddenFailure`` instead of the reason, because
+    /// the reason may name host paths.
+    ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - reason: Why the boot cannot succeed.
     /// - Returns: The notice and the discard that follow.
     mutating func bootFailed(_ id: LeaseID, reason: String) -> [LedgerAction] {
-        end(id, reason: reason, machineExited: true)
+        end(id, reason: reason, pairedClientReason: MachineOutcome.hiddenFailure, machineExited: true)
     }
 
     /// Removes a lease whose clone the daemon deleted and grants its slot.
@@ -616,7 +644,7 @@ struct LeaseLedger {
     /// Describes the pool as an owner may see it.
     ///
     /// A paired client sees only its own leases and requests. Its requests keep their positions
-    /// in the whole queue.
+    /// in the whole queue. The local user sees the host paths of every lease and request.
     ///
     /// - Parameter owner: Who asks.
     /// - Returns: The slots, the visible leases ordered by identifier, and the visible requests in
@@ -627,11 +655,11 @@ struct LeaseLedger {
             leases: leases.values
                 .filter { owner.mayAct(on: $0.owner) }
                 .sorted { $0.id < $1.id }
-                .map(summary(of:)),
+                .map { summary(of: $0, for: owner) },
             queue: queue.enumerated().filter { owner.mayAct(on: $1.owner) }.map { index, request in
                 QueuedSummary(
                     position: index + 1,
-                    source: request.terms.source,
+                    source: owner == .local ? request.terms.source : request.sourceName ?? "",
                     priority: request.terms.priority,
                     since: request.since,
                 )
@@ -654,17 +682,34 @@ struct LeaseLedger {
         return record
     }
 
-    /// Describes one lease for clients.
+    /// Describes one lease for the notices to its client.
+    ///
+    /// The notices about a paired client's lease name no host path, even if a local client
+    /// attached to the lease.
     ///
     /// - Parameter record: The stored lease.
-    /// - Returns: The lease as clients see it.
+    /// - Returns: The lease as its owner sees it.
     func summary(of record: LeaseRecord) -> LeaseSummary {
-        LeaseSummary(
+        summary(of: record, for: record.owner)
+    }
+
+    /// Describes one lease as an owner sees it.
+    ///
+    /// A paired client sees the source's name, and no clone or guest address.
+    ///
+    /// - Parameters:
+    ///   - record: The stored lease.
+    ///   - viewer: Who receives the summary.
+    /// - Returns: The lease as the viewer sees it. The source is empty if a paired client's lease
+    ///   has no source name. Only a state file from an older build holds such a lease.
+    func summary(of record: LeaseRecord, for viewer: LeaseOwner) -> LeaseSummary {
+        let isLocal = viewer == .local
+        return LeaseSummary(
             id: record.id,
-            source: record.terms.source,
-            bundle: directory.bundle(for: record.id).root.path(percentEncoded: false),
+            source: isLocal ? record.terms.source : record.sourceName ?? "",
+            bundle: isLocal ? directory.bundle(for: record.id).root.path(percentEncoded: false) : nil,
             phase: record.phase,
-            address: record.address,
+            address: isLocal ? record.address : nil,
             expiresAt: record.expiresAt,
             restarts: record.restarts,
             detached: record.terms.detached,
@@ -688,6 +733,7 @@ struct LeaseLedger {
                 id: id,
                 owner: request.owner,
                 terms: request.terms,
+                sourceName: request.sourceName,
                 phase: .starting,
                 grantedAt: now,
                 restarts: 0,
@@ -720,9 +766,16 @@ struct LeaseLedger {
     /// - Parameters:
     ///   - id: The lease.
     ///   - reason: Why the lease ends.
+    ///   - pairedClientReason: The reason that the client of a paired client's lease receives
+    ///     instead, or `nil` when `reason` names no host path.
     ///   - machineExited: Whether the caller knows that the VM's run already ended.
     /// - Returns: The notice and the stop or discard, or nothing for a lease that already stops.
-    private mutating func end(_ id: LeaseID, reason: String, machineExited: Bool = false) -> [LedgerAction] {
+    private mutating func end(
+        _ id: LeaseID,
+        reason: String,
+        pairedClientReason: String? = nil,
+        machineExited: Bool = false,
+    ) -> [LedgerAction] {
         guard var record = leases[id], record.phase != .stopping else {
             return []
         }
@@ -735,7 +788,8 @@ struct LeaseLedger {
         orphanedSince[id] = nil
         var actions: [LedgerAction] = []
         if let client = clients.removeValue(forKey: id) {
-            actions.append(.notify(client, .ended(id, reason: reason)))
+            let shown = record.owner == .local ? reason : pairedClientReason ?? reason
+            actions.append(.notify(client, .ended(id, reason: shown)))
         }
         actions.append(machineMayRun ? .stop(id) : .discard(id))
         return actions

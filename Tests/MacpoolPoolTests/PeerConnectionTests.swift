@@ -28,7 +28,7 @@ struct PeerConnectionTests {
         // Only a paired Mac must name an offered source. The refusal shows that the daemon serves
         // the connection for the client's key.
         try channel.send(PoolRequest.lease(fixture.terms()))
-        let refusal = PoolError.invalidRequest(reason: "the host offers no source named \(fixture.source)")
+        let refusal = PoolError.invalidRequest(reason: "the host does not offer the requested source")
         #expect(try await next(channel) == .failure(refusal.description))
         let connected = fixture.logs.entries("A paired Mac connected")
         #expect(connected.map { $0.metadata["key"] } == [clientKey.rawValue])
