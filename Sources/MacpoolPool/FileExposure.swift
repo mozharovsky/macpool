@@ -1,3 +1,4 @@
+import Darwin.membership
 import Foundation
 
 /// What lets other users reach a file that belongs to the current user and grants others no
@@ -72,14 +73,15 @@ enum FileExposure: Sendable, Equatable {
     ///
     /// Unlike ``find(inDirectoryAt:)``, the check accepts an access control list that only denies
     /// access or only allows reading. macOS puts `group:everyone deny delete` on folders such as
-    /// `~/Library`. Such a list gives other users no access.
+    /// `~/Library`. Such a list gives other users no access. The check also accepts an entry that
+    /// allows writes only to the directory's owner.
     ///
     /// - Parameter directory: The directory.
     /// - Returns: The first exposure found, or `nil` when nothing lets other users change the
     ///   directory's entries.
     /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the directory cannot be
-    ///   opened or its volume or access control list cannot be read. A symbolic link at its path
-    ///   cannot be opened.
+    ///   opened or its volume, owner, or access control list cannot be read. A symbolic link at
+    ///   its path cannot be opened.
     static func findWriteAccess(inDirectoryAt directory: URL) throws(PoolError) -> FileExposure? {
         let path = directory.pathWithoutTrailingSlash
         let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -94,6 +96,38 @@ enum FileExposure: Sendable, Equatable {
             return nil
         }
         defer { acl_free(UnsafeMutableRawPointer(list)) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            throw .systemCall("inspecting", directory)
+        }
+        return try findWriteAccess(in: list, owner: status.st_uid, of: directory)
+    }
+
+    /// Finds an entry of a directory's access control list that lets another user change the
+    /// directory's entries.
+    ///
+    /// If an entry allows a write in ``directoryWrites`` and its subject is not the owner's UUID,
+    /// the call returns ``writableAccessControlList``. This holds for a group's entry even when
+    /// the owner belongs to the group.
+    ///
+    /// - Parameters:
+    ///   - list: The directory's extended access control list.
+    ///   - owner: The user ID of the directory's owner.
+    ///   - directory: The directory's location, for error messages.
+    /// - Returns: ``writableAccessControlList``, or `nil` when no entry lets another user write.
+    /// - Throws: ``PoolError/fileSystem(operation:path:reason:)`` when the owner's UUID or an
+    ///   entry's tag, permissions, or subject cannot be read.
+    static func findWriteAccess(in list: acl_t, owner: uid_t, of directory: URL) throws(PoolError) -> FileExposure? {
+        var ownerUUID: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        let code = mbr_uid_to_uuid(owner, &ownerUUID)
+        guard code == 0 else {
+            throw .fileSystem(
+                operation: "finding the owner's UUID of",
+                path: directory.path(percentEncoded: false),
+                reason: String(cString: strerror(code)),
+            )
+        }
+        let ownerID = UUID(uuid: ownerUUID)
         var entry: acl_entry_t?
         var position = ACL_FIRST_ENTRY.rawValue
         while acl_get_entry(list, position, &entry) == 0, let current = entry {
@@ -101,15 +135,28 @@ enum FileExposure: Sendable, Equatable {
             var tag = ACL_UNDEFINED_TAG
             var permissions: acl_permset_t?
             guard acl_get_tag_type(current, &tag) == 0, acl_get_permset(current, &permissions) == 0,
-                  let permissions
+                  let permissions, let subject = subject(of: current)
             else {
                 throw .systemCall("reading the access control list of", directory)
             }
-            if tag == ACL_EXTENDED_ALLOW, directoryWrites.contains(where: { acl_get_perm_np(permissions, $0) == 1 }) {
+            if tag == ACL_EXTENDED_ALLOW, subject != ownerID,
+               directoryWrites.contains(where: { acl_get_perm_np(permissions, $0) == 1 }) {
                 return .writableAccessControlList
             }
         }
         return nil
+    }
+
+    /// Reads the UUID of the user or group that an access control entry applies to.
+    ///
+    /// - Parameter entry: An entry of an extended access control list.
+    /// - Returns: The UUID, or `nil` when the entry has no subject or it cannot be read.
+    private static func subject(of entry: acl_entry_t) -> UUID? {
+        guard let qualifier = acl_get_qualifier(entry) else {
+            return nil
+        }
+        defer { acl_free(qualifier) }
+        return UUID(uuid: qualifier.load(as: uuid_t.self))
     }
 
     /// Finds what the volume of an open file lets other users do.

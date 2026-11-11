@@ -142,6 +142,57 @@ struct MacIdentityTests {
         try await Self.changeMode("-N", path)
     }
 
+    /// Accepts an access control entry of the data directory that lets only its owner change the
+    /// entries. Refuses an entry for another user or for a group, also beside an entry for the owner.
+    @Test func acceptsWritesOnlyForTheOwnerOfTheDataDirectory() async throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        let path = directory.root.pathWithoutTrailingSlash
+        let refusal = PoolError.insecureDirectory(path: path, reason: FileExposure.writableAccessControlList.reason)
+        let owner = "user:\(NSUserName()) allow add_file,delete_child,writesecurity"
+
+        try await Self.changeMode("+a", owner, path)
+        _ = try MacIdentity.loadOrCreate(in: directory)
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        try await Self.changeMode("-N", path)
+        let refused = [
+            ["user:daemon allow add_file"],
+            ["group:staff allow add_file"],
+            [owner, "user:daemon allow delete_child"],
+        ]
+        for entries in refused {
+            for entry in entries {
+                try await Self.changeMode("+a", entry, path)
+            }
+            #expect(throws: refusal, "\(entries)") {
+                try MacIdentity.loadOrCreate(in: directory)
+            }
+            #expect(throws: refusal, "\(entries)") {
+                try TrustList<TrustedClient>.load(from: directory)
+            }
+            try await Self.changeMode("-N", path)
+        }
+    }
+
+    /// Fails instead of skipping an access control entry whose subject cannot be read.
+    @Test func failsOnAnEntryWithoutASubject() throws {
+        var list = acl_init(1)
+        defer { acl_free(UnsafeMutableRawPointer(list)) }
+        var entry: acl_entry_t?
+        try #require(acl_create_entry(&list, &entry) == 0)
+        let directory = URL(filePath: "/")
+        let error = #expect(throws: PoolError.self) {
+            try FileExposure.findWriteAccess(in: #require(list), owner: getuid(), of: directory)
+        }
+        guard case let .fileSystem(operation, _, _)? = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
+        #expect(operation == "reading the access control list of")
+    }
+
     /// Names a key with the hexadecimal digits of its digest.
     @Test func namesTheKeyByItsDigest() {
         let digest = MacIdentity.keyDigest(of: P256.Signing.PrivateKey().publicKey)
