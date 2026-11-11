@@ -41,19 +41,20 @@ struct HostListCommand: ParsableCommand {
     /// - Throws: ``CommandError/pool(_:)`` when the list cannot be read.
     func lines() throws(CommandError) -> [String] {
         let directory = location.directory
-        let clients = try pool { () throws(PoolError) in try TrustedClient.paired(in: directory) }
+        let clients = try readList { () throws(PoolError) in try TrustedClient.paired(in: directory) }
         if json {
             return try [LeaseOutput.json(clients, describing: "the list of paired clients")]
         }
         guard !clients.isEmpty else {
             return ["no paired clients"]
         }
-        return LeaseOutput.aligned([["PAIRED", "BLOCKED", "CEILING", "CLIENT"]] + clients.map { client in
+        return LeaseOutput.aligned([["PAIRED", "BLOCKED", "CEILING", "KEY", "CLIENT"]] + clients.map { client in
             [
                 LeaseOutput.timestamp(client.pairedAt),
                 client.isBlocked ? "yes" : "no",
                 String(client.priorityCeiling),
-                PeerText.name(client.name, key: client.key),
+                client.key.shortKey,
+                PeerText.isolated(client.name),
             ]
         })
     }
@@ -99,20 +100,39 @@ struct PoolListCommand: ParsableCommand {
     /// - Throws: ``CommandError/pool(_:)`` when the list cannot be read.
     func lines() throws(CommandError) -> [String] {
         let directory = location.directory
-        let hosts = try pool { () throws(PoolError) in try TrustedHost.paired(in: directory) }
+        let hosts = try readList { () throws(PoolError) in try TrustedHost.paired(in: directory) }
         if json {
             return try [LeaseOutput.json(hosts, describing: "the list of paired hosts")]
         }
         guard !hosts.isEmpty else {
             return ["no paired hosts"]
         }
-        return LeaseOutput.aligned([["PAIRED", "ADDRESS", "PORT", "HOST"]] + hosts.map { host in
+        return LeaseOutput.aligned([["PAIRED", "ADDRESS", "PORT", "KEY", "HOST"]] + hosts.map { host in
             [
                 LeaseOutput.timestamp(host.pairedAt),
                 PeerText.isolated(host.address),
                 String(host.port),
-                PeerText.name(host.name, key: host.key),
+                host.key.shortKey,
+                PeerText.isolated(host.name),
             ]
         })
+    }
+}
+
+/// Reads a list of paired Macs and wraps its error for the command line.
+///
+/// The reason of an unusable list can quote text from the file, which someone may have edited.
+/// The reason therefore passes through ``PeerText/escaped(_:)``.
+///
+/// - Parameter read: The read of the list.
+/// - Returns: The records.
+/// - Throws: ``CommandError/pool(_:)`` with the read's error.
+private func readList<Record>(_ read: () throws(PoolError) -> [Record]) throws(CommandError) -> [Record] {
+    do {
+        return try read()
+    } catch let .unusableTrustList(path, reason) {
+        throw .pool(.unusableTrustList(path: path, reason: PeerText.escaped(reason)))
+    } catch {
+        throw .pool(error)
     }
 }

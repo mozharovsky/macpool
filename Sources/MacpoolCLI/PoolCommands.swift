@@ -145,6 +145,9 @@ enum LeaseOutput {
 
     /// Encodes a value as JSON with sorted keys and ISO 8601 times.
     ///
+    /// Strings keep their exact text. Scalars that a terminal would act on appear as escapes. See
+    /// ``PeerText/escapedJSON(_:)``.
+    ///
     /// - Parameters:
     ///   - value: The value to encode.
     ///   - name: What the value holds, for the error message, such as `the pool summary`.
@@ -157,7 +160,7 @@ enum LeaseOutput {
         guard let data = try? encoder.encode(value) else {
             throw .pool(.malformedMessage(reason: "\(name) cannot be encoded"))
         }
-        return String(decoding: data, as: UTF8.self)
+        return PeerText.escapedJSON(String(decoding: data, as: UTF8.self))
     }
 
     /// Formats the pool as tables of leases and images, with one line per queued request.

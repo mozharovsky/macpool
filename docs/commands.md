@@ -118,14 +118,18 @@ prints `no paired clients`.
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory that holds the list. |
 | `--json` | off | Prints the records as one JSON array. |
 
-Each row shows when the client paired, whether this Mac blocks it, its priority ceiling, and its
-name with its short key, such as `runner (mzxw-6ytb-oi2d-k3lq)`. Names aren't unique, so compare
-the short key.
+Each row shows when the client paired, whether this Mac blocks it, its priority ceiling, its short
+key, such as `mzxw-6ytb-oi2d-k3lq`, and its name. Names aren't unique, so compare the short key in
+the `KEY` column. A name can contain text that looks like a short key.
 
-The other Mac chose its name. The table shows each control, format, line separator, and paragraph
-separator character as an escape such as `\u{202E}`, and a backslash as two. It also puts the name
-between the invisible isolates U+2068 and U+2069. Right-to-left letters then don't reorder the
-columns. Scripts should read `--json`. It keeps the exact names and the full keys.
+The other Mac chose its name. The table shows each character that pairing refuses in a name as an
+escape such as `\u{202E}`, and a backslash as two. These are control and format characters, line
+and paragraph separators, private-use and unassigned characters, and invisible characters such as
+variation selectors. The table also puts the name between the invisible isolates U+2068 and U+2069.
+Right-to-left letters then don't reorder the columns.
+
+`--json` keeps the exact names and the full keys. It writes the same characters as JSON escapes
+such as `\u202E`. A JSON parser reads them back as the original text.
 
 ## pool list
 
@@ -133,9 +137,9 @@ columns. Scripts should read `--json`. It keeps the exact names and the full key
 data directory and needs no running daemon. Without paired hosts it prints `no paired hosts`. It
 takes the same `--data-dir` and `--json` options as `host list`.
 
-Each row shows when this Mac paired, the host's address and port from the pairing code, and the
-host's name with its short key. The host chose its name and its address. The table escapes and
-isolates both like a client's name in `host list`.
+Each row shows when this Mac paired, the host's address and port from the pairing code, the host's
+short key, and its name. The host chose its name and its address. The table escapes and isolates
+both like a client's name in `host list`.
 
 ## Scripts
 

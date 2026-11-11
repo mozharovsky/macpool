@@ -9,10 +9,16 @@ struct TrustCommandTests {
     /// The time of every pairing in these tests, 2027-01-15T08:00:00Z.
     private static let pairedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
-    /// Escapes the scalars that act on a terminal and keeps every other scalar.
+    /// Escapes the scalars that the pairing check refuses and keeps every other scalar.
     @Test(arguments: zip(
-        ["\u{1B}[31mred", "a\u{202E}b", "a\u{2028}b", "a\u{2029}b", "a\u{200B}b", "a\nb", "a\\u{1B}"],
-        ["\\u{1B}[31mred", "a\\u{202E}b", "a\\u{2028}b", "a\\u{2029}b", "a\\u{200B}b", "a\\u{A}b", "a\\\\u{1B}"],
+        [
+            "\u{1B}[31mred", "a\u{202E}b", "a\u{2028}b", "a\u{2029}b", "a\u{200B}b", "a\nb", "a\u{9B}b",
+            "a\u{FE0F}b", "a\u{3164}b", "a\u{E000}b", "a\u{378}b", "a\\u{1B}",
+        ],
+        [
+            "\\u{1B}[31mred", "a\\u{202E}b", "a\\u{2028}b", "a\\u{2029}b", "a\\u{200B}b", "a\\u{A}b", "a\\u{9B}b",
+            "a\\u{FE0F}b", "a\\u{3164}b", "a\\u{E000}b", "a\\u{378}b", "a\\\\u{1B}",
+        ],
     ))
     func escapesTerminalScalars(text: String, escaped: String) {
         #expect(PeerText.escaped(text) == escaped)
@@ -34,9 +40,9 @@ struct TrustCommandTests {
             TrustedClient(key: hebrew, name: "שלום", pairedAt: Self.pairedAt, isBlocked: true, priorityCeiling: 12),
         ])
         #expect(try fixture.hostList() == [
-            "PAIRED                BLOCKED  CEILING  CLIENT",
-            "2027-01-15T08:00:00Z  no       0        \u{2068}runner\u{2069} (\(runner.shortKey))",
-            "2027-01-15T08:00:00Z  yes      12       \u{2068}שלום\u{2069} (\(hebrew.shortKey))",
+            "PAIRED                BLOCKED  CEILING  KEY                  CLIENT",
+            "2027-01-15T08:00:00Z  no       0        \(runner.shortKey)  \u{2068}runner\u{2069}",
+            "2027-01-15T08:00:00Z  yes      12       \(hebrew.shortKey)  \u{2068}שלום\u{2069}",
         ])
     }
 
@@ -57,10 +63,10 @@ struct TrustCommandTests {
             TrustedHost(key: second, name: "מארח", address: "מארח.local", port: 80, pairedAt: Self.pairedAt),
         ])
         #expect(try fixture.poolList() == [
-            "PAIRED                ADDRESS        PORT  HOST",
-            "2027-01-15T08:00:00Z  \u{2068}example.local\u{2069}  7373  "
-                + "\u{2068}build\\u{1B}[2J\u{2069} (\(first.shortKey))",
-            "2027-01-15T08:00:00Z  \u{2068}מארח.local\u{2069}     80    \u{2068}מארח\u{2069} (\(second.shortKey))",
+            "PAIRED                ADDRESS        PORT  KEY                  HOST",
+            "2027-01-15T08:00:00Z  \u{2068}example.local\u{2069}  7373  \(first.shortKey)  "
+                + "\u{2068}build\\u{1B}[2J\u{2069}",
+            "2027-01-15T08:00:00Z  \u{2068}מארח.local\u{2069}     80    \(second.shortKey)  \u{2068}מארח\u{2069}",
         ])
     }
 
@@ -75,15 +81,33 @@ struct TrustCommandTests {
         ])
         let lines = try fixture.hostList()
         #expect(lines.count == 3)
-        #expect(lines[1].hasSuffix("\u{2068}runner\u{2069} (\(first.shortKey))"))
-        #expect(lines[2].hasSuffix("\u{2068}runner  \u{2069} (\(second.shortKey))"))
+        #expect(lines[1].hasSuffix("\(first.shortKey)  \u{2068}runner\u{2069}"))
+        #expect(lines[2].hasSuffix("\(second.shortKey)  \u{2068}runner  \u{2069}"))
     }
 
-    /// Prints the exact records as JSON, without isolates or escapes of its own.
+    /// Prints the real short key before a name that imitates another Mac's short key.
+    @Test func printsTheKeyBeforeTheName() throws {
+        let fixture = try TrustFixture()
+        let real = try fixture.key("3")
+        let imitation = "runner (xo53-xo53-xo53-xo53)" + String(repeating: "\u{3000}", count: 36)
+        #expect(PairedMac.isValidName(imitation))
+        try fixture.save([TrustedClient(key: real, name: imitation, pairedAt: Self.pairedAt, isBlocked: false)])
+        #expect(try fixture.hostList().last == "2027-01-15T08:00:00Z  no       0        \(real.shortKey)  "
+            + "\u{2068}\(imitation)\u{2069}")
+        #expect(PeerText.name(imitation, key: real) == "\(real.shortKey) \u{2068}\(imitation)\u{2069}")
+    }
+
+    /// Prints records as JSON that parses back to the exact records, with escapes for the scalars
+    /// that a terminal acts on and without isolates.
     @Test func printsExactJSON() throws {
         let fixture = try TrustFixture()
         let clients = try [
-            TrustedClient(key: fixture.key("e"), name: "a\u{202E}b\u{2028}", pairedAt: Self.pairedAt, isBlocked: true),
+            TrustedClient(
+                key: fixture.key("e"),
+                name: "a\u{202E}b\u{2028}\u{9B}\u{7F}\u{E0041}",
+                pairedAt: Self.pairedAt,
+                isBlocked: true,
+            ),
         ]
         let hosts = try [
             TrustedHost(
@@ -102,7 +126,9 @@ struct TrustCommandTests {
             #expect(!text.contains(PeerText.isolateStart))
             #expect(!text.contains(PeerText.isolateEnd))
             #expect(!text.contains("\\u{"))
+            #expect(!text.unicodeScalars.contains { $0.value > 0x7E && !PairedMac.isPrintable($0) })
         }
+        #expect(try fixture.hostList(json: true).joined().contains(#"a\u202Eb\u2028\u009B\u007F\uDB40\uDC41"#))
         #expect(try decoder
             .decode([TrustedClient].self, from: Data(fixture.hostList(json: true).joined().utf8)) == clients)
         #expect(try decoder.decode([TrustedHost].self, from: Data(fixture.poolList(json: true).joined().utf8)) == hosts)
@@ -124,6 +150,21 @@ struct TrustCommandTests {
         try fixture.save([TrustedClient]())
         try fixture.save([TrustedHost]())
         try expectEmpty()
+    }
+
+    /// Escapes the text from the file that the reason of an unusable list quotes.
+    @Test func escapesTheReasonOfAnUnusableList() throws {
+        let fixture = try TrustFixture()
+        try fixture.save([TrustedClient]())
+        let list = #"{"version":1,"macs":[{"key":"\u001b[2J\u0007","name":"x","paired_at":"2027-01-15T08:00:00Z","#
+            + #""blocked":false}]}"#
+        try Data(list.utf8).write(to: TrustList<TrustedClient>.file(in: fixture.directory))
+        let error = #expect(throws: CommandError.self) {
+            try fixture.hostList()
+        }
+        let description = try #require(error?.description)
+        #expect(description.contains(#"\u{1B}[2J\u{7}"#))
+        #expect(!description.unicodeScalars.contains { !PairedMac.isPrintable($0) })
     }
 
     /// Reports an unreadable list with its path and the reason.

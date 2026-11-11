@@ -974,11 +974,14 @@ public struct PairedMac: Sendable, Equatable, Codable {
 
     /// Reports whether a scalar may appear in a Mac's name.
     ///
+    /// A list of paired Macs that someone edited may hold names with other scalars. Escape those
+    /// scalars before a terminal shows such a name.
+    ///
     /// - Parameter scalar: A scalar of the name.
     /// - Returns: Whether the scalar is not default-ignorable and its general category is not a
     ///   control, format, separator of lines or paragraphs, private-use, surrogate, or unassigned
     ///   category.
-    private static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+    public static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
         guard !scalar.properties.isDefaultIgnorableCodePoint else {
             return false
         }
