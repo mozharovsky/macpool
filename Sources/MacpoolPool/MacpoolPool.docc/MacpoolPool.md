@@ -166,6 +166,21 @@ that the client's macOS does not know, the host records the client and
 ``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
 and pair again with a new code.
 
+### Revoking
+
+The local user revokes a client with ``PoolRequest/revoke(key:endLeases:)``. Name the client by its
+short key or its full fingerprint. The daemon takes no name, because each Mac chooses its own name
+and two Macs may choose the same one. If a short key matches two records, the request fails and
+asks for the full key.
+
+A revocation marks the record as blocked and keeps its other fields. The daemon then closes every
+connection of the client. The client's waiting requests leave the queue, and its leases end. Only a
+detached lease whose VM was ready runs on until it expires, unless `endLeases` is set. Nothing
+unblocks a client. It cannot pair again while its record stays in `clients.json`.
+
+If the list cannot be read or the block cannot be saved, the request fails. The client then keeps
+its connections and leases.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a

@@ -34,7 +34,8 @@ import Synchronization
 ///
 /// The daemon reads a paired client's record again before each of its requests. If the record is
 /// gone or blocked, the daemon refuses the request and closes the connection. If the list cannot
-/// be read, the daemon refuses only the request.
+/// be read, the daemon refuses only the request. A revocation blocks the record and closes the
+/// client's connections at once.
 ///
 /// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
 /// Mac's key only then. A key or a list of paired clients that cannot be loaded, or a port that
@@ -904,6 +905,10 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     /// - Returns: Whether the connection stays open for the next request.
     private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) -> Bool {
+        // A revocation may close the connection after the line arrived.
+        guard clients[client] != nil else {
+            return false
+        }
         var record: TrustedClient?
         if case let .client(key) = owner {
             do throws(PoolError) {
@@ -959,6 +964,11 @@ public actor PoolDaemon {
                     throw .invalidRequest(reason: "only another Mac can pair with the host")
                 }
                 reply(pair(key, secret: secret, name: name), to: client)
+            case let .revoke(key, endLeases):
+                guard owner == .local else {
+                    throw .invalidRequest(reason: "only the host's own user can revoke Macs")
+                }
+                try reply(revoke(key, endLeases: endLeases), to: client)
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -966,9 +976,116 @@ public actor PoolDaemon {
         return true
     }
 
+    /// Blocks a paired Mac, closes its connections, and ends its leases that need a client.
+    ///
+    /// If `endLeases` is set, the daemon also ends the Mac's detached leases. The daemon saves the
+    /// block before it closes the connections. If the list cannot be read or saved, the Mac keeps
+    /// its connections and leases.
+    ///
+    /// - Parameters:
+    ///   - text: The Mac's short key or full fingerprint.
+    ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
+    /// - Returns: The reply to the local user.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key or when a
+    ///   short key names more than one Mac. The errors of ``TrustList/load(from:)`` and
+    ///   ``TrustList/save(to:)`` propagate.
+    private func revoke(_ text: String, endLeases: Bool) throws(PoolError) -> PoolReply {
+        var list = try TrustList<TrustedClient>.load(from: configuration.directory)
+        let record = try Self.onlyMatch(of: text, in: list.records.filter { $0.key.isNamed(by: text) })
+        list.block(record.key)
+        try list.save(to: configuration.directory)
+        let ended = cutOff(record.key, endLeases: endLeases, reason: Self.revocationReason)
+        configuration.logger.notice("Revoked a paired Mac", metadata: [
+            "key": "\(record.key)",
+            "name": "\(record.name)",
+            "connections": "\(ended.connections)",
+            "leases": "\(ended.leases)",
+        ])
+        return .revoked(
+            PairedMac(name: record.name, key: record.key),
+            connections: ended.connections,
+            leases: ended.leases,
+        )
+    }
+
+    /// The reason of the leases that a revocation ends.
+    private static let revocationReason = "the host revoked this Mac"
+
+    /// The connections and leases that ``cutOff(_:endLeases:reason:)`` ended.
+    private struct CutOff {
+        /// The number of connections that the daemon closed.
+        var connections: Int
+        /// The number of leases that ended.
+        var leases: Int
+    }
+
+    /// Ends the leases of a paired Mac and closes its connections.
+    ///
+    /// The daemon ends the leases first. Their attached clients then receive the reason. Each
+    /// closed connection receives a refusal, and its waiting requests leave the queue.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the Mac's key.
+    ///   - endLeases: Whether the daemon also ends the leases that outlive their client. The
+    ///     leases that need a client end in either case.
+    ///   - reason: Why the leases end.
+    /// - Returns: The counts of closed connections and of the Mac's leases that ended.
+    private func cutOff(_ key: KeyFingerprint, endLeases: Bool, reason: String) -> CutOff {
+        let owner = LeaseOwner.client(key)
+        let before = ledger.liveLeases(of: owner).count
+        // A lease that needs a client may wait for its client to reattach after a daemon
+        // restart. The Mac can no longer reattach. The lease therefore ends now.
+        for id in ledger.liveLeases(of: owner) where endLeases || ledger.leases[id]?.needsClient == true {
+            perform((try? ledger.release(id, owner: .local, reason: reason)) ?? [])
+        }
+        let connections = clients.filter { $0.value.owner == owner }.keys.sorted()
+        for connection in connections {
+            disconnect(connection, sending: .failure(Self.notAcceptedReason))
+        }
+        return CutOff(connections: connections.count, leases: before - ledger.liveLeases(of: owner).count)
+    }
+
     /// The refusal that a paired Mac receives after the host stopped accepting it.
     private static let notAcceptedReason = PoolError.invalidRequest(reason: "the host no longer accepts this Mac")
         .description
+
+    /// Sends a last reply to a paired client and closes its connection.
+    ///
+    /// The daemon withdraws the client's waiting requests and ends its attached leases at once,
+    /// as when the client disconnects. A paired client holds no invitation, because only the local
+    /// user may invite.
+    ///
+    /// - Parameters:
+    ///   - client: The client.
+    ///   - last: The reply that the client receives before the connection closes.
+    private func disconnect(_ client: ClientID, sending last: PoolReply) {
+        guard let connection = clients.removeValue(forKey: client) else {
+            return
+        }
+        perform(ledger.clientDisconnected(client, now: configuration.now()))
+        try? connection.channel.send(visible(last, to: connection.owner))
+        Task { await connection.channel.finish() }
+    }
+
+    /// Returns the one Mac that a person's key names.
+    ///
+    /// - Parameters:
+    ///   - text: The short key or full fingerprint that the person gave.
+    ///   - matches: The Macs with a key that `text` names, each once.
+    /// - Returns: The only match.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when `matches` is empty or has more than one
+    ///   Mac.
+    private static func onlyMatch<Mac>(of text: String, in matches: [Mac]) throws(PoolError) -> Mac {
+        guard matches.count < 2 else {
+            throw .invalidRequest(
+                reason: "\(matches.count) paired Macs have the short key \(text). Give the full key",
+            )
+        }
+        guard let match = matches.first else {
+            throw .invalidRequest(reason: "no paired Mac has the key \(text). Give its short key or its full key")
+        }
+        return match
+    }
 
     /// Sends a reply to a client that is still connected.
     ///
@@ -2034,7 +2151,7 @@ private extension PoolReply {
             [message]
         case let .invitation(code, _):
             [code.description]
-        case let .paired(mac), let .alreadyPaired(mac):
+        case let .paired(mac), let .alreadyPaired(mac), let .revoked(mac, _, _):
             [mac.name]
         }
     }

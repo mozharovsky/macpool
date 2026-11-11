@@ -43,6 +43,7 @@ struct MessageTests {
             .renew(id),
             .status,
             .invite(address: "127.0.0.1", priorityCeiling: 3),
+            .revoke(key: "mzxw-6ytb-oi2d-k3lq", endLeases: true),
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
@@ -61,6 +62,7 @@ struct MessageTests {
             .paired(PairedMac(name: "runner", key: randomKey())),
             .alreadyPaired(PairedMac(name: "runner", key: randomKey())),
             .wrongCode,
+            .revoked(PairedMac(name: "runner", key: randomKey()), connections: 2, leases: 1),
         ]
         for reply in replies {
             let data = try MessageCoding.encoder.encode(reply)
@@ -68,6 +70,8 @@ struct MessageTests {
         }
         let invite = Data(#"{"request":"invite","address":"127.0.0.1"}"#.utf8)
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: invite) == .invite(address: "127.0.0.1"))
+        let revoke = Data(#"{"request":"revoke","key":"mzxw-6ytb-oi2d-k3lq"}"#.utf8)
+        #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: revoke) == .revoke(key: "mzxw-6ytb-oi2d-k3lq"))
         var hidden = lease
         hidden.source = "base"
         hidden.bundle = nil

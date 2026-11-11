@@ -587,6 +587,26 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Closes the connection of a revoked Mac at once and refuses its new connections.
+    @Test func revokesAConnectedMac() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let open = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+
+        let revoked = try await PoolClient.send(.revoke(key: clientKey.shortKey), to: fixture.directory)
+        #expect(revoked == .revoked(PairedMac(name: "client", key: clientKey), connections: 1, leases: 0))
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        } != nil)
+        await daemon.shutdown()
+    }
+
     /// Admits nobody while the list of paired clients or its directory has an access control
     /// list, and leaves the list in place.
     @Test func admitsNobodyWhileTheListHasAnAccessControlList() async throws {

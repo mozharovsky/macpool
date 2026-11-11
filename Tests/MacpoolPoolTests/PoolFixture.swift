@@ -671,7 +671,8 @@ extension PoolReply {
         switch self {
         case let .starting(lease), let .ready(lease), let .restarting(lease, _), let .renewed(lease):
             lease
-        case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode:
+        case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode,
+             .revoked:
             nil
         }
     }
