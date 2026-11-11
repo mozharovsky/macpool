@@ -160,6 +160,20 @@ struct PoolCommandTests {
         ])
     }
 
+    /// Keeps a name whole when it has characters that take two UTF-16 units.
+    @Test func keepsWideCharactersInTable() {
+        let pool = PoolSummary(slots: 1, leases: [], queue: [], images: [
+            ImageSummary(name: "📦xcode", path: "/pool/images/📦xcode", isReady: true),
+            ImageSummary(name: "a", path: "/pool/images/a", isReady: false),
+        ])
+        #expect(LeaseOutput.table(pool) == [
+            "slots 1, leases 0, queued 0, images 2",
+            "IMAGE   READY  BUILDS",
+            "📦xcode  yes    -",
+            "a       no     -",
+        ])
+    }
+
     /// Leaves a running supervisor's socket and exit record alone when its lease is supervised.
     @Test func superviseRefusesLeaseWithRunningSupervisor() async throws {
         let parent = FileManager.default.temporaryDirectory

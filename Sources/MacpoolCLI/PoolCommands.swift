@@ -192,11 +192,9 @@ enum LeaseOutput {
         let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
         return rows.map { row in
             row.indices.map { column in
-                column == row.count - 1 ? row[column] : row[column].padding(
-                    toLength: widths[column],
-                    withPad: " ",
-                    startingAt: 0,
-                )
+                // String.padding(toLength:) counts UTF-16 units and would cut a name with an emoji.
+                column == row.count - 1 ? row[column]
+                    : row[column] + String(repeating: " ", count: widths[column] - row[column].count)
             }.joined(separator: "  ")
         }
     }
