@@ -60,9 +60,9 @@ If a step or a check fails, or you press Control-C, or the command gets `SIGTERM
 stops the VM and deletes the clone. With `--keep-failed`, it keeps the clone as `images/NAME` with `ready`
 set to false. Delete a failed image yourself before you build another one with the same name.
 
-If the command ends without its cleanup, for example after `kill -9` or a power loss, it leaves
-`images/.NAME.building` and `images/.NAME.inputs` behind. The next build of `NAME` stops and names
-both. Delete both when no other `image xcode` is building `NAME`.
+If the command ends without its cleanup, for example after `kill -9` or a power loss, it can leave
+`images/.NAME.building`, `images/.NAME.inputs`, or both behind. The next build of `NAME` stops and
+names both paths. When no other `image xcode` is building `NAME`, delete the ones that exist.
 
 The daemon refuses to lease an image that isn't ready or a bundle in `images` without
 `image.json`. It checks when a request arrives and again each time it clones the image for a lease.
