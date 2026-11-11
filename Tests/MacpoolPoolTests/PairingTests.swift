@@ -33,7 +33,7 @@ struct PairingTests {
         ] {
             #expect(PairingCode(broken) == nil, "\(broken)")
         }
-        #expect(PairingCode.isValidAddress("192.168.1.20"))
+        #expect(PairingCode.isValidAddress("192.0.2.20"))
         #expect(!PairingCode.isValidAddress("studio local"))
         #expect(!PairingCode.isValidAddress(""))
     }

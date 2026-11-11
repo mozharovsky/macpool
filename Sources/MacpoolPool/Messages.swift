@@ -394,7 +394,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// connection. A newer invitation replaces this one.
     ///
     /// - Parameter address: The host's address that the code carries to clients, such as
-    ///   `studio.local`.
+    ///   `example.local`.
     case invite(address: String)
 
     /// Pairs the sending Mac with the host.

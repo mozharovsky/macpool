@@ -19,7 +19,7 @@ public struct PairingCode: Sendable, Equatable, Codable, CustomStringConvertible
     /// The number of bytes of a secret.
     static let secretBytes = 16
 
-    /// The host's address, such as `studio.local` or `192.168.1.20`.
+    /// The host's address, such as `example.local` or `192.0.2.20`.
     public let address: String
 
     /// The TCP port on which the host listens for paired Macs.
