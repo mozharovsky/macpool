@@ -846,6 +846,9 @@ public struct PairedMac: Sendable, Equatable, Codable {
     /// scalars include the characters that have no width and the Hangul fillers. A name of only
     /// spaces, marks, or the blank Braille pattern U+2800 looks empty.
     ///
+    /// The check uses the Unicode tables of the running macOS. If a scalar comes from a newer
+    /// Unicode version than this macOS knows, the scalar is unassigned and the name fails.
+    ///
     /// - Parameter name: A name that a Mac gave for itself.
     /// - Returns: Whether the name meets every condition.
     static func isValidName(_ name: String) -> Bool {
@@ -867,6 +870,8 @@ public struct PairedMac: Sendable, Equatable, Codable {
             return false
         }
         switch scalar.properties.generalCategory {
+        // A newer Unicode version may assign a scalar that this macOS does not know to a format
+        // control.
         case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
             return false
         default:

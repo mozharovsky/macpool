@@ -180,8 +180,8 @@ public enum PoolClient {
     ///   key that does not match the code, ``PoolError/daemonRefused(message:)`` when the host
     ///   refuses the code, ``PoolError/connectionClosed`` when the host closes the connection
     ///   before it replies, or ``PoolError/malformedMessage(reason:)`` when the reply names another
-    ///   key. Another ``PoolError`` means that this Mac's key or the list of hosts cannot be read
-    ///   or written.
+    ///   key or a host name that this Mac does not accept. Another ``PoolError`` means that this
+    ///   Mac's key or the list of hosts cannot be read or written.
     public static func pair(
         using code: PairingCode,
         name: String,
@@ -233,6 +233,9 @@ public enum PoolClient {
             ))
             try hosts.save(to: directory)
             return host
+        case let .paired(host)? where host.key == hostKey:
+            throw .malformedMessage(reason: "the host's name has characters that macOS on this Mac does not accept. "
+                + "The host recorded this Mac. Change the host's name and pair again with a new code")
         case let .failure(message)?:
             throw .daemonRefused(message: message)
         case nil:

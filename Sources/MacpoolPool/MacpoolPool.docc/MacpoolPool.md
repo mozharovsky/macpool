@@ -134,6 +134,11 @@ A name also starts with a scalar that is not a mark. It has at least one letter,
 punctuation, or symbol other than the blank Braille pattern U+2800. A name therefore cannot hide
 part of itself or look empty when the pool shows it.
 
+Each Mac checks names with the Unicode tables of its own macOS. If the host's name has a scalar
+that the client's macOS does not know, the host records the client and
+``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
+and pair again with a new code.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a

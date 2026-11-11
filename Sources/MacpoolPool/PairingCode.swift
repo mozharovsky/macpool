@@ -2,7 +2,7 @@ import Foundation
 
 /// The text that a client Mac uses once to pair with a host.
 ///
-/// A code reads `macpool1:studio.local:7373:` followed by 52 base32 characters. The characters
+/// A code reads `macpool1:example.local:7373:` followed by 52 base32 characters. The characters
 /// carry the first 128 bits of the digest of the host's key and a secret of 128 bits. The client
 /// connects to the address and port and accepts only a host key with that digest. The host then
 /// accepts the client's key only with the secret.
