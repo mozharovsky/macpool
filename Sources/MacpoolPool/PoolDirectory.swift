@@ -12,8 +12,8 @@ public import MacpoolVM
 ///   supervisors leave behind. Only the owner can enter it.
 /// - `leases` holds one cloned bundle per lease, named after the lease.
 /// - `logs` holds the supervisors' output and, under launchd, the daemon's.
-/// - `trust` holds this Mac's key for connections between Macs. Only the owner can enter it, and
-///   backups skip it.
+/// - `trust` holds this Mac's key for connections between Macs and the lists of paired Macs. Only
+///   the owner can enter it, and backups skip it.
 ///
 /// Clones must live on the same APFS volume as their sources, so the data directory shares a
 /// volume with the source bundles.
@@ -233,6 +233,25 @@ public struct PoolDirectory: Sendable, Hashable {
             try trust.setResourceValues(values)
         } catch {
             throw .fileSystem("excluding from backups", trustDirectory, error)
+        }
+    }
+
+    /// Checks that no other user controls the trust directory or the data directory, and changes
+    /// neither.
+    ///
+    /// A reader of a list of paired Macs runs this check, because another user who controls the
+    /// directory could put a key in the list.
+    ///
+    /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when the data directory or the
+    ///   trust directory is not a real directory or belongs to another user, when other users can
+    ///   write to the data directory or enter the trust directory, or when a ``FileExposure``
+    ///   lets other users reach the trust directory, or
+    ///   ``PoolError/fileSystem(operation:path:reason:)`` when a directory cannot be inspected.
+    func checkTrustDirectory() throws(PoolError) {
+        try Self.checkOwnership(of: root, forbidden: 0o022)
+        try Self.checkOwnership(of: trustDirectory, forbidden: 0o077)
+        if let exposure = try FileExposure.find(inDirectoryAt: trustDirectory) {
+            throw .insecureDirectory(path: trustDirectory.pathWithoutTrailingSlash, reason: exposure.reason)
         }
     }
 
