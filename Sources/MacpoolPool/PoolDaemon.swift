@@ -992,9 +992,9 @@ public actor PoolDaemon {
     /// save also fails, the daemon keeps the block in ``unsavedBlocks`` and reports the failure.
     ///
     /// If the list cannot be read or has no record of the key, the daemon looks for the key among
-    /// the connected Macs and the owners of leases. It closes that Mac's connections and ends its
-    /// leases. When the list cannot be read, the daemon also keeps the block in ``unsavedBlocks``.
-    /// It reports either case as a failure.
+    /// the connected Macs and the owners of leases. It closes that Mac's connections and ends the
+    /// same leases. When the list cannot be read, the daemon also keeps the block in
+    /// ``unsavedBlocks``. It reports either case as a failure.
     ///
     /// - Parameters:
     ///   - text: The Mac's short key or full fingerprint.

@@ -522,7 +522,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// ``PoolReply/revoked(_:connections:leases:)``.
     ///
     /// If the daemon cannot save the block, or if the list has no record of the key, it still
-    /// closes the connections and ends the leases. The reply is then a failure that says so.
+    /// closes the connections and ends the same leases. The reply is then a failure that says so.
     ///
     /// - Parameters:
     ///   - key: The Mac's ``KeyFingerprint/shortKey`` or its full fingerprint. The daemon takes no
