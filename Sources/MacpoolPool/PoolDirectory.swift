@@ -54,10 +54,12 @@ public struct PoolDirectory: Sendable, Hashable {
         return resolve(parent).appending(path: url.lastPathComponent, directoryHint: .notDirectory)
     }
 
-    /// Checks that a shared directory keeps the guest away from the data directory and a source.
+    /// Checks that a shared directory keeps the guest away from the data directory, the sources,
+    /// and the macpool executable.
     ///
     /// The check refuses a shared directory that is the data directory, contains it, or lies
-    /// inside it. It also refuses one that is the source or contains it. It compares the paths
+    /// inside it. It also refuses one that is a source or contains one. If the guest can write the
+    /// directory, the check also refuses it when it contains the executable. It compares the paths
     /// after resolving symbolic links and firmlinks, and it ignores letter case and the Unicode
     /// normalization form.
     ///
@@ -67,10 +69,17 @@ public struct PoolDirectory: Sendable, Hashable {
     ///
     /// - Parameters:
     ///   - shared: The absolute path of the shared directory.
-    ///   - source: The absolute path of the bundle that the lease clones, or `nil` for none.
+    ///   - isReadOnly: Whether the guest can only read the shared directory.
+    ///   - sources: The absolute paths of the bundles that the guest must not reach.
+    ///   - executable: The macpool executable that starts VMs, or `nil` for none.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when the check refuses the directory or
     ///   cannot resolve one of the paths. The reason names the paths and a way out.
-    public func checkShare(_ shared: String, source: String? = nil) throws(PoolError) {
+    public func checkShare(
+        _ shared: String,
+        isReadOnly: Bool = false,
+        sources: [String] = [],
+        executable: URL? = nil,
+    ) throws(PoolError) {
         func resolved(_ path: String) throws(PoolError) -> [ArraySlice<UInt8>] {
             guard let components = Self.physicalComponents(of: path) else {
                 throw .invalidRequest(reason: """
@@ -82,7 +91,8 @@ public struct PoolDirectory: Sendable, Hashable {
         }
         let share = try resolved(shared)
         let data = try resolved(root.path(percentEncoded: false))
-        let reach = "The guest could change the images, clones, and pool state in it."
+        let access = isReadOnly ? "read" : "change"
+        let reach = "The guest could \(access) the images, clones, and pool state in it."
         if data.starts(with: share) {
             throw .invalidRequest(reason: """
             the shared directory \(shared) includes macpool's data directory \(root.path(percentEncoded: false)). \
@@ -95,11 +105,24 @@ public struct PoolDirectory: Sendable, Hashable {
             \(reach) Share a directory outside it.
             """)
         }
-        if let source, try resolved(source).starts(with: share) {
+        for source in sources where try resolved(source).starts(with: share) {
             throw .invalidRequest(reason: """
-            the shared directory \(shared) includes the source \(source). The guest could change the source, \
-            and later clones would copy the change. Share a narrower directory.
+            the shared directory \(shared) includes the source \(source). The guest could \(access) its disk and \
+            guest account. Share a narrower directory.
             """)
+        }
+        // The executable is a file, so its directory resolves and its name stays as written.
+        if let executable, !isReadOnly {
+            let file = try resolved(executable.deletingLastPathComponent().path(percentEncoded: false))
+                + [PoolDaemon.caselessBytes(of: executable.lastPathComponent)[...]]
+            if file.starts(with: share) {
+                throw .invalidRequest(reason: """
+                the shared directory \(shared) includes the macpool executable \
+                \(executable.path(percentEncoded: false)). \
+                The guest could replace it and run code on this Mac. \
+                Share a narrower directory or share it read-only.
+                """)
+            }
         }
     }
 

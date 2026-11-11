@@ -1120,7 +1120,7 @@ public actor PoolDaemon {
     ///   for these instead. Every request gets ``PoolError/invalidRequest(reason:)`` when the
     ///   source never booted, is an image without a record that marks it ready, or lies on another
     ///   volume than the data directory. It also gets that error when the shared directory is
-    ///   missing or when ``PoolDirectory/checkShare(_:source:)`` refuses it.
+    ///   missing or when ``PoolDirectory/checkShare(_:isReadOnly:sources:executable:)`` refuses it.
     private func checkSource(of terms: LeaseTerms, offeredName: String?) throws(PoolError) {
         let source = terms.source
         let shown = offeredName ?? source
@@ -1184,7 +1184,13 @@ public actor PoolDaemon {
             guard manager.fileExists(atPath: shared, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
             }
-            try configuration.directory.checkShare(shared, source: source)
+            // Only a launcher that runs a real executable gives the guest a file to replace.
+            try configuration.directory.checkShare(
+                shared,
+                isReadOnly: terms.sharedDirectoryIsReadOnly,
+                sources: [source] + configuration.offeredSources.values.sorted(),
+                executable: (configuration.launcher as? ProcessSupervisorLauncher)?.executable,
+            )
         }
     }
 

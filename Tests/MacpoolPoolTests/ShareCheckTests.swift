@@ -37,6 +37,11 @@ struct ShareCheckTests {
                 "\(error)".contains("\(shared) \(relation) macpool's data directory")
             }
         }
+        #expect {
+            try directory.checkShare(path, isReadOnly: true)
+        } throws: { error in
+            "\(error)".contains("The guest could read the images")
+        }
         // A data directory that does not exist yet is still kept out of the guest's reach.
         let missing = PoolDirectory(root: root.url.appending(path: "later/pool"))
         #expect(throws: PoolError.self) { try missing.checkShare(path) }
@@ -53,12 +58,28 @@ struct ShareCheckTests {
         for created in [source, beside] {
             try FileManager.default.createDirectory(atPath: created, withIntermediateDirectories: true)
         }
-        try directory.checkShare(beside, source: source)
+        try directory.checkShare(beside, sources: [source])
         let work = root.url.appending(path: "work").path(percentEncoded: false)
         #expect {
-            try directory.checkShare(work, source: source)
+            try directory.checkShare(work, sources: [beside + "/base", source])
         } throws: { error in
             "\(error)".contains("\(work) includes the source \(source)")
+        }
+    }
+
+    /// Refuses a writable directory that includes the executable and accepts a read-only one.
+    @Test func refusesWritableDirectoryWithExecutable() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let bin = root.url.appending(path: "bin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
+        let executable = bin.appending(path: "macpool")
+        let shared = root.url.appending(path: "BIN").path(percentEncoded: false)
+        try directory.checkShare(shared, isReadOnly: true, executable: executable)
+        #expect {
+            try directory.checkShare(shared, executable: executable)
+        } throws: { error in
+            "\(error)".contains("\(shared) includes the macpool executable")
         }
     }
 }

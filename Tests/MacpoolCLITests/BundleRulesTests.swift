@@ -16,17 +16,22 @@ struct BundleRulesTests {
         #expect(!FileManager.default.fileExists(atPath: directory.bundle.guestAccountFile.path(percentEncoded: false)))
     }
 
-    /// Refuses to share the home directory, because it includes the default data directory.
-    @Test func refusesShareOverDefaultDataDirectory() async throws {
+    /// Refuses shares that include the default data directory, the bundle, or the executable.
+    @Test func refusesSharesThatReachHostFiles() async throws {
         let directory = try BundleDirectory(hasBooted: false)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
-        let command = try #require(
-            try Macpool.parseAsRoot(["run", "--bundle", directory.path, "--share", home]) as? RunCommand,
-        )
-        await #expect {
-            try await command.run()
-        } throws: { error in
-            "\(error)".contains("macpool's data directory")
+        let shares = try [
+            (FileManager.default.homeDirectoryForCurrentUser, "macpool's data directory"),
+            (directory.bundle.root.deletingLastPathComponent(), "includes the source"),
+            (Executable.current().deletingLastPathComponent(), "includes the macpool executable"),
+        ]
+        for (shared, reason) in shares {
+            let arguments = ["run", "--bundle", directory.path, "--share", shared.path(percentEncoded: false)]
+            let command = try #require(try Macpool.parseAsRoot(arguments) as? RunCommand)
+            await #expect {
+                try await command.run()
+            } throws: { error in
+                "\(error)".contains(reason)
+            }
         }
     }
 

@@ -60,7 +60,7 @@ guest has an address, and with `--wait-ssh` once SSH answers too.
 | `--wait-ssh` | off | Waits for SSH before `ready`. |
 | `--timeout SECONDS` | 900 | The longest wait for the address and SSH. On a clone's first run it also limits the credential replacement. |
 | `--hold SECONDS` | 0 | How long the VM keeps running after `ready`. With 0, `run` starts to stop it right away. |
-| `--share DIR` | none | Shares a host directory. The guest mounts it at `/Volumes/My Shared Files`. It can't be, contain, or lie inside the default data directory. |
+| `--share DIR` | none | Shares a host directory. The guest mounts it at `/Volumes/My Shared Files`. It can't be, contain, or lie inside the default data directory, or contain the bundle. Without `--share-read-only` it can't contain the `macpool` executable. |
 | `--share-read-only` | off | Lets the guest only read the shared directory. Needs `--share`. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. |
 
@@ -97,7 +97,7 @@ in a second terminal.
 
 ```sh
 $macpool clone --from .cache/vms/base --to .cache/vms/job1
-$macpool run --bundle .cache/vms/job1 --share "$PWD" --hold 600
+$macpool run --bundle .cache/vms/job1 --share "$PWD/Sources" --hold 600
 Scripts/ssh.sh .cache/vms/job1 'ls "/Volumes/My Shared Files"'
 Scripts/shutdown.sh .cache/vms/job1
 ```

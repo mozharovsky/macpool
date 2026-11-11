@@ -225,7 +225,9 @@ struct PoolDaemonTests {
     /// Refuses requests that cannot succeed and leaves the pool unchanged.
     @Test func refusesUnusableRequests() async throws {
         let pool = try PoolFixture()
-        let daemon = try await pool.start()
+        let offered = pool.root.url.appending(path: "offered").path(percentEncoded: false)
+        try FileManager.default.createDirectory(atPath: offered, withIntermediateDirectories: false)
+        let daemon = try await pool.start(offeredSources: ["offered": offered])
         let missing = pool.root.url.appending(path: "missing").path(percentEncoded: false)
         let fresh = VMBundle(root: pool.root.url.appending(path: "fresh", directoryHint: .isDirectory))
         try FileManager.default.createDirectory(at: fresh.root, withIntermediateDirectories: false)
@@ -244,6 +246,7 @@ struct PoolDaemonTests {
             .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: missing)),
             .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: pool.root.url.path())),
             .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: pool.source)),
+            .lease(LeaseTerms(source: pool.source, timeToLive: 60, sharedDirectory: offered)),
             .release(#require(LeaseID("0a1b2c3d"))),
             .renew(#require(LeaseID("0a1b2c3d"))),
             .attach(#require(LeaseID("0a1b2c3d"))),
@@ -268,6 +271,27 @@ struct PoolDaemonTests {
         withExtendedLifetime(lock) {}
         #expect(await daemon.summary().leases.isEmpty)
         #expect(await daemon.summary().queue.isEmpty)
+        await daemon.shutdown()
+    }
+
+    /// Refuses a writable share that includes the executable that starts supervisors.
+    @Test func refusesShareWithSupervisorExecutable() async throws {
+        let pool = try PoolFixture()
+        let bin = pool.root.url.appending(path: "bin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
+        let daemon = try PoolDaemon(configuration: PoolDaemon.Configuration(
+            directory: pool.directory,
+            policy: PoolPolicy(slots: 1),
+            launcher: ProcessSupervisorLauncher(executable: bin.appending(path: "macpool")),
+        ))
+        try await daemon.start()
+        var terms = pool.terms()
+        terms.sharedDirectory = bin.path(percentEncoded: false)
+        await #expect {
+            try await PoolClient.send(.lease(terms), to: pool.directory)
+        } throws: { error in
+            "\(error)".contains("includes the macpool executable")
+        }
         await daemon.shutdown()
     }
 
