@@ -105,24 +105,31 @@ public struct PoolDirectory: Sendable, Hashable {
             \(reach) Share a directory outside it.
             """)
         }
-        for source in sources where try resolved(source).starts(with: share) {
+        // A path that ends in a symbolic link names the link and its target. The guest could
+        // replace either one, so the check covers both. The executable is a file, so only the
+        // directories on a path resolve and the last name stays as written.
+        func isShared(_ path: String) throws(PoolError) -> Bool {
+            for url in [URL(filePath: path), URL(filePath: path).resolvingSymlinksInPath()] {
+                let parent = try resolved(url.deletingLastPathComponent().path(percentEncoded: false))
+                if (parent + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]).starts(with: share) {
+                    return true
+                }
+            }
+            return false
+        }
+        for source in sources where try isShared(source) {
             throw .invalidRequest(reason: """
             the shared directory \(shared) includes the source \(source). The guest could \(access) its disk and \
             guest account. Share a narrower directory.
             """)
         }
-        // The executable is a file, so its directory resolves and its name stays as written.
-        if let executable, !isReadOnly {
-            let file = try resolved(executable.deletingLastPathComponent().path(percentEncoded: false))
-                + [PoolDaemon.caselessBytes(of: executable.lastPathComponent)[...]]
-            if file.starts(with: share) {
-                throw .invalidRequest(reason: """
-                the shared directory \(shared) includes the macpool executable \
-                \(executable.path(percentEncoded: false)). \
-                The guest could replace it and run code on this Mac. \
-                Share a narrower directory or share it read-only.
-                """)
-            }
+        if let executable, !isReadOnly, try isShared(executable.path(percentEncoded: false)) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes the macpool executable \
+            \(executable.path(percentEncoded: false)). \
+            The guest could replace it and run code on this Mac. \
+            Share a narrower directory or share it read-only.
+            """)
         }
     }
 

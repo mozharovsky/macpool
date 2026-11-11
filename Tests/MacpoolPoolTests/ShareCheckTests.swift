@@ -65,6 +65,11 @@ struct ShareCheckTests {
         } throws: { error in
             "\(error)".contains("\(work) includes the source \(source)")
         }
+        // The guest could replace a link to the source, so a share that holds the link is refused.
+        let link = root.url.appending(path: "poolside/base")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(filePath: source))
+        let alias = link.path(percentEncoded: false)
+        #expect(throws: PoolError.self) { try directory.checkShare(beside, sources: [alias]) }
     }
 
     /// Refuses a writable directory that includes the executable and accepts a read-only one.
@@ -81,5 +86,13 @@ struct ShareCheckTests {
         } throws: { error in
             "\(error)".contains("\(shared) includes the macpool executable")
         }
+        // A link outside the share still runs the file inside it.
+        let tools = root.url.appending(path: "tools", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: false)
+        try Data().write(to: tools.appending(path: "macpool"))
+        let link = bin.appending(path: "alias")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: tools.appending(path: "macpool"))
+        let toolsPath = tools.path(percentEncoded: false)
+        #expect(throws: PoolError.self) { try directory.checkShare(toolsPath, executable: link) }
     }
 }
