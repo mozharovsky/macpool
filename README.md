@@ -158,6 +158,7 @@ macOS runs at most two VMs at a time on one Mac. Each one takes its full memory 
 - [Getting started](docs/getting-started.md). Every quick-start step with the output you should see.
 - [Commands](docs/commands.md). Each command and script with its options and defaults.
 - [Leases and the daemon](docs/leases.md). Queues, time to live, restarts, and the launchd job.
+- [Xcode images](docs/xcode-image.md). A source with Xcode and a simulator runtime, ready to lease.
 - [Clone credentials](docs/clone-credentials.md). How a clone gets its own password and host key.
 - [Troubleshooting](docs/troubleshooting.md). Logs, stops, and what the daemon does after a failure.
 - [Limits](docs/limits.md). What macpool can't do or doesn't protect against.

@@ -64,7 +64,7 @@ $macpool release LEASE
 
 | Command | What it does |
 | --- | --- |
-| `macpool list` | Prints the slots, leases, and queue. `--json` prints one JSON object. |
+| `macpool list` | Prints the slots, leases, queue, and images. `--json` prints one JSON object. |
 | `macpool renew LEASE` | Moves the expiry to the time to live from now and prints `expires_at=`. |
 | `macpool release LEASE` | Ends the lease right away. |
 

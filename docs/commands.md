@@ -1,7 +1,8 @@
 # Commands
 
 This page lists the commands that prepare, boot, and clone VMs, and the scripts that reach a
-guest. The daemon's commands are in [Leases and the daemon](leases.md).
+guest. The daemon's commands are in [Leases and the daemon](leases.md), and `image xcode` is in
+[Xcode images](xcode-image.md).
 
 `macpool --help` lists the commands, and `macpool help COMMAND` shows a command's options.
 `macpool --version` prints the version. The examples keep images and bundles in the ignored
@@ -19,6 +20,7 @@ A bundle is a directory that holds one VM. These are the files you'll meet.
 | `known_hosts` | The guest's pinned Ed25519 host key. |
 | `lock` | The lock that a running command holds. |
 | `stop-request` | Created by you to end a `run` early. |
+| `image.json` | Whether an image passed its checks, and its builds. See [Xcode images](xcode-image.md). |
 
 ## fetch
 

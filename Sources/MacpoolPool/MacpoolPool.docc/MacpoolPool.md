@@ -11,7 +11,8 @@ ready on SSH. Requests that find no free slot wait in a queue ordered by priorit
 arrival.
 
 If the source has an `ImageRecord` and the image is not ready, the daemon refuses the
-request. The daemon also lists the images in its data directory for clients on the same Mac as
+request. It checks the record again right before it clones a queued request. If the image is no
+longer ready, the lease ends without a boot. The daemon also lists the images in its data directory for clients on the same Mac as
 ``ImageSummary`` values.
 
 The daemon and its clients exchange one JSON message per line over a Unix socket in the data
