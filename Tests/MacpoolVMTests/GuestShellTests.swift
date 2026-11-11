@@ -99,6 +99,58 @@ struct GuestShellTests {
         #expect(ContinuousClock.now - started < .seconds(30))
     }
 
+    /// Ends a process that outlasts its time limit and keeps the output it wrote before.
+    @Test func throwsWhenTimeLimitPasses() async {
+        let started = ContinuousClock.now
+        await #expect(throws: MacpoolError.guestCommandTimedOut(
+            limit: .seconds(2),
+            output: "started\n",
+            errorOutput: "warning\n",
+        )) {
+            try await GuestShell.collect(
+                executable: "/bin/sh",
+                // exec leaves no child that would hold the output streams open after the kill.
+                arguments: ["-c", "echo started; echo warning >&2; exec /bin/sleep 60"],
+                input: "",
+                timeLimit: .seconds(2),
+            )
+        }
+        #expect(ContinuousClock.now - started < .seconds(30))
+    }
+
+    /// Returns at once when the process ends before its time limit.
+    @Test func returnsBeforeTimeLimit() async throws {
+        let started = ContinuousClock.now
+        let result = try await GuestShell.collect(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo done"],
+            input: "",
+            timeLimit: .seconds(40),
+        )
+        #expect(result == GuestCommandResult(status: .exited(0), output: "done\n", errorOutput: ""))
+        #expect(ContinuousClock.now - started < .seconds(30))
+    }
+
+    /// Keeps the status of a process that another signal ends before the time limit.
+    @Test func keepsForeignKillBeforeTimeLimit() async throws {
+        let result = try await GuestShell.collect(
+            executable: "/bin/sh",
+            arguments: ["-c", "kill -9 $$"],
+            input: "",
+            timeLimit: .seconds(40),
+        )
+        #expect(result.status == .signaled(9))
+    }
+
+    /// Describes a time limit with the end of the error output.
+    @Test func describesTimeLimit() {
+        let quiet = MacpoolError.guestCommandTimedOut(limit: .seconds(5), output: "x", errorOutput: " \n")
+        let message = "the guest command did not finish within 5.0 seconds, and it may still run in the guest"
+        #expect(quiet.description == message)
+        let error = MacpoolError.guestCommandTimedOut(limit: .seconds(5), output: "", errorOutput: "a\nlast\n")
+        #expect(error.description == message + ": a\nlast")
+    }
+
     /// Throws when the program cannot start.
     @Test func throwsWhenProgramIsMissing() async {
         await #expect {
