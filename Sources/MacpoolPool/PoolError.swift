@@ -123,6 +123,25 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: What is wrong with the file or the key.
     case unusableIdentity(path: String, reason: String)
 
+    /// This Mac's key is missing while a list of paired Macs exists.
+    ///
+    /// The paired Macs know this Mac by the missing key. The pool therefore creates no new key
+    /// until a person puts the key file back or deletes the lists.
+    ///
+    /// - Parameters:
+    ///   - path: The key file.
+    ///   - lists: The lists of paired Macs that exist.
+    case missingIdentity(path: String, lists: [String])
+
+    /// A list of paired Macs cannot be read.
+    ///
+    /// While the list of paired clients cannot be read, the host admits no paired Mac.
+    ///
+    /// - Parameters:
+    ///   - path: The list's file.
+    ///   - reason: What is wrong with the file or its contents.
+    case unusableTrustList(path: String, reason: String)
+
     /// A one-line description for logs and command output.
     public var description: String {
         switch self {
@@ -165,6 +184,12 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
             "the data directory \(path) is unsafe: \(reason)"
         case let .unusableIdentity(path, reason):
             "this Mac's key \(path) is unusable: \(reason)"
+        case let .missingIdentity(path, lists):
+            "this Mac's key \(path) is missing, and Macs in \(lists.joined(separator: " and ")) know this Mac "
+                + "by that key, so put the key file back, or delete \(lists.count == 1 ? "that list" : "those lists") "
+                + "and pair the Macs again"
+        case let .unusableTrustList(path, reason):
+            "the list of paired Macs \(path) is unusable: \(reason)"
         }
     }
 

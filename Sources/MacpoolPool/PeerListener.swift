@@ -13,17 +13,8 @@ public struct PeerSettings: Sendable {
     /// The TCP port, or 0 for a free port that the system picks.
     public var port: UInt16
 
-    /// Returns the fingerprints of the keys that may connect.
-    ///
-    /// The listener calls it during every handshake, so a key that leaves the set opens no new
-    /// connection. Connections that are already open stay open. An empty set admits nobody.
-    ///
-    /// If the keys cannot be read, the closure must return an empty set. The listener makes every
-    /// call on one serial queue, so a slow call delays every handshake.
-    public var trustedKeys: @Sendable () -> Set<KeyFingerprint>
-
-    /// The wait before the daemon tries to listen again after this Mac's key or the port failed,
-    /// or after the listener stopped.
+    /// The wait before the daemon tries to listen again after this Mac's key, the list of paired
+    /// clients, or the port failed, or after the listener stopped.
     public var retryInterval: Duration
 
     /// Creates listener settings.
@@ -31,17 +22,10 @@ public struct PeerSettings: Sendable {
     /// - Parameters:
     ///   - address: The local address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
-    ///   - trustedKeys: Returns the fingerprints of the keys that may connect.
     ///   - retryInterval: The wait before another attempt to listen.
-    public init(
-        address: String,
-        port: UInt16,
-        trustedKeys: @escaping @Sendable () -> Set<KeyFingerprint>,
-        retryInterval: Duration = .seconds(10),
-    ) {
+    public init(address: String, port: UInt16, retryInterval: Duration = .seconds(10)) {
         self.address = address
         self.port = port
-        self.trustedKeys = trustedKeys
         self.retryInterval = retryInterval
     }
 }
@@ -50,9 +34,12 @@ public struct PeerSettings: Sendable {
 ///
 /// Every connection runs a TLS 1.3 handshake with ``PeerSecurity`` settings. A client with
 /// another key fails the handshake and never reaches ``connections``. If ALPN chose no protocol
-/// version that this build speaks, the listener closes the connection after the handshake. A
-/// connection whose handshake does not finish in time ends, so a silent peer holds no socket for
-/// long.
+/// version that this build speaks, the listener closes the connection after the handshake.
+///
+/// A peer proves its key only at the end of the handshake, so anyone who reaches the port can
+/// start one. The listener therefore limits the handshakes that run at once and closes a new
+/// connection beyond the limit before its handshake begins. A connection whose handshake does
+/// not finish in time ends, so a silent peer holds a place for a short time only.
 ///
 /// ``connections`` ends when ``close()`` runs or the listener fails after it was ready.
 final class PeerListener: Sendable {
@@ -86,17 +73,22 @@ final class PeerListener: Sendable {
     ///
     /// - Parameters:
     ///   - identity: This Mac's key and certificate.
-    ///   - settings: The address, the port, and the trusted keys.
+    ///   - settings: The address and the port.
+    ///   - trustedKeys: Returns the fingerprints of the keys that may connect. The listener calls
+    ///     it during every handshake on one serial queue, so a slow call delays every handshake.
+    ///     If the keys cannot be read, it must return an empty set.
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
+    ///   - handshakeLimit: The most handshakes that run at once.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
     ///   ``PoolError/connection(path:reason:)`` when the listener cannot start, for example
     ///   because another process holds the port.
     init(
         identity: MacIdentity,
         settings: PeerSettings,
-        handshakeTimeout: Duration = .seconds(10),
+        trustedKeys: @escaping @Sendable () -> Set<KeyFingerprint>,
+        handshakeTimeout: Duration = .seconds(5),
+        handshakeLimit: Int = 16,
     ) async throws(PoolError) {
-        let trustedKeys = settings.trustedKeys
         let parameters = try PeerSecurity.parameters(identity: identity, isServer: true) { key in
             trustedKeys().contains(key)
         }
@@ -110,8 +102,13 @@ final class PeerListener: Sendable {
             throw .connection(path: place, reason: "\(error)")
         }
         let (connections, continuation) = AsyncStream.makeStream(of: Peer.self)
+        let handshakes = HandshakeCount(limit: handshakeLimit)
         listener.newConnectionHandler = { connection in
-            Self.admit(connection, within: handshakeTimeout, to: continuation)
+            guard handshakes.begin() else {
+                connection.cancel()
+                return
+            }
+            Self.admit(connection, within: handshakeTimeout, counted: handshakes, to: continuation)
         }
         let failure: String? = await withCheckedContinuation { ready in
             let once = ResumeOnce(ready)
@@ -149,13 +146,16 @@ final class PeerListener: Sendable {
     /// - Parameters:
     ///   - connection: A connection that the listener accepted and that has not started.
     ///   - timeout: The longest wait for the handshake.
+    ///   - handshakes: The count of running handshakes. It already includes this one. The
+    ///     handshake leaves the count once it succeeds, fails, or runs out of time.
     ///   - continuation: Receives the connection after the handshake.
     private static func admit(
         _ connection: NWConnection,
         within timeout: Duration,
+        counted handshakes: HandshakeCount,
         to continuation: AsyncStream<Peer>.Continuation,
     ) {
-        let outcome = HandshakeOutcome()
+        let outcome = HandshakeOutcome(handshakes)
         let peer = "\(connection.endpoint)"
         connection.stateUpdateHandler = { state in
             switch state {
@@ -175,7 +175,10 @@ final class PeerListener: Sendable {
                     channel.close()
                 }
             case .failed, .waiting:
+                _ = outcome.settle()
                 connection.cancel()
+            case .cancelled:
+                _ = outcome.settle()
             default:
                 break
             }
@@ -199,18 +202,68 @@ final class PeerListener: Sendable {
     }
 }
 
+/// The number of handshakes that run at once, up to a limit.
+private final class HandshakeCount: Sendable {
+    /// The most handshakes that run at once.
+    private let limit: Int
+
+    /// The handshakes that run.
+    private let running = Mutex(0)
+
+    /// Creates a count of zero.
+    ///
+    /// - Parameter limit: The most handshakes that run at once.
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Counts a new handshake unless the limit is reached.
+    ///
+    /// - Returns: Whether the handshake may run. After `true`, a call of ``end()`` must follow.
+    func begin() -> Bool {
+        running.withLock { running in
+            guard running < limit else {
+                return false
+            }
+            running += 1
+            return true
+        }
+    }
+
+    /// Stops counting a handshake that ``begin()`` counted.
+    func end() {
+        running.withLock { $0 -= 1 }
+    }
+}
+
 /// Whether a connection's handshake finished or ran out of time, whichever came first.
+///
+/// The handshake leaves its ``HandshakeCount`` when the outcome settles.
 private final class HandshakeOutcome: Sendable {
     /// Whether the outcome is settled.
     private let isSettled = Mutex(false)
+
+    /// The count that includes this handshake until the outcome settles.
+    private let handshakes: HandshakeCount
+
+    /// Creates an outcome that is not settled yet.
+    ///
+    /// - Parameter handshakes: The count that includes this handshake.
+    init(_ handshakes: HandshakeCount) {
+        self.handshakes = handshakes
+    }
 
     /// Settles the outcome unless an earlier call did.
     ///
     /// - Returns: Whether this call settled it.
     func settle() -> Bool {
-        isSettled.withLock { settled in
+        let settled = isSettled.withLock { settled in
             defer { settled = true }
             return !settled
         }
+        if settled {
+            handshakes.end()
+        }
+        return settled
     }
 }

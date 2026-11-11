@@ -53,6 +53,38 @@ struct MacIdentityTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: trust) == ["identity.pem"])
     }
 
+    /// Creates no key while a list of paired Macs exists, because those Macs know this Mac by its
+    /// old key, and creates one once the lists are gone.
+    @Test func createsNoKeyWhileAListExists() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let key = directory.identityFile.path(percentEncoded: false)
+        let clients = TrustList<TrustedClient>.file(in: directory).path(percentEncoded: false)
+        let hosts = TrustList<TrustedHost>.file(in: directory).path(percentEncoded: false)
+
+        try TrustList<TrustedClient>().save(to: directory)
+        #expect(throws: PoolError.missingIdentity(path: key, lists: [clients])) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+        try TrustList<TrustedHost>().save(to: directory)
+        let both = PoolError.missingIdentity(path: key, lists: [clients, hosts])
+        #expect(throws: both) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+        #expect(both.description == "this Mac's key \(key) is missing, and Macs in \(clients) and \(hosts) know "
+            + "this Mac by that key, so put the key file back, or delete those lists and pair the Macs again")
+        try FileManager.default.removeItem(atPath: clients)
+        #expect(throws: PoolError.missingIdentity(path: key, lists: [hosts])) {
+            try MacIdentity.loadOrCreate(in: directory)
+        }
+        #expect(!FileManager.default.fileExists(atPath: key))
+
+        try FileManager.default.removeItem(atPath: hosts)
+        let created = try MacIdentity.loadOrCreate(in: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        #expect(try MacIdentity.loadOrCreate(in: directory).keyDigest == created.keyDigest)
+    }
+
     /// Names a key with the hexadecimal digits of its digest.
     @Test func namesTheKeyByItsDigest() {
         let digest = MacIdentity.keyDigest(of: P256.Signing.PrivateKey().publicKey)
