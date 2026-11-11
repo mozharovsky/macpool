@@ -1,6 +1,7 @@
 public import Foundation
 public import Logging
 import MacpoolVM
+import Synchronization
 
 /// The daemon that owns a host's VM slots, its lease queue, and the supervisors of leased VMs.
 ///
@@ -31,10 +32,10 @@ import MacpoolVM
 /// directory or ask for a priority above the default of 0.
 ///
 /// With ``Configuration/peers`` set, the daemon also listens on TCP for paired Macs. It loads this
-/// Mac's key only then. A key that cannot be loaded or a port that another process holds leaves
-/// the local socket serving, and the daemon tries again later. A paired Mac proves its key in a
-/// TLS handshake, receives a greeting with the protocol version, and then exchanges the same
-/// lines as a local client.
+/// Mac's key only then. A key or a list of paired clients that cannot be loaded, or a port that
+/// another process holds, leaves the local socket serving, and the daemon tries again later. A
+/// paired Mac proves its key in a TLS handshake, receives a greeting with the protocol version,
+/// and then exchanges the same lines as a local client.
 ///
 /// After the daemon handles a request, it waits until the messages that it sent to the client so
 /// far left, and only then reads the next request. Lease events sent later do not extend the
@@ -144,6 +145,14 @@ public actor PoolDaemon {
         }
     }
 
+    /// A connected client and the owner it acts for.
+    private struct ClientConnection {
+        /// The client's connection.
+        let channel: MessageChannel
+        /// Who the client acts for.
+        let owner: LeaseOwner
+    }
+
     /// The daemon's connection to one supervisor.
     private struct Link {
         /// The connection.
@@ -192,7 +201,8 @@ public actor PoolDaemon {
     private enum PeerListenerAttempt {
         /// The listener is ready.
         case listening(PeerListener)
-        /// The key or the port failed, and a later attempt may succeed.
+        /// The key, the list of paired clients, or the port failed, and a later attempt may
+        /// succeed.
         case failed
         /// The daemon shut down.
         case stopped
@@ -222,8 +232,14 @@ public actor PoolDaemon {
     /// repeats on every attempt therefore appears in the log once.
     private var peerListenerFailure: String?
 
+    /// The most connections that one paired Mac may have at once.
+    ///
+    /// Each connection queues up to 4 MiB of replies. The limit bounds the memory that one Mac
+    /// can hold this way.
+    static let connectionsPerPeer = 4
+
     /// The connected clients.
-    private var clients: [ClientID: MessageChannel] = [:]
+    private var clients: [ClientID: ClientConnection] = [:]
 
     /// The number of the next client.
     private var nextClient: UInt64 = 0
@@ -365,8 +381,8 @@ public actor PoolDaemon {
         listener = nil
         peerListener?.close()
         peerListener = nil
-        for channel in clients.values {
-            channel.close()
+        for client in clients.values {
+            client.channel.close()
         }
         for link in links.values {
             link.channel.close()
@@ -434,17 +450,18 @@ public actor PoolDaemon {
         }
         let client = ClientID(value: nextClient)
         nextClient += 1
-        clients[client] = channel
+        clients[client] = ClientConnection(channel: channel, owner: owner)
         Task { await self.serve(client, owner: owner, on: channel) }
     }
 
-    /// Starts the listener for paired Macs, loading this Mac's key first.
+    /// Starts the listener for paired Macs, loading this Mac's key and the list of paired clients
+    /// first.
     ///
     /// A failure is logged once until its reason changes or the listener starts.
     ///
-    /// - Parameter settings: The address, the port, and the trusted keys.
-    /// - Returns: The listener, ``PeerListenerAttempt/failed`` when the key or the port failed, or
-    ///   ``PeerListenerAttempt/stopped`` after ``shutdown()``.
+    /// - Parameter settings: The address and the port.
+    /// - Returns: The listener, ``PeerListenerAttempt/failed`` when the key, the list, or the port
+    ///   failed, or ``PeerListenerAttempt/stopped`` after ``shutdown()``.
     private func openPeerListener(_ settings: PeerSettings) async -> PeerListenerAttempt {
         guard !isShutDown else {
             return .stopped
@@ -452,7 +469,11 @@ public actor PoolDaemon {
         let started: PeerListener
         do throws(PoolError) {
             let identity = try MacIdentity.loadOrCreate(in: configuration.directory)
-            started = try await PeerListener(identity: identity, settings: settings)
+            // A list that cannot be read now would refuse every handshake, so the log says why
+            // once instead.
+            _ = try TrustList<TrustedClient>.load(from: configuration.directory)
+            let clientKeys = ClientKeys(directory: configuration.directory, logger: configuration.logger)
+            started = try await PeerListener(identity: identity, settings: settings, trustedKeys: { clientKeys.read() })
         } catch {
             if peerListenerFailure != error.description {
                 peerListenerFailure = error.description
@@ -489,10 +510,25 @@ public actor PoolDaemon {
 
     /// Greets a paired Mac and serves its requests as the owner of its key.
     ///
+    /// A Mac that already has ``connectionsPerPeer`` connections gets a failure reply instead of
+    /// the greeting, and the daemon closes the new connection.
+    ///
     /// - Parameter peer: A connection whose handshake proved a trusted key.
     private func acceptPeer(_ peer: PeerListener.Peer) {
         guard !isShutDown else {
             peer.channel.close()
+            return
+        }
+        let owner = LeaseOwner.client(peer.fingerprint)
+        guard clients.values.count(where: { $0.owner == owner }) < Self.connectionsPerPeer else {
+            configuration.logger.warning("A paired Mac has too many connections", metadata: [
+                "key": "\(peer.fingerprint)",
+                "address": "\(peer.channel.peer)",
+            ])
+            try? peer.channel.send(PoolReply.failure(
+                "this Mac already has \(Self.connectionsPerPeer) connections to the host, the most it may have",
+            ))
+            Task { await peer.channel.finish() }
             return
         }
         try? peer.channel.send(HostGreeting(version: peer.version, role: .host))
@@ -500,7 +536,7 @@ public actor PoolDaemon {
             "key": "\(peer.fingerprint)",
             "address": "\(peer.channel.peer)",
         ])
-        accept(peer.channel, owner: .client(peer.fingerprint))
+        accept(peer.channel, owner: owner)
     }
 
     /// The port on which the daemon listens for paired Macs, or `nil` while it does not listen.
@@ -585,7 +621,7 @@ public actor PoolDaemon {
     ///   - reply: The reply.
     ///   - client: The receiving client.
     private func reply(_ reply: PoolReply, to client: ClientID) {
-        try? clients[client]?.send(reply)
+        try? clients[client]?.channel.send(reply)
     }
 
     /// Applies an owner's limits to a lease request and checks that it can serve a lease.
@@ -1371,6 +1407,54 @@ public actor PoolDaemon {
             if let modified = modified as? Date, modified < cutoff {
                 try? manager.removeItem(at: file)
             }
+        }
+    }
+}
+
+/// Reads the keys of the paired clients that may connect, during the handshakes of the listener
+/// for paired Macs.
+///
+/// If the list cannot be read, the reader returns no keys, and the listener admits nobody. The
+/// reader logs a failure once until its reason changes or a read succeeds.
+private final class ClientKeys: Sendable {
+    /// The data directory.
+    private let directory: PoolDirectory
+
+    /// The daemon's logger.
+    private let logger: Logger
+
+    /// The reason of the last failed read, or `nil` after a read succeeded.
+    private let failure = Mutex<String?>(nil)
+
+    /// Creates a reader.
+    ///
+    /// - Parameters:
+    ///   - directory: The data directory.
+    ///   - logger: The daemon's logger.
+    init(directory: PoolDirectory, logger: Logger) {
+        self.directory = directory
+        self.logger = logger
+    }
+
+    /// Reads the keys of the clients that are not blocked.
+    ///
+    /// - Returns: The keys, or an empty set when the list cannot be read.
+    func read() -> Set<KeyFingerprint> {
+        do throws(PoolError) {
+            let keys = try TrustList<TrustedClient>.load(from: directory).admittedKeys
+            failure.withLock { $0 = nil }
+            return keys
+        } catch {
+            let isNew = failure.withLock { last in
+                defer { last = error.description }
+                return last != error.description
+            }
+            if isNew {
+                logger.error("The list of paired clients cannot be read, so no paired Mac can connect", metadata: [
+                    "reason": "\(error)",
+                ])
+            }
+            return []
         }
     }
 }

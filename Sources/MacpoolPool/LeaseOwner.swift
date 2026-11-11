@@ -3,10 +3,13 @@ import CryptoKit
 /// The SHA-256 digest of a public key's SubjectPublicKeyInfo, in 64 lowercase hexadecimal digits.
 ///
 /// A paired Mac proves its key when it connects, and the daemon names that Mac by the key's
-/// fingerprint.
-public struct KeyFingerprint: Hashable, Sendable, CustomStringConvertible {
+/// fingerprint. People compare the shorter ``shortKey``.
+public struct KeyFingerprint: Hashable, Sendable, Codable, CustomStringConvertible {
     /// The number of hexadecimal digits in a fingerprint.
     static let length = 64
+
+    /// The number of the digest's leading bytes that ``shortKey`` shows.
+    private static let shortKeyBytes = 10
 
     /// The fingerprint's text.
     public let rawValue: String
@@ -43,9 +46,59 @@ public struct KeyFingerprint: Hashable, Sendable, CustomStringConvertible {
         rawValue = String(decoding: text, as: UTF8.self)
     }
 
+    /// Decodes a fingerprint from its text.
+    ///
+    /// - Parameter decoder: The decoder to read from.
+    /// - Throws: `DecodingError.dataCorrupted` when the text is not 64 lowercase hexadecimal
+    ///   digits.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let text = try container.decode(String.self)
+        guard let fingerprint = KeyFingerprint(text) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "not a key fingerprint: \(text)")
+        }
+        self = fingerprint
+    }
+
+    /// Encodes the fingerprint as its text.
+    ///
+    /// - Parameter encoder: The encoder to write to.
+    /// - Throws: An error when the encoder rejects the value.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    /// The first 80 bits of the digest in lowercase base32, in four groups of four characters,
+    /// such as `mzxw-6ytb-oi2d-k3lq`.
+    ///
+    /// Both sides of a pairing show this text, so a person can compare the key that the host
+    /// trusts with the key of the client. Finding another key with the same short key takes
+    /// about 2^80 attempts.
+    public var shortKey: String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(Self.shortKeyBytes)
+        var digits = rawValue.utf8.makeIterator()
+        while bytes.count < Self.shortKeyBytes, let high = digits.next(), let low = digits.next() {
+            bytes.append(Self.nibble(high) << 4 | Self.nibble(low))
+        }
+        let text = Base32.encode(bytes)
+        return stride(from: 0, to: text.count, by: 4)
+            .map { offset in String(text.dropFirst(offset).prefix(4)) }
+            .joined(separator: "-")
+    }
+
     /// The fingerprint's text.
     public var description: String {
         rawValue
+    }
+
+    /// Converts a lowercase hexadecimal digit to its value.
+    ///
+    /// - Parameter digit: A digit from ``rawValue``.
+    /// - Returns: The value from 0 to 15.
+    private static func nibble(_ digit: UInt8) -> UInt8 {
+        digit <= UInt8(ascii: "9") ? digit - UInt8(ascii: "0") : digit - UInt8(ascii: "a") + 10
     }
 }
 
@@ -100,13 +153,13 @@ public enum LeaseOwner: Hashable, Sendable, Codable, CustomStringConvertible {
         }
     }
 
-    /// The owner for logs, with a paired client's fingerprint shortened to 16 digits.
+    /// The owner for logs, with a paired client's ``KeyFingerprint/shortKey``.
     public var description: String {
         switch self {
         case .local:
             Self.localText
         case let .client(fingerprint):
-            "client \(fingerprint.rawValue.prefix(16))"
+            "client \(fingerprint.shortKey)"
         }
     }
 

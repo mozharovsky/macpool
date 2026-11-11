@@ -44,9 +44,16 @@ local user gets ahead of a paired client's waiting request by asking for a highe
 
 Each Mac has one P-256 key, which serves it as a host and as a client of other Macs. The key lives
 in PKCS#8 PEM in `trust/identity.pem` of the data directory, and only its owner may read the file
-or enter the directory. The pool creates the key when it first needs it. It refuses a key file
-that other users can reach and never replaces an unusable one, because paired Macs know the Mac by
-its key.
+or enter the directory. The pool refuses a key file that other users can reach and never replaces
+an unusable one, because paired Macs know the Mac by its key.
+
+The pool creates the key when it first needs it, unless `trust` holds a list of paired Macs. The
+host lists its clients in `clients.json`, and a client lists its hosts in `hosts.json`. If the key
+is missing while either list exists, the pool refuses to start the listener for paired Macs. The
+error names the lists. Put the key file back, or delete the lists and pair the Macs again.
+
+People compare a key by its ``KeyFingerprint/shortKey``, the first 80 bits of the digest in
+base32. Logs name a paired client by the same text.
 
 Permission bits alone do not keep other users out. The pool also refuses the key and the `trust`
 directory on a volume that ignores ownership and when either has an access control list. The
@@ -64,16 +71,24 @@ side checks only the key in the first certificate that the other side sends, and
 trust evaluation never runs. Session resumption and session tickets are off, so every connection
 runs a full handshake.
 
-The host checks a client's key against ``PeerSettings/trustedKeys`` during every handshake. A key
-that leaves the set opens no new connection, and connections that are already open stay open. A
+The host reads `trust/clients.json` during every handshake and admits the keys of clients that
+are not blocked. A key that leaves the list opens no new connection, and connections that are
+already open stay open. If the list cannot be read when the listener starts, the listener does
+not start. If it cannot be read later, the host admits nobody until it can. A
 TLS 1.3 client finishes its handshake before the host checks the client's key. The host therefore
 first sends a `hello` line. The line names the host's role and the protocol version that ALPN
 chose. The client sends requests only after that line. Both sides then exchange the same lines as
 on the Unix socket.
 
-The daemon loads the key when it starts listening. A key that cannot be loaded or a port that
-another process holds leaves the local socket serving. The daemon logs the failure and tries
-again after ``PeerSettings/retryInterval``.
+The daemon loads the key when it starts listening. A key or a list that cannot be loaded, or a
+port that another process holds, leaves the local socket serving. The daemon logs the failure and
+tries again after ``PeerSettings/retryInterval``.
+
+Anyone who reaches the port can start a handshake, because a client proves its key only at the
+end. At most 16 handshakes run at once, and the host closes a connection beyond that before its
+handshake begins. A handshake that does not finish within 5 seconds ends. A paired Mac may hold
+at most 4 connections. A fifth connection receives a failure reply instead of the greeting and
+closes. These limits are fixed.
 
 A channel queues at most 4 MiB for a peer that does not read and closes the connection beyond
 that. After the daemon handles a request, it reads the next one only once the messages that it
