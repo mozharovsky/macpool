@@ -52,7 +52,7 @@ $macpool fetch --download
 The line `measure ipsw_path=` names the file. Its name is the macOS build, as in
 `.cache/ipsw/BUILD.ipsw`. If the download breaks off, run the command again to continue it.
 
-Install macOS into a new VM.
+Install macOS into a new VM. Replace `BUILD` with the name from `measure ipsw_path=`.
 
 ```sh
 $macpool create --ipsw .cache/ipsw/BUILD.ipsw --bundle .cache/vms/base
@@ -92,9 +92,10 @@ It prints `listening` and the path of its socket, and it keeps running in the fo
 daemon keeps its clones in `~/Library/Application Support/macpool`. That directory must be on the
 same APFS volume as `.cache/vms`.
 
-Lease a clone and open a shell in it from the second terminal.
+Lease a clone and open a shell in it from the second terminal. Set `macpool` there too.
 
 ```sh
+macpool=.build/release/macpool
 $macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE"'
 ```
 
@@ -200,8 +201,10 @@ $macpool clone --from .cache/vms/base --to .cache/vms/job1
 $macpool run --bundle .cache/vms/job1 --share "$PWD" --hold 600
 Scripts/ssh.sh .cache/vms/job1 'ls "/Volumes/My Shared Files"'
 Scripts/shutdown.sh .cache/vms/job1
-rm -rf .cache/vms/job1
 ```
+
+`Scripts/shutdown.sh` returns before the guest stops. Wait until `run` exits, and then delete the
+clone with `rm -rf .cache/vms/job1`.
 
 ### Lease clones from the daemon
 
@@ -251,11 +254,11 @@ $macpool release LEASE
 $macpool daemon uninstall
 ```
 
-`--restart` decides when the daemon boots a leased VM again. With the default `on-failure`, if the
-VM stops unexpectedly, the daemon boots the same clone again after 5, 10, and 20 seconds and then
-ends the lease. With `never`, the lease ends at the first stop. With `always`, the daemon also
-boots the clone again after the guest shuts itself down. `lease` prints `restarting reason=` and
-later `ready` again.
+`--restart` decides when the daemon boots a leased VM again. With the default `on-failure`, the
+daemon boots the same clone again if the VM stops unexpectedly. With `always`, it also does so
+after the guest shuts itself down. With `never`, the lease ends at the first stop. A lease gets at
+most three such boots, after 5, 10, and 20 seconds, and the next stop ends it. `lease` prints
+`restarting reason=` and later `ready` again.
 
 ### Output
 
@@ -298,10 +301,11 @@ stop for 30 seconds, the daemon ends it. The daemon sends another stop, then `SI
 lease boots again or ends as it would after a crash.
 
 If `state.json` in the data directory is malformed, the daemon moves it aside as
-`state.json.invalid-TIME`, starts without leases, and stops the VMs that it finds. If the file
-cannot be opened or uses a format version that this build cannot read, the daemon does not start,
-and the VMs keep running. While the file cannot be written, an ended lease keeps its VM, clone,
-and slot. The daemon retries the write every second and cleans up after a write succeeds.
+`state.json.invalid-TIME` and starts without leases. It then stops the VMs that it finds and
+deletes their clones. If the file cannot be opened or uses a format version that this build
+cannot read, the daemon does not start, and the VMs keep running. While the file cannot be
+written, an ended lease keeps its VM, clone, and slot. The daemon retries the write every second
+and cleans up after a write succeeds.
 
 ## Requirements and limits
 
@@ -318,10 +322,10 @@ The default is 128 GB. Xcode with an iOS simulator runtime does not fit on a 64 
 
 You will also meet these limits.
 
-- A clone accepts its source's password and host key until its first `run` prints `ready`. This
-  step takes about 11 to 69 seconds after SSH answers. Anyone with the source's password, in
-  another guest or on the host, can log in during that time and leave access behind that `ready`
-  does not reveal.
+- A clone accepts its source's password and host key for about 11 to 69 seconds after SSH
+  answers, until its first `run` prints `ready`. Anyone with the source's password, in another
+  guest or on the host, can log in during that time and leave access behind that `ready` does not
+  reveal.
 - Locks are advisory. They coordinate macpool commands and do not stop other tools from changing a
   bundle.
 - The daemon counts only its own VMs. A `run` or `create` beside it can take a VM that macOS
