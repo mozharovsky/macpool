@@ -34,6 +34,9 @@ final class PairingInvitation: Sendable {
 
         /// The connection that opened the invitation.
         let inviter: ClientID
+
+        /// The highest priority that the client who pairs may ask for.
+        let priorityCeiling: Int
     }
 
     /// A new invitation.
@@ -61,8 +64,10 @@ final class PairingInvitation: Sendable {
     enum Redemption: Equatable {
         /// The secret was right, and the invitation ended.
         ///
-        /// - Parameter ended: The invitation.
-        case accepted(Ended)
+        /// - Parameters:
+        ///   - ended: The invitation.
+        ///   - priorityCeiling: The highest priority that the new client may ask for.
+        case accepted(Ended, priorityCeiling: Int)
 
         /// The secret was wrong, and the invitation stays open.
         ///
@@ -82,9 +87,10 @@ final class PairingInvitation: Sendable {
     ///
     /// - Parameters:
     ///   - inviter: The connection that asks for the invitation.
+    ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
     ///   - now: The current time.
     /// - Returns: The new invitation's secret and end.
-    func open(for inviter: ClientID, at now: Date) -> Opened {
+    func open(for inviter: ClientID, priorityCeiling: Int = 0, at now: Date) -> Opened {
         let secret = SymmetricKey(size: .bits128).withUnsafeBytes { Array($0) }
         let expiresAt = now.addingTimeInterval(Self.lifetime)
         let replaced = ticket.withLock { ticket in
@@ -94,6 +100,7 @@ final class PairingInvitation: Sendable {
                     expiresAt: expiresAt,
                     wrongSecrets: 0,
                     inviter: inviter,
+                    priorityCeiling: priorityCeiling,
                 )
             }
             return ticket.map { Ended(inviter: $0.inviter, wrongSecrets: $0.wrongSecrets) }
@@ -123,7 +130,10 @@ final class PairingInvitation: Sendable {
             }
             if digest == open.digest {
                 ticket = nil
-                return .accepted(Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets))
+                return .accepted(
+                    Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets),
+                    priorityCeiling: open.priorityCeiling,
+                )
             }
             ticket?.wrongSecrets += 1
             return .rejected(inviter: open.inviter, wrongSecrets: open.wrongSecrets + 1)

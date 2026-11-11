@@ -138,14 +138,32 @@ final class PoolFixture {
     /// Connects a client that the daemon serves for a paired Mac.
     ///
     /// The test's own socket stands in for the network listener. The daemon receives the
-    /// accepted connection with the owner that a handshake would establish.
+    /// accepted connection with the owner that a handshake would establish. If the owner is a
+    /// paired client, its record in the list of paired clients gets `priorityCeiling` first.
     ///
     /// - Parameters:
     ///   - daemon: The daemon.
     ///   - owner: Who the client acts for.
+    ///   - priorityCeiling: The highest priority that the client may ask for.
     /// - Returns: The client's end of the connection.
-    /// - Throws: An error when the socket cannot listen or the connection fails.
-    func pairedClient(of daemon: PoolDaemon, owner: LeaseOwner) async throws -> MessageChannel {
+    /// - Throws: An error when the list cannot be written, the socket cannot listen, or the
+    ///   connection fails.
+    func pairedClient(
+        of daemon: PoolDaemon,
+        owner: LeaseOwner,
+        priorityCeiling: Int = 0,
+    ) async throws -> MessageChannel {
+        if case let .client(key) = owner {
+            var clients = try TrustList<TrustedClient>.load(from: directory)
+            clients.insert(TrustedClient(
+                key: key,
+                name: "client",
+                pairedAt: Date(),
+                isBlocked: false,
+                priorityCeiling: priorityCeiling,
+            ))
+            try clients.save(to: directory)
+        }
         let socket = root.url.appending(path: "paired.sock")
         let listener = try await SocketListener(socket: socket)
         defer { listener.close() }

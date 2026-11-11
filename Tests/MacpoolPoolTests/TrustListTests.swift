@@ -15,6 +15,13 @@ struct TrustListTests {
         var clients = TrustList<TrustedClient>()
         clients.insert(client("runner"))
         clients.insert(client("builder", isBlocked: true))
+        clients.insert(TrustedClient(
+            key: randomKey(),
+            name: "trusted",
+            pairedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            isBlocked: false,
+            priorityCeiling: 3,
+        ))
         try clients.save(to: directory)
         var hosts = TrustList<TrustedHost>()
         hosts.insert(TrustedHost(
@@ -37,8 +44,67 @@ struct TrustListTests {
         #expect(first?["key"] as? String == clients.records.first?.key.rawValue)
         #expect(first?["blocked"] as? Bool == false)
         #expect(first?["paired_at"] as? String == "2027-01-15T08:00:00Z")
+        #expect(first?["priority_ceiling"] as? Int == 0)
+        #expect((stored?["macs"] as? [[String: Any]])?.last?["priority_ceiling"] as? Int == 3)
         let trust = directory.trustDirectory.path(percentEncoded: false)
         #expect(try FileManager.default.contentsOfDirectory(atPath: trust).sorted() == ["clients.json", "hosts.json"])
+    }
+
+    /// Reads a record without a priority ceiling with a ceiling of 0.
+    @Test func readsRecordsWithoutACeiling() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try Self.saveRecord(withCeiling: 4, in: directory) { record in
+            #expect(record.removeValue(forKey: "priority_ceiling") as? Int == 4)
+        }
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.map(\.priorityCeiling) == [0])
+    }
+
+    /// Refuses a list with a negative priority ceiling. A build that does not know ceilings would
+    /// read the record with a ceiling of 0.
+    @Test func refusesANegativeCeiling() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        try Self.saveRecord(withCeiling: 0, in: directory) { record in
+            record["priority_ceiling"] = -5
+        }
+        let error = #expect(throws: PoolError.self) {
+            try TrustList<TrustedClient>.load(from: directory)
+        }
+        guard case let .unusableTrustList(_, reason)? = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
+        #expect(reason.contains("The priority ceiling -5 is below 0."))
+    }
+
+    /// Saves a list with one client record and changes the record in the file.
+    ///
+    /// - Parameters:
+    ///   - priorityCeiling: The ceiling of the saved record.
+    ///   - directory: The data directory.
+    ///   - change: The change of the record's JSON object.
+    /// - Throws: An error when the list cannot be saved or the file cannot be read or written.
+    static func saveRecord(
+        withCeiling priorityCeiling: Int,
+        in directory: PoolDirectory,
+        change: (inout [String: Any]) -> Void,
+    ) throws {
+        var clients = TrustList<TrustedClient>()
+        clients.insert(TrustedClient(
+            key: randomKey(),
+            name: "runner",
+            pairedAt: Date(),
+            isBlocked: false,
+            priorityCeiling: priorityCeiling,
+        ))
+        try clients.save(to: directory)
+        let file = TrustList<TrustedClient>.file(in: directory)
+        var stored = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        var macs = try #require(stored["macs"] as? [[String: Any]])
+        change(&macs[0])
+        stored["macs"] = macs
+        try JSONSerialization.data(withJSONObject: stored).write(to: file)
     }
 
     /// Keeps one record per key and admits only clients that are not blocked.

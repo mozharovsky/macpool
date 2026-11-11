@@ -486,9 +486,14 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// stays open. When a client pairs, the daemon sends ``PoolReply/paired(_:)`` on the same
     /// connection. A newer invitation replaces this one.
     ///
-    /// - Parameter address: The host's address that the code carries to clients, such as
-    ///   `example.local`.
-    case invite(address: String)
+    /// The client that pairs with the code may ask for priorities up to `priorityCeiling`. A Mac
+    /// that is already paired keeps its own ceiling.
+    ///
+    /// - Parameters:
+    ///   - address: The host's address that the code carries to clients, such as
+    ///     `example.local`.
+    ///   - priorityCeiling: The highest priority that the client may ask for, 0 or more.
+    case invite(address: String, priorityCeiling: Int = 0)
 
     /// Pairs the sending Mac with the host.
     ///
@@ -511,6 +516,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case lease
         /// The address of an invitation.
         case address
+        /// The priority ceiling of an invitation.
+        case priorityCeiling = "priority_ceiling"
         /// The secret of a pairing.
         case secret
         /// The name of a pairing Mac.
@@ -536,7 +543,10 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case "status":
             self = .status
         case "invite":
-            self = try .invite(address: container.decode(String.self, forKey: .address))
+            self = try .invite(
+                address: container.decode(String.self, forKey: .address),
+                priorityCeiling: container.decodeIfPresent(Int.self, forKey: .priorityCeiling) ?? 0,
+            )
         case "pair":
             self = try .pair(
                 secret: container.decode(String.self, forKey: .secret),
@@ -572,9 +582,10 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(id, forKey: .lease)
         case .status:
             try container.encode("status", forKey: .request)
-        case let .invite(address):
+        case let .invite(address, priorityCeiling):
             try container.encode("invite", forKey: .request)
             try container.encode(address, forKey: .address)
+            try container.encode(priorityCeiling, forKey: .priorityCeiling)
         case let .pair(secret, name):
             try container.encode("pair", forKey: .request)
             try container.encode(secret, forKey: .secret)
