@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A paired Mac in a ``TrustList``.
 protocol TrustRecord: Codable, Sendable, Equatable {
@@ -13,7 +13,12 @@ protocol TrustRecord: Codable, Sendable, Equatable {
 }
 
 /// A Mac that may lease VMs from this host.
-struct TrustedClient: TrustRecord {
+///
+/// The host keeps these records in `clients.json` in the trust directory.
+///
+/// The client chose its name. The pool checks names only when Macs pair, and a list that someone
+/// edited may hold any text. Escape the name before a terminal shows it.
+public struct TrustedClient: TrustRecord {
     /// The file of the host's list.
     static let fileName = "clients.json"
 
@@ -21,25 +26,27 @@ struct TrustedClient: TrustRecord {
     static let listName = "the list of paired clients"
 
     /// The fingerprint of the client's key.
-    var key: KeyFingerprint
+    public var key: KeyFingerprint
 
     /// The name that the client gave for itself when it paired.
-    var name: String
+    ///
+    /// Names are not unique. Show the key's ``KeyFingerprint/shortKey`` next to it.
+    public var name: String
 
     /// When the client paired.
-    var pairedAt: Date
+    public var pairedAt: Date
 
     /// Whether the host refuses the client.
     ///
     /// A blocked client opens no new connection. The record stays, so a person sees which key
     /// the host refuses.
-    var isBlocked: Bool
+    public var isBlocked: Bool
 
     /// The highest priority that the client may ask for, 0 or more.
     ///
     /// The field only widens what a client may do. A build that does not know the field reads the
-    /// record with a ceiling of 0. The field therefore needs no new ``TrustList/formatVersion``.
-    var priorityCeiling = 0
+    /// record with a ceiling of 0. The field therefore needs no new format version of the list.
+    public var priorityCeiling = 0
 
     /// The JSON keys of a record.
     private enum CodingKeys: String, CodingKey {
@@ -57,7 +64,7 @@ struct TrustedClient: TrustRecord {
 }
 
 /// The decoding of a client record. It also reads records from before priority ceilings.
-extension TrustedClient {
+public extension TrustedClient {
     /// Decodes a record. A record without a ceiling gets a ceiling of 0.
     ///
     /// - Parameter decoder: The decoder to read from.
@@ -86,7 +93,12 @@ extension TrustedClient {
 }
 
 /// A host that this Mac may lease VMs from.
-struct TrustedHost: TrustRecord {
+///
+/// A client keeps these records in `hosts.json` in the trust directory.
+///
+/// The host chose its name and the address in the pairing code. Escape both before a terminal
+/// shows them.
+public struct TrustedHost: TrustRecord {
     /// The file of the client's list.
     static let fileName = "hosts.json"
 
@@ -94,19 +106,21 @@ struct TrustedHost: TrustRecord {
     static let listName = "the list of paired hosts"
 
     /// The fingerprint of the host's key.
-    var key: KeyFingerprint
+    public var key: KeyFingerprint
 
     /// The name by which this Mac's commands refer to the host.
-    var name: String
+    ///
+    /// Names are not unique. Show the key's ``KeyFingerprint/shortKey`` next to it.
+    public var name: String
 
     /// The host's address, such as `example.local`.
-    var address: String
+    public var address: String
 
     /// The host's TCP port.
-    var port: UInt16
+    public var port: UInt16
 
     /// When this Mac paired with the host.
-    var pairedAt: Date
+    public var pairedAt: Date
 
     /// The JSON keys of a record.
     private enum CodingKeys: String, CodingKey {
@@ -288,5 +302,39 @@ extension TrustList where Record == TrustedClient {
     /// The keys of the clients that are not blocked.
     var admittedKeys: Set<KeyFingerprint> {
         Set(records.filter { !$0.isBlocked }.map(\.key))
+    }
+}
+
+/// The public reading of the host's list.
+public extension TrustedClient {
+    /// Reads the clients that this host paired with, in the order they were added.
+    ///
+    /// The call neither creates nor changes a file, and it needs no running daemon.
+    ///
+    /// - Parameter directory: The data directory.
+    /// - Returns: The records. If `clients.json` does not exist, the array is empty.
+    /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when other users can change the data
+    ///   directory or reach the trust directory, ``PoolError/unusableTrustList(path:reason:)``
+    ///   when the file is open to other users, too large, or holds no list that this build reads,
+    ///   or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
+    static func paired(in directory: PoolDirectory) throws(PoolError) -> [TrustedClient] {
+        try TrustList<Self>.load(from: directory).records
+    }
+}
+
+/// The public reading of the client's list.
+public extension TrustedHost {
+    /// Reads the hosts that this Mac paired with, in the order they were added.
+    ///
+    /// The call neither creates nor changes a file, and it needs no running daemon.
+    ///
+    /// - Parameter directory: The data directory.
+    /// - Returns: The records. If `hosts.json` does not exist, the array is empty.
+    /// - Throws: ``PoolError/insecureDirectory(path:reason:)`` when other users can change the data
+    ///   directory or reach the trust directory, ``PoolError/unusableTrustList(path:reason:)``
+    ///   when the file is open to other users, too large, or holds no list that this build reads,
+    ///   or ``PoolError/fileSystem(operation:path:reason:)`` when it cannot be read.
+    static func paired(in directory: PoolDirectory) throws(PoolError) -> [TrustedHost] {
+        try TrustList<Self>.load(from: directory).records
     }
 }

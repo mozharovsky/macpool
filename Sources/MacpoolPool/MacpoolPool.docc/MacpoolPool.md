@@ -135,7 +135,8 @@ already knows keeps its record and its ceiling.
 ``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
 it sends the secret. The host then adds the client to `clients.json`, and the client adds the
 host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``. If the two
-texts differ, someone else used the code.
+texts differ, someone else used the code. ``TrustedClient/paired(in:)`` and
+``TrustedHost/paired(in:)`` read the two lists without a running daemon.
 
 A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
 5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
@@ -251,6 +252,8 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``KeyFingerprint``
 - ``PairingCode``
 - ``PairedMac``
+- ``TrustedClient``
+- ``TrustedHost``
 - ``RestartPolicy``
 - ``LeasePhase``
 - ``LeaseSummary``
