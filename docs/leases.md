@@ -42,7 +42,11 @@ busy, it prints `queued position=N` and waits. Once the clone is ready, it print
 | `--data-dir DIR` | see above | The daemon to ask. |
 
 The daemon refuses a source that's running, has never booted, lies on another volume, or didn't
-finish replacing its credentials. It also refuses a `--share` directory that doesn't exist.
+finish replacing its credentials. It also refuses a `--share` directory that doesn't exist, that
+is, contains, or lies inside its data directory, or that contains the source or an offered source.
+Without `--share-read-only`, it also refuses one that contains the `macpool` executable. The guest
+could otherwise reach the images, other leases' clones, or code that runs on the host. Share a
+narrower directory instead.
 
 Without `--detach`, the lease lasts as long as `lease` runs, and Control-C releases it. A command
 after `--` runs with `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS` in its

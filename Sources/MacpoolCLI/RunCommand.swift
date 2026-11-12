@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import MacpoolPool
 import MacpoolVM
 
 /// Boots a bundle headless, waits for its network, and stops it on request.
@@ -72,19 +73,35 @@ struct RunCommand: AsyncParsableCommand {
 
     /// Boots the VM, measures the time to its network and SSH, holds it, and stops it.
     ///
-    /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
-    ///   fails, or the VM stops early.
+    /// - Throws: ``CommandError`` when the shared directory overlaps the default data directory or
+    ///   includes the bundle or the executable, the executable cannot be located for that check,
+    ///   the bundle is in use, the boot record rules out the provisioning choice, the VM cannot
+    ///   start, a step times out, the credential rotation fails, or the VM stops early.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when the bundle is in use, the boot record rules out the
-    ///   provisioning choice, the VM cannot start, a step times out, the credential rotation
-    ///   fails, or the VM stops early.
+    /// - Throws: ``CommandError`` when the shared directory overlaps the default data directory or
+    ///   includes the bundle or the executable, the executable cannot be located for that check,
+    ///   the bundle is in use, the boot record rules out the provisioning choice, the VM cannot
+    ///   start, a step times out, the credential rotation fails, or the VM stops early.
     private func perform() async throws(CommandError) {
+        // A VM outside the daemon still must not reach the daemon's images and clones. The bundle
+        // counts as a source, because a bundle that boots in place can serve as one later.
+        if let shared = sharing.absolutePath {
+            let executable = try Executable.current()
+            let source = URL(filePath: bundle).absoluteURL.path(percentEncoded: false)
+            try pool { () throws(PoolError) in
+                try PoolDirectory.standard.checkShare(
+                    shared,
+                    isReadOnly: sharing.readOnly,
+                    sources: [source],
+                    executable: executable,
+                )
+            }
+        }
         let target = VMBundle(root: URL(filePath: bundle))
         let stopRequest = target.stopRequest.path(percentEncoded: false)
         let session = MachineSession(

@@ -1,0 +1,140 @@
+import Foundation
+import MacpoolPool
+import Testing
+
+/// Tests of the rule that a shared directory stays clear of the data directory and the source.
+struct ShareCheckTests {
+    /// Refuses every spelling of the data directory, its parents, and its contents.
+    @Test func refusesDirectoriesThatOverlapDataDirectory() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory.leasesDirectory, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: root.url.appending(path: "link"), withDestinationURL: directory.root)
+        // A directory that the user can search but not read still resolves.
+        let leases = directory.leasesDirectory.path(percentEncoded: false)
+        try manager.setAttributes([.posixPermissions: 0o300], ofItemAtPath: leases)
+        defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: leases) }
+        let hidden = root.url.appending(path: "hidden")
+        try manager.createSymbolicLink(at: hidden, withDestinationURL: directory.leasesDirectory)
+        let parent = try #require(realpath(root.url.path(percentEncoded: false), nil))
+        defer { free(parent) }
+        let path = String(cString: parent)
+        let refusals = [
+            ("\(path)/pool", "includes"),
+            (path, "includes"),
+            ("\(path)/POOL", "includes"),
+            ("\(path)/link", "includes"),
+            ("/System/Volumes/Data\(path)", "includes"),
+            ("/System/Volumes/Data", "includes"),
+            ("\(path)/pool/leases", "lies inside"),
+            ("\(path)/hidden", "lies inside"),
+        ]
+        for (shared, relation) in refusals {
+            #expect {
+                try directory.checkShare(shared)
+            } throws: { error in
+                "\(error)".contains("\(shared) \(relation) macpool's data directory")
+            }
+        }
+        #expect {
+            try directory.checkShare(path, isReadOnly: true)
+        } throws: { error in
+            "\(error)".contains("The guest could read the images")
+        }
+        // A data directory that does not exist yet is still kept out of the guest's reach.
+        let missing = PoolDirectory(root: root.url.appending(path: "later/pool"))
+        #expect(throws: PoolError.self) { try missing.checkShare(path) }
+    }
+
+    /// Accepts a directory beside the data directory and refuses one that includes the source.
+    @Test func refusesDirectoriesThatIncludeSource() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let source = root.url.appending(path: "work/base").path(percentEncoded: false)
+        // The name begins with the data directory's name, so only a comparison of whole
+        // components accepts it.
+        let beside = root.url.appending(path: "poolside").path(percentEncoded: false)
+        for created in [source, beside] {
+            try FileManager.default.createDirectory(atPath: created, withIntermediateDirectories: true)
+        }
+        try directory.checkShare(beside, sources: [source])
+        // The request may spell the source in another case than the volume stores.
+        let typed = root.url.appending(path: "work/BASE").path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(source, sources: [typed])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
+        // A share named through a link inside itself could point elsewhere at a later boot.
+        try FileManager.default.createSymbolicLink(atPath: "\(source)/up", withDestinationPath: "..")
+        #expect {
+            try directory.checkShare("\(source)/up/base", sources: [])
+        } throws: { error in
+            "\(error)".contains("passes through a symbolic link inside itself")
+        }
+        let work = root.url.appending(path: "work").path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(work, sources: [beside + "/base", source])
+        } throws: { error in
+            "\(error)".contains("\(work) includes the source \(source)")
+        }
+        // The guest could replace a link to the source, so a share that holds the link is refused.
+        let link = root.url.appending(path: "poolside/base")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(filePath: source))
+        let alias = link.path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(beside, sources: [alias])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
+        // A link in a parent directory is just as replaceable.
+        let through = root.url.appending(path: "poolside/work").path(percentEncoded: false)
+        try FileManager.default.createSymbolicLink(atPath: through, withDestinationPath: "../work")
+        #expect {
+            try directory.checkShare(beside, sources: ["\(through)/base"])
+        } throws: { error in
+            "\(error)".contains("includes the source")
+        }
+    }
+
+    /// Refuses a writable directory that includes the executable and accepts a read-only one.
+    @Test func refusesWritableDirectoryWithExecutable() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let bin = root.url.appending(path: "bin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
+        let executable = bin.appending(path: "macpool")
+        let shared = root.url.appending(path: "BIN").path(percentEncoded: false)
+        try directory.checkShare(shared, isReadOnly: true, executable: executable)
+        #expect {
+            try directory.checkShare(shared, executable: executable)
+        } throws: { error in
+            "\(error)".contains("\(shared) includes the macpool executable")
+        }
+        // A link outside the share still runs the file inside it.
+        let tools = root.url.appending(path: "tools", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: false)
+        try Data().write(to: tools.appending(path: "macpool"))
+        let link = bin.appending(path: "alias")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: tools.appending(path: "macpool"))
+        let toolsPath = tools.path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(toolsPath, executable: link)
+        } throws: { error in
+            "\(error)".contains("includes the macpool executable")
+        }
+        // So is a link that the chain passes on the way to the file.
+        let hops = root.url.appending(path: "hops", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: hops, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: hops.appending(path: "hop"), withDestinationURL: link)
+        let chain = bin.appending(path: "chain")
+        try FileManager.default.createSymbolicLink(at: chain, withDestinationURL: hops.appending(path: "hop"))
+        let hopsPath = hops.path(percentEncoded: false)
+        #expect {
+            try directory.checkShare(hopsPath, executable: chain)
+        } throws: { error in
+            "\(error)".contains("includes the macpool executable")
+        }
+    }
+}
