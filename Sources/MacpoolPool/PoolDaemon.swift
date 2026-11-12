@@ -1142,8 +1142,8 @@ public actor PoolDaemon {
             "connections": "\(ended.connections)",
             "leases": "\(ended.leases)",
         ])
-        // serve(_:owner:on:) finishes this connection. If a second finish started here first, the
-        // close at the end of serve(_:owner:on:) would drop the reply.
+        // serve(_:owner:on:) finishes this connection after the reply. Unlike disconnect(_:sending:),
+        // this call starts no finish of its own.
         stopServing(client, sending: .forgotten(leases: ended.leases))
     }
 
