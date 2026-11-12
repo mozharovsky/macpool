@@ -603,7 +603,8 @@ final class FakeLauncher: SupervisorLauncher {
     ///   - directory: The data directory.
     func exit(_ id: LeaseID, _ outcome: MachineOutcome, directory: PoolDirectory) {
         // The task below must not hold a copy of the supervisor, which would keep its lock.
-        let ended = state.withLock { state -> (server: SupervisorServer?, linger: Duration, processID: Int32)? in
+        // A signal that ends the supervisor meanwhile must find the close recorded.
+        let ended = state.withLock { state -> (closing: Task<Void, Never>?, linger: Duration, processID: Int32)? in
             guard var supervisor = state.supervisors[id], !supervisor.hasExited else {
                 return nil
             }
@@ -617,16 +618,16 @@ final class FakeLauncher: SupervisorLauncher {
                 protocolVersion: supervisor.behavior.protocolVersion,
             )
             state.supervisors[id] = supervisor
-            return (server, supervisor.behavior.lingerAfterExit, supervisor.processID)
+            try? directory.writeExitRecord(outcome, for: id)
+            server?.publish(SupervisorStatus(phase: .exited, outcome: outcome))
+            let closing = Self.close(server, of: id, in: &state)
+            return (closing, supervisor.behavior.lingerAfterExit, supervisor.processID)
         }
         guard let ended else {
             return
         }
-        try? directory.writeExitRecord(outcome, for: id)
-        ended.server?.publish(SupervisorStatus(phase: .exited, outcome: outcome))
-        let closing = close(ended.server, of: id)
         Task {
-            await closing?.value
+            await ended.closing?.value
             try? await Task.sleep(for: ended.linger)
             self.state.withLock { state in
                 if state.supervisors[id]?.processID == ended.processID {
@@ -645,25 +646,35 @@ final class FakeLauncher: SupervisorLauncher {
     ///   listen.
     @discardableResult
     private func end(_ id: LeaseID) -> Task<Void, Never>? {
-        // The removed value is the last copy of the supervisor, so its locks go with it here.
-        guard let supervisor = state.withLock({ $0.supervisors.removeValue(forKey: id) }) else {
-            return nil
+        state.withLock { state in
+            // The removed value is the last copy of the supervisor, so its locks go with it here.
+            guard let supervisor = state.supervisors.removeValue(forKey: id) else {
+                return nil
+            }
+            return Self.close(supervisor.server, of: id, in: &state)
         }
-        return close(supervisor.server, of: id)
     }
 
     /// Starts closing a supervisor's socket and records the close for the next launch.
     ///
+    /// The caller holds the state's lock while it ends the supervisor and records the close. A
+    /// launch therefore cannot start between the two and miss the close.
+    ///
     /// - Parameters:
     ///   - server: The socket, or `nil` when the supervisor does not listen.
     ///   - id: The lease.
+    ///   - state: The launcher's state.
     /// - Returns: The close, or `nil` without a socket.
-    private func close(_ server: SupervisorServer?, of id: LeaseID) -> Task<Void, Never>? {
+    private static func close(
+        _ server: SupervisorServer?,
+        of id: LeaseID,
+        in state: inout State,
+    ) -> Task<Void, Never>? {
         guard let server else {
             return nil
         }
         let closing = Task { await server.close() }
-        state.withLock { $0.closings[id] = closing }
+        state.closings[id] = closing
         return closing
     }
 
