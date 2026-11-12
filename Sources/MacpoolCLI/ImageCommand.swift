@@ -20,9 +20,9 @@ struct ImageCommand: AsyncParsableCommand {
 /// first launch packages, the runtime, and the free space. The guest shuts itself down, and the
 /// clone becomes `images/NAME` in the data directory with a ready image record.
 ///
-/// If the build fails or a signal interrupts it, the command deletes the clone. With
-/// `--keep-failed` it keeps the clone as `images/NAME` with a record that is not ready. The daemon
-/// refuses to lease such an image.
+/// If the build fails, or `SIGINT`, `SIGTERM`, or `SIGHUP` interrupts it, the command stops the VM
+/// and deletes the clone. With `--keep-failed` it keeps the clone as `images/NAME` with a record
+/// that is not ready. The daemon refuses to lease such an image.
 struct XcodeImageCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -109,30 +109,40 @@ struct XcodeImageCommand: AsyncParsableCommand {
     private func perform() async throws(CommandError) {
         let clock = ContinuousClock()
         let started = clock.now
-        let xcodeURL = URL(filePath: xcode).absoluteURL
-        let runtimeURL = URL(filePath: runtime).absoluteURL
-        for url in [xcodeURL, runtimeURL]
-            where !FileManager.default.isReadableFile(atPath: url.path(percentEncoded: false)) {
-            throw .invalidValue("\(url.path(percentEncoded: false)) is not a readable file")
-        }
         let base = VMBundle(root: URL(filePath: from).absoluteURL)
         let workspace = ImageWorkspace(directory: location.directory, name: name)
-        // The watch starts before the clone, so a signal during the copy still reaches cleanup.
-        let interrupted = StopFlag()
-        let signals = SignalWatch { _ in interrupted.set() }
-        defer { signals.cancel() }
         let deviceName = device
         try await workspace.build(
             from: base,
-            xcode: xcodeURL,
-            runtime: runtimeURL,
+            xcode: URL(filePath: xcode).absoluteURL,
+            runtime: URL(filePath: runtime).absoluteURL,
             keepFailed: keepFailed,
-            interrupted: interrupted,
-        ) { building, inputs async throws(CommandError) in
+            watchSignals: Self.watchSignals,
+        ) { building, inputs, interrupted async throws(CommandError) in
             try await buildInGuest(building, inputs: inputs, device: deviceName, interrupted: interrupted)
         }
         Report.measure("image_seconds", Report.seconds(clock.now - started, decimals: 1))
         Report.line("image=\(workspace.image.path(percentEncoded: false))")
+    }
+
+    /// Starts watching the signals that interrupt a build.
+    ///
+    /// `SIGINT`, `SIGTERM`, and `SIGHUP` set `interrupted`. Closing the terminal sends `SIGHUP`, and
+    /// the build then continues with a dead standard output. If the process already ignores a
+    /// signal, for example `SIGHUP` under `nohup`, the signal does not interrupt the build.
+    ///
+    /// The function also prepares the output for the rest of the process. `SIGPIPE` stays ignored,
+    /// and ``Report/line(_:)`` drops lines that it cannot write. The cleanup and the lines after a
+    /// published image then finish with a closed pipe or terminal.
+    ///
+    /// - Parameter interrupted: The flag that the signals set.
+    /// - Returns: The function that stops the watch and restores the earlier signal actions.
+    static func watchSignals(_ interrupted: StopFlag) -> @Sendable () -> Void {
+        signal(SIGPIPE, SIG_IGN)
+        Report.dropUnwritableLines()
+        let signals = (SignalWatch.signals + [SIGHUP]).filter { !SignalWatch.isIgnored($0) }
+        let watch = SignalWatch(signals: signals) { _ in interrupted.set() }
+        return { watch.cancel() }
     }
 
     /// Boots the clone, runs the build in the guest, and waits until the guest shuts down.

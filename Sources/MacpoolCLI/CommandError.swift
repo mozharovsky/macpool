@@ -8,7 +8,10 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     /// - Parameter error: The library's error.
     case library(MacpoolError)
 
-    /// A signal interrupted the command, which removed what it had created.
+    /// A signal interrupted the command.
+    ///
+    /// The command removed what it had created, unless `image xcode --keep-failed` kept the
+    /// failed image.
     case interrupted
 
     /// The bundle has never booted, and its only provisioning boot would go unused.
@@ -85,6 +88,14 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: Why the step failed.
     case imageStep(step: String, reason: String)
 
+    /// An image build that did not finish left its clone or its inputs behind.
+    ///
+    /// - Parameters:
+    ///   - name: The image's name.
+    ///   - building: The clone's directory.
+    ///   - inputs: The directory of the inputs that the guest reads.
+    case unfinishedImageBuild(name: String, building: String, inputs: String)
+
     /// A supervised VM's boot or run failed.
     ///
     /// - Parameter reason: The failure.
@@ -127,6 +138,9 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             reason
         case let .imageStep(step, reason):
             "building the image failed while \(step): \(reason)"
+        case let .unfinishedImageBuild(name, building, inputs):
+            "an earlier build of \(name) did not finish and may have left \(building) and \(inputs). "
+                + "If no image xcode command is building \(name) now, delete both and build again"
         }
     }
 }
