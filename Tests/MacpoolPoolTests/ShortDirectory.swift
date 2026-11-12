@@ -18,7 +18,22 @@ final class ShortDirectory {
     }
 
     /// Removes the directory and its contents.
+    ///
+    /// If a test ends before its cleanup, a file may stay immutable. The removal then clears the
+    /// flag first.
     deinit {
-        try? FileManager.default.removeItem(at: url)
+        let manager = FileManager.default
+        let paths = manager.enumerator(atPath: url.path(percentEncoded: false))?.allObjects as? [String] ?? []
+        for path in paths {
+            let item = url.appending(path: path).path(percentEncoded: false)
+            // The attributes describe a symbolic link itself. A change of flags would follow it.
+            guard let attributes = try? manager.attributesOfItem(atPath: item),
+                  attributes[.type] as? FileAttributeType != .typeSymbolicLink,
+                  attributes[.immutable] as? Bool == true else {
+                continue
+            }
+            try? manager.setAttributes([.immutable: false], ofItemAtPath: item)
+        }
+        try? manager.removeItem(at: url)
     }
 }

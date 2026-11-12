@@ -8,6 +8,10 @@ struct RevocationTests {
     /// The refusal that a paired Mac receives once the host no longer accepts it.
     static let notAccepted = PoolReply.failure(ClientRightsTests.refusal("the host no longer accepts this Mac"))
 
+    /// The end of a revocation's failure when the daemon keeps the block only in memory.
+    static let staysBlocked = "The Mac stays blocked until the daemon restarts. Revoke it again once the list can be "
+        + "saved"
+
     /// Blocks a Mac with two connections, a waiting request, an attached lease, and a detached
     /// lease. The connections close, the request leaves the queue, and the attached lease ends.
     /// The detached lease ends only on a second revocation with `endLeases`.
@@ -93,9 +97,9 @@ struct RevocationTests {
         await daemon.shutdown()
     }
 
-    /// Changes nothing when the list cannot be read. The revocation fails, and the Mac's
-    /// connection stays open.
-    @Test func changesNothingWhenTheListCannotBeRead() async throws {
+    /// Closes the connections of the named Mac when the list of paired clients cannot be read,
+    /// keeps the block in memory, and reports the list's error.
+    @Test func closesConnectionsWhenTheListCannotBeRead() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
         let owner = try LeaseLedgerTests.paired("a")
@@ -103,20 +107,105 @@ struct RevocationTests {
             return
         }
         let remote = try await pool.pairedClient(of: daemon, owner: owner)
-        let list = TrustList<TrustedClient>.file(in: pool.directory)
-        let saved = try Data(contentsOf: list)
-        try Data("{".utf8).write(to: list)
-        await #expect(throws: PoolError.self) {
-            try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        try Data("{".utf8).write(to: TrustList<TrustedClient>.file(in: pool.directory))
+
+        do {
+            _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+            Issue.record("the revocation succeeded without a list")
+        } catch let .daemonRefused(message) {
+            #expect(message
+                .hasPrefix("the host closed the Mac's connections, but it cannot read its list of paired Macs"))
+            #expect(message.hasSuffix(Self.staysBlocked))
         }
-        try saved.write(to: list)
-        try remote.send(PoolRequest.status)
-        guard case .status = try await next(remote) else {
-            Issue.record("the connection did not stay open")
+        #expect(try await next(remote) == Self.notAccepted)
+        #expect(try await isClosed(remote))
+        #expect(await daemon.unsavedBlocks == [key])
+        await daemon.shutdown()
+    }
+
+    /// Closes the connections of a revoked Mac when the block cannot be saved, and refuses the
+    /// Mac's requests until a later revocation saves the block.
+    @Test func reportsABlockThatCannotBeSaved() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
             return
         }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+
+        do {
+            _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+            Issue.record("the revocation succeeded without a saved block")
+        } catch let .daemonRefused(message) {
+            #expect(message
+                .hasPrefix("the host closed the Mac's connections, but it cannot record that the Mac is blocked"))
+            #expect(message.hasSuffix(Self.staysBlocked))
+        }
+        #expect(try await next(remote) == Self.notAccepted)
+        #expect(try await isClosed(remote))
         #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == false)
-        remote.close()
+        #expect(await daemon.unsavedBlocks == [key])
+
+        try Self.setImmutable(false, listIn: pool.directory)
+        let late = try await pool.pairedClient(of: daemon, owner: owner)
+        try late.send(PoolRequest.status)
+        #expect(try await next(late) == Self.notAccepted)
+        #expect(try await isClosed(late))
+        let again = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        #expect(again == .revoked(PairedMac(name: "client", key: key), connections: 0, leases: 0))
+        #expect(await daemon.unsavedBlocks.isEmpty)
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
+        await daemon.shutdown()
+    }
+
+    /// Saves a block a second time after the revocation ended the Mac's leases. Here the first
+    /// save fails, and the list becomes writable when the lease ends.
+    @Test func savesTheBlockAgainAfterTheLeasesEnd() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        #expect(try await next(remote).lease?.phase == .starting)
+        #expect(try await next(remote).lease?.phase == .ready)
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+        let directory = pool.directory
+        pool.logs.whenLogged("A lease ended") {
+            try? Self.setImmutable(false, listIn: directory)
+        }
+
+        let revoked = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        #expect(revoked == .revoked(PairedMac(name: "client", key: key), connections: 1, leases: 1))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
+        await daemon.shutdown()
+    }
+
+    /// Closes the connections of a Mac that the readable list no longer names, without a block.
+    @Test func revokesAConnectedMacWithoutARecord() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try TrustList<TrustedClient>().save(to: pool.directory)
+
+        let refusal = "the host closed the Mac's connections, but its list of paired Macs has no record of the Mac "
+            + "to block. The Mac can pair again with a new code"
+        await #expect(throws: PoolError.daemonRefused(message: ClientRightsTests.refusal(refusal))) {
+            try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        }
+        #expect(try await next(remote) == Self.notAccepted)
+        #expect(try await isClosed(remote))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory).records.isEmpty)
         await daemon.shutdown()
     }
 
@@ -145,5 +234,20 @@ struct RevocationTests {
         #expect(records.map(\.key) == [blockedKey])
         #expect(records.map(\.isBlocked) == [true])
         await daemon.shutdown()
+    }
+
+    /// Sets or clears the user immutable flag of the list of paired clients.
+    ///
+    /// While the flag is set, the list stays readable, and the rename that saves it fails.
+    ///
+    /// - Parameters:
+    ///   - isImmutable: Whether to set the flag.
+    ///   - directory: The host's data directory.
+    /// - Throws: `POSIXError` when the flag cannot be changed.
+    static func setImmutable(_ isImmutable: Bool, listIn directory: PoolDirectory) throws {
+        let path = TrustList<TrustedClient>.file(in: directory).path(percentEncoded: false)
+        guard chflags(path, isImmutable ? UInt32(UF_IMMUTABLE) : 0) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 }

@@ -255,6 +255,41 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Pairs a revoked Mac again with a new code after a person deleted its record. The daemon
+    /// kept the Mac's block only in memory. The new pairing ends that block.
+    @Test func pairsAgainAfterAnUnsavedBlock() async throws {
+        let host = try await PairingHost()
+        let client = try host.clientDirectory()
+        let first = try await host.invite()
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: client)
+        let identity = try MacIdentity.loadOrCreate(in: client)
+        let clientKey = KeyFingerprint(digest: identity.keyDigest)
+        let directory = host.fixture.directory
+        try RevocationTests.setImmutable(true, listIn: directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: clientKey.shortKey), to: directory)
+        }
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        } != nil)
+
+        try RevocationTests.setImmutable(false, listIn: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        let second = try await host.invite()
+        _ = try await PoolClient.pair(using: second.code, name: "runner", directory: client)
+        #expect(try await next(second.channel) == .paired(PairedMac(name: "runner", key: clientKey)))
+        #expect(await host.daemon.unsavedBlocks.isEmpty)
+        let channel = try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        try channel.send(PoolRequest.status)
+        guard case .status = try await next(channel) else {
+            Issue.record("the host did not serve the Mac that paired again")
+            return
+        }
+        channel.close()
+        await host.stop()
+    }
+
     /// Records the priority ceiling of the code with the new client.
     @Test func recordsTheCeilingOfTheCode() async throws {
         let host = try await PairingHost()

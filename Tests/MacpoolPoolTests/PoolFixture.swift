@@ -779,11 +779,28 @@ final class LogRecorder: Sendable {
     /// The messages in the order of logging.
     private let entries = Mutex<[LogEntry]>([])
 
-    /// Adds a message.
+    /// The actions that run once when a message is logged, keyed by the message's text.
+    private let actions = Mutex<[String: @Sendable () -> Void]>([:])
+
+    /// Adds a message and runs the action that waits for its text.
     ///
     /// - Parameter entry: The message.
     func record(_ entry: LogEntry) {
         entries.withLock { $0.append(entry) }
+        let action = actions.withLock { $0.removeValue(forKey: entry.message) }
+        action?()
+    }
+
+    /// Runs an action once, the next time a logger writes a message.
+    ///
+    /// The action runs before the logging call returns. A test can therefore change the file
+    /// system at a known step of the daemon's work.
+    ///
+    /// - Parameters:
+    ///   - message: The text of the message.
+    ///   - action: The action to run.
+    func whenLogged(_ message: String, run action: @escaping @Sendable () -> Void) {
+        actions.withLock { $0[message] = action }
     }
 
     /// Every message in the order of logging.
