@@ -355,6 +355,16 @@ final class FakeLauncher: SupervisorLauncher {
         var identifications = 0
     }
 
+    /// What a supervisor does after its run ended.
+    private struct EndedRun {
+        /// The close of the socket, or `nil` when the supervisor did not listen.
+        let closing: Task<Void, Never>?
+        /// How long the supervisor keeps its lock after the close.
+        let linger: Duration
+        /// The supervisor whose lock goes after the linger.
+        let processID: Int32
+    }
+
     /// The running supervisors and the launch history.
     private struct State {
         /// The supervisors that hold their locks.
@@ -604,7 +614,7 @@ final class FakeLauncher: SupervisorLauncher {
     func exit(_ id: LeaseID, _ outcome: MachineOutcome, directory: PoolDirectory) {
         // The task below must not hold a copy of the supervisor, which would keep its lock.
         // A signal that ends the supervisor meanwhile must find the close recorded.
-        let ended = state.withLock { state -> (closing: Task<Void, Never>?, linger: Duration, processID: Int32)? in
+        let ended = state.withLock { state -> EndedRun? in
             guard var supervisor = state.supervisors[id], !supervisor.hasExited else {
                 return nil
             }
@@ -621,7 +631,11 @@ final class FakeLauncher: SupervisorLauncher {
             try? directory.writeExitRecord(outcome, for: id)
             server?.publish(SupervisorStatus(phase: .exited, outcome: outcome))
             let closing = Self.close(server, of: id, in: &state)
-            return (closing, supervisor.behavior.lingerAfterExit, supervisor.processID)
+            return EndedRun(
+                closing: closing,
+                linger: supervisor.behavior.lingerAfterExit,
+                processID: supervisor.processID,
+            )
         }
         guard let ended else {
             return
