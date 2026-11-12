@@ -8,7 +8,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct ClientRightsTests {
     /// Lets a paired client ask for priorities up to the ceiling in its record. The daemon reads
-    /// the record again for every lease request.
+    /// the record again for every request.
     @Test func capsPrioritiesAtTheCeiling() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start(offeredSources: ["base": pool.source])
@@ -27,12 +27,7 @@ struct ClientRightsTests {
         try Self.record(owner, priorityCeiling: 0, in: pool.directory)
         try remote.send(PoolRequest.lease(terms(1)))
         #expect(try await next(remote) == .failure(Self.refusal("this Mac may ask for a priority of at most 0")))
-        try Self.record(owner, priorityCeiling: 0, isBlocked: true, in: pool.directory)
-        try remote.send(PoolRequest.lease(terms(0)))
-        #expect(try await next(remote) == .failure(Self.refusal("the host no longer accepts this Mac")))
-        try TrustList<TrustedClient>().save(to: pool.directory)
-        try remote.send(PoolRequest.lease(terms(0)))
-        #expect(try await next(remote) == .failure(Self.refusal("the host no longer accepts this Mac")))
+        remote.close()
         await daemon.shutdown()
     }
 

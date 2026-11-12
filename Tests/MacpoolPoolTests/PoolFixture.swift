@@ -699,6 +699,28 @@ func next(_ client: MessageChannel, within timeout: Duration = .seconds(10)) asy
     return try #require(await client.receive(PoolReply.self), "no reply within \(timeout)")
 }
 
+/// Waits until the daemon closes a client connection.
+///
+/// A receive does not end on task cancellation. The call therefore closes the connection itself
+/// when it stays open too long. The test then fails instead of hanging.
+///
+/// - Parameters:
+///   - client: The client's connection.
+///   - timeout: The longest wait.
+/// - Returns: `true` when the connection ended within `timeout` without another reply.
+/// - Throws: ``PoolError`` when a line is not a reply.
+func isClosed(_ client: MessageChannel, within timeout: Duration = .seconds(10)) async throws -> Bool {
+    let watchdog = Task {
+        try await Task.sleep(for: timeout)
+        client.close()
+        return true
+    }
+    let reply = try await client.receive(PoolReply.self)
+    watchdog.cancel()
+    let timedOut = await (try? watchdog.value) == true
+    return reply == nil && !timedOut
+}
+
 /// Waits until a condition holds.
 ///
 /// - Parameters:

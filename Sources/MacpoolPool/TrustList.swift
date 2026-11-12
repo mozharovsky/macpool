@@ -31,8 +31,8 @@ struct TrustedClient: TrustRecord {
 
     /// Whether the host refuses the client.
     ///
-    /// A blocked client opens no new connection. The record stays, so a person sees which key
-    /// the host refuses.
+    /// A blocked client opens no new connection, and its open connections close at their next
+    /// request. The record stays. A person then sees which key the host refuses.
     var isBlocked: Bool
 
     /// The highest priority that the client may ask for, 0 or more.
