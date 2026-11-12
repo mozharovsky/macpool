@@ -479,6 +479,8 @@ struct PairingTests {
         #expect(try await next(asking) == .failure("this Mac is not paired with the host, so it can only pair"))
         #expect(try await asking.receive(PoolReply.self) == nil)
 
+        // Each silent wait starts after this point, however long the connections take.
+        let start = ContinuousClock.now
         var silent: [MessageChannel] = []
         for _ in 0 ..< PoolDaemon.pairingConnectionLimit {
             try await silent.append(PoolClient.connect(to: host.endpoint, as: makeIdentity(), hostKey: host.key))
@@ -487,7 +489,6 @@ struct PairingTests {
         #expect(await refusal { () async throws(PoolError) in
             try await PoolClient.connect(to: host.endpoint, as: extra, hostKey: host.key)
         } == "the host refused the connection: other Macs are pairing with the host, so try again shortly")
-        let start = ContinuousClock.now
         for channel in silent {
             #expect(try await channel.receive(PoolReply.self) == nil)
             channel.close()
