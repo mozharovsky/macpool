@@ -537,8 +537,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// replies with ``PoolReply/forgotten(leases:)``, and closes every connection of the Mac. The
     /// Mac can then return only with a new pairing code.
     ///
-    /// If the daemon cannot read or save its list of paired Macs, it refuses the request and
-    /// changes nothing.
+    /// If the daemon cannot read its list of paired Macs, it refuses the request and changes
+    /// nothing. The same holds when a save fails and the list still names the Mac. If a save
+    /// fails after the rename that removed the Mac's record, the daemon forgets the Mac.
     ///
     /// - Parameter endLeases: Whether the daemon ends the Mac's leases.
     case forget(endLeases: Bool = false)

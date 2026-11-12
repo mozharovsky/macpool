@@ -1107,8 +1107,10 @@ public actor PoolDaemon {
     /// Removes the record of the paired Mac that sent the request and closes the Mac's other
     /// connections.
     ///
-    /// The daemon saves the list before it changes anything else. If the save fails, the Mac
-    /// keeps its record, its leases, and its connections.
+    /// The daemon saves the list before it changes anything else. If the save fails, the daemon
+    /// reads the list again. When the list still names the Mac or cannot be read, the Mac keeps
+    /// its record, its leases, and its connections. When the list no longer names the Mac, the
+    /// daemon forgets the Mac as after a save that succeeded.
     ///
     /// - Parameters:
     ///   - key: The fingerprint of the Mac's key.
@@ -1116,7 +1118,8 @@ public actor PoolDaemon {
     ///   - client: The connection that sent the request. It receives
     ///     ``PoolReply/forgotten(leases:)``, and `serve(_:owner:on:)` closes it.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when the Mac has leases and `endLeases` is
-    ///   not set, or when the list cannot be read or saved. The reason names no host path.
+    ///   not set, when the list cannot be read, or when the save fails and the list does not show
+    ///   the Mac removed. The reason names no host path.
     private func forget(_ key: KeyFingerprint, endLeases: Bool, from client: ClientID) throws(PoolError) {
         let leases = ledger.liveLeases(of: .client(key)).count
         guard leases == 0 || endLeases else {
@@ -1131,10 +1134,17 @@ public actor PoolDaemon {
         } catch {
             configuration.logger.log(
                 level: peerLogLevel(of: .unsavedClientList, full: .error),
-                "The host cannot forget a paired Mac",
+                "The host cannot save the list of paired Macs for a forget request",
                 metadata: ["key": "\(key)", "reason": "\(error)"],
             )
-            throw .invalidRequest(reason: "the host cannot update its list of paired Macs")
+            // A save can fail after the rename that puts the new list in place, for example when
+            // the directory cannot be flushed. The Mac would then keep leases that it can no longer
+            // reach. The daemon therefore reads the list again and forgets the Mac when the list no
+            // longer names it.
+            guard let saved = try? TrustList<TrustedClient>.load(from: configuration.directory), saved[key] == nil
+            else {
+                throw .invalidRequest(reason: "the host cannot update its list of paired Macs")
+            }
         }
         let ended = cutOff(key, endLeases: true, reason: "this Mac asked the host to forget it", except: client)
         configuration.logger.notice("Forgot a paired Mac on its request", metadata: [

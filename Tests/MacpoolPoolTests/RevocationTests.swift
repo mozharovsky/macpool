@@ -241,6 +241,39 @@ struct RevocationTests {
         await daemon.shutdown()
     }
 
+    /// Forgets a Mac that asks the host to forget it when the save fails after the rename that
+    /// puts the list without the Mac's record in place.
+    @Test func forgetsWhenTheSaveFailsAfterTheRename() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let owner = try LeaseLedgerTests.paired("a")
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        let other = try await pool.pairedClient(of: daemon, owner: owner)
+        try remote.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, detached: true)))
+        #expect(try await next(remote).lease?.phase == .starting)
+        let lease = try #require(try await next(remote).lease)
+        // No test can fail the flush after the rename. The rename fails on the immutable file
+        // instead, and the test then saves the list without the record. The file then matches
+        // the file after a rename and a failed flush.
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+        let directory = pool.directory
+        pool.logs.whenLogged("The host cannot save the list of paired Macs for a forget request") {
+            try? Self.setImmutable(false, listIn: directory)
+            try? TrustList<TrustedClient>().save(to: directory)
+        }
+
+        try remote.send(PoolRequest.forget(endLeases: true))
+        #expect(try await next(remote) == .ended(lease.id, reason: "this Mac asked the host to forget it"))
+        #expect(try await next(remote) == .forgotten(leases: 1))
+        #expect(try await isClosed(remote))
+        #expect(try await next(other) == Self.notAccepted)
+        #expect(try await isClosed(other))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory).records.isEmpty)
+        #expect(await daemon.summary().leases.allSatisfy { $0.phase == .stopping })
+        await daemon.shutdown()
+    }
+
     /// Removes the record of a Mac that asks the host to forget it. The Mac must first release
     /// its leases or ask the host to end them. Every connection of the Mac then closes.
     @Test func forgetsAPairedMac() async throws {

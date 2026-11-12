@@ -197,8 +197,11 @@ code.
 A paired client asks the host to forget it with ``PoolRequest/forget(endLeases:)``. If it holds
 leases and `endLeases` is not set, the request fails. Otherwise the daemon first saves the list
 without the record. It then ends the leases and closes every connection of the client. If the list
-cannot be read or saved, the request fails and the daemon changes nothing. The daemon refuses this
-request from a blocked client. A blocked record therefore stays.
+cannot be read, the request fails and the daemon changes nothing. If the save fails, the daemon
+reads the list again, because a save can fail after the rename that puts the new list in place.
+When the list no longer names the client, the daemon forgets the client. Otherwise the request
+fails and the daemon changes nothing. The daemon refuses this request from a blocked client. A
+blocked record therefore stays.
 
 ### Supervisors
 
