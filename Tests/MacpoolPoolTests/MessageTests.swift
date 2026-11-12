@@ -272,6 +272,93 @@ struct MessageTests {
         server.close()
     }
 
+    /// Leaves the connection to a finish that began, so a close during the finish loses no
+    /// message.
+    @Test func closeKeepsARunningFinish() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        // The socket's buffers hold less than one message, so the finish waits until the client
+        // reads.
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        let finishing = Task { await server.finish(within: .seconds(30)) }
+        try await waitUntilFinishBegins(on: server, peer: client)
+        server.close()
+        server.close()
+        for _ in 0 ..< 4 {
+            #expect(try await client.receive(String.self) == text)
+        }
+        #expect(try await client.receive(String.self) == nil)
+        await finishing.value
+    }
+
+    /// Closes the connection when the time limit of a finish passes, although a close came
+    /// during the finish and the peer never reads.
+    @Test func finishClosesAtItsTimeLimit() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        let finishing = Task { await server.finish(within: .milliseconds(200)) }
+        try await waitUntilFinishBegins(on: server, peer: client)
+        server.close()
+        await finishing.value
+        // The client read nothing before the limit, so the connection ends before the first
+        // message is complete.
+        #expect(try await client.receive(String.self) == nil)
+    }
+
+    /// Closes the connection at once when no finish began, and a second close changes nothing.
+    @Test func closeWithoutFinishDropsQueuedMessages() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let text = String(repeating: "a", count: 256 << 10)
+        for _ in 0 ..< 4 {
+            try server.send(text)
+        }
+        server.close()
+        server.close()
+        #expect(try await client.receive(String.self) == nil)
+        await server.finish()
+    }
+
+    /// Returns once a finish of the server began.
+    ///
+    /// The server reads one request of the peer at a time. Its receive returns `nil` once the
+    /// finish began, which tells the test without waiting for a fixed time.
+    ///
+    /// - Parameters:
+    ///   - server: The channel whose finish the test waits for.
+    ///   - peer: The other end, which sends the requests.
+    /// - Throws: An error when a request cannot be sent or read.
+    private func waitUntilFinishBegins(on server: MessageChannel, peer: MessageChannel) async throws {
+        repeat {
+            try peer.send(PoolRequest.status)
+        } while try await server.receive(PoolRequest.self) != nil
+    }
+
     /// Fails at once for a missing socket and for a path that no socket can have.
     @Test func refusesMissingAndOverlongSockets() async throws {
         let directory = try ShortDirectory()

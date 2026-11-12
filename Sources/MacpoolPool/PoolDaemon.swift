@@ -1317,7 +1317,7 @@ public actor PoolDaemon {
     /// - Parameter text: The text to convert.
     /// - Returns: The bytes. Two texts that differ only in letter case or normalization form have
     ///   the same bytes.
-    private static func caselessBytes(of text: String) -> [UInt8] {
+    static func caselessBytes(of text: String) -> [UInt8] {
         // The canonical caseless match of the Unicode standard decomposes a text before and after
         // case folding.
         let folded = text.decomposedStringWithCanonicalMapping.folding(options: .caseInsensitive, locale: nil)
@@ -1436,8 +1436,9 @@ public actor PoolDaemon {
     ///   image record cannot be read, its own credential rotation did not finish, or another
     ///   process holds it. A paired client's request gets ``PoolError/invalidRequest(reason:)``
     ///   for these instead. Every request gets ``PoolError/invalidRequest(reason:)`` when the
-    ///   source never booted, is an image without a record that marks it ready, lies on another
-    ///   volume than the data directory, or the shared directory is missing.
+    ///   source never booted, is an image without a record that marks it ready, or lies on another
+    ///   volume than the data directory. It also gets that error when the shared directory is
+    ///   missing or when ``PoolDirectory/checkShare(_:isReadOnly:sources:executable:)`` refuses it.
     private func checkSource(of terms: LeaseTerms, offeredName: String?) throws(PoolError) {
         let source = terms.source
         let shown = offeredName ?? source
@@ -1485,6 +1486,13 @@ public actor PoolDaemon {
             guard manager.fileExists(atPath: shared, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw .invalidRequest(reason: "the shared directory \(shared) does not exist")
             }
+            // Only a launcher that runs a real executable gives the guest a file to replace.
+            try configuration.directory.checkShare(
+                shared,
+                isReadOnly: terms.sharedDirectoryIsReadOnly,
+                sources: [source] + configuration.offeredSources.values.sorted(),
+                executable: (configuration.launcher as? ProcessSupervisorLauncher)?.executable,
+            )
         }
     }
 

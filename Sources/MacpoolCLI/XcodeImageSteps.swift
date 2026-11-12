@@ -187,7 +187,32 @@ struct XcodeImageSteps {
             throw .imageStep(step: name, reason: "df printed \(output)")
         }
         guard kilobytes >= Self.minimumFreeBytes / 1024 else {
-            throw .imageStep(step: name, reason: "the guest has \(kilobytes >> 20) GiB free, less than 40 GiB")
+            throw .imageStep(step: name, reason: "the guest has \(kilobytes >> 20) GB free, less than 40 GB")
+        }
+    }
+
+    /// Asks the guest to shut down a second after the command returns.
+    ///
+    /// If the task is cancelled during the command, the method returns without an error. The build
+    /// cancels its steps only after the VM stops, and it then judges the build by how the VM
+    /// stopped.
+    ///
+    /// - Throws: ``CommandError/imageStep(step:reason:)`` when the command fails, or
+    ///   ``CommandError/library(_:)`` when it cannot run or outlasts its time limit.
+    func shutDown() async throws(CommandError) {
+        do {
+            // The delay lets ssh report the status before the guest drops the connection.
+            try await step(
+                "shutting down the guest",
+                "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+                asRoot: true,
+                timeLimit: .seconds(60),
+            )
+        } catch {
+            // A guest that stopped before ssh returned has done what the command asked.
+            guard Task.isCancelled else {
+                throw error
+            }
         }
     }
 
@@ -199,8 +224,9 @@ struct XcodeImageSteps {
     ///   - asRoot: Whether `sudo` runs the command as root.
     ///   - timeLimit: The longest time the command may take.
     /// - Returns: The command's standard output.
-    /// - Throws: ``CommandError/imageStep(step:reason:)`` when the command fails, or
-    ///   ``CommandError/library(_:)`` when it cannot run or outlasts its time limit.
+    /// - Throws: ``CommandError/imageStep(step:reason:)`` when the command fails or the task is
+    ///   cancelled, or ``CommandError/library(_:)`` when the command cannot run or outlasts its
+    ///   time limit.
     @discardableResult
     private func step(
         _ name: String,
@@ -209,8 +235,14 @@ struct XcodeImageSteps {
         timeLimit: Duration = .seconds(120),
     ) async throws(CommandError) -> String {
         Report.line("step: \(name)")
-        let result = try await library { () async throws(MacpoolError) in
-            try await guest.runStep(command, asRoot: asRoot, timeLimit: timeLimit)
+        let result: GuestCommandResult
+        do throws(MacpoolError) {
+            result = try await guest.runStep(command, asRoot: asRoot, timeLimit: timeLimit)
+        } catch .guestCommandCancelled {
+            // The build cancels its steps only after the VM stops.
+            throw .imageStep(step: name, reason: "the VM stopped")
+        } catch {
+            throw .library(error)
         }
         guard result.succeeded else {
             throw .imageStep(step: name, reason: result.failureSummary)

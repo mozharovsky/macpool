@@ -187,9 +187,7 @@ struct ChannelStreamTests {
     @Test func refusesAClosedPort() async throws {
         let listener = try await LoopbackListener()
         let endpoint = listener.endpoint
-        listener.close()
-        // The listener closes its socket asynchronously.
-        try await Task.sleep(for: .milliseconds(200))
+        await listener.closeAndWait()
         let start = ContinuousClock.now
         await #expect {
             try await MessageChannel.connect(to: endpoint, using: .tcp, timeout: .seconds(20))
@@ -268,5 +266,19 @@ private final class LoopbackListener: Sendable {
     /// Stops listening.
     func close() {
         listener.cancel()
+    }
+
+    /// Stops listening and waits until the listener closed its socket.
+    func closeAndWait() async {
+        let listener = listener
+        await withCheckedContinuation { (cancelled: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(cancelled)
+            listener.stateUpdateHandler = { state in
+                if case .cancelled = state {
+                    once.resume(returning: ())
+                }
+            }
+            listener.cancel()
+        }
     }
 }

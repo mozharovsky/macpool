@@ -54,6 +54,150 @@ public struct PoolDirectory: Sendable, Hashable {
         return resolve(parent).appending(path: url.lastPathComponent, directoryHint: .notDirectory)
     }
 
+    /// Checks that a shared directory keeps the guest away from the data directory, the sources,
+    /// and the macpool executable.
+    ///
+    /// The check refuses a shared directory that is the data directory, contains it, or lies
+    /// inside it. It also refuses one that is a source or contains one. If the guest can write the
+    /// directory, the check also refuses it when it contains the executable. A share that holds a
+    /// symbolic link on the way to a source or the executable counts as containing it. A shared
+    /// path that passes through a symbolic link inside the share is refused too. The check
+    /// compares the paths after resolving symbolic links and firmlinks, and it ignores letter case
+    /// and the Unicode normalization form.
+    ///
+    /// The check reads the paths once. The VM opens the shared directory by its path when it
+    /// boots. If a directory on that path is replaced in between, the VM shares what the path
+    /// names then.
+    ///
+    /// - Parameters:
+    ///   - shared: The absolute path of the shared directory.
+    ///   - isReadOnly: Whether the guest can only read the shared directory.
+    ///   - sources: The absolute paths of the bundles that the guest must not reach.
+    ///   - executable: The macpool executable that starts VMs, or `nil` for none.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the check refuses the directory or
+    ///   cannot resolve one of the paths. The reason names the paths and a way out.
+    public func checkShare(
+        _ shared: String,
+        isReadOnly: Bool = false,
+        sources: [String] = [],
+        executable: URL? = nil,
+    ) throws(PoolError) {
+        func resolved(_ path: String) throws(PoolError) -> [ArraySlice<UInt8>] {
+            guard let components = Self.physicalComponents(of: path) else {
+                throw .invalidRequest(reason: """
+                macpool cannot open \(path) to check the shared directory \(shared). \
+                Share a directory that you can open.
+                """)
+            }
+            return components
+        }
+        let share = try resolved(shared)
+        let data = try resolved(root.path(percentEncoded: false))
+        let access = isReadOnly ? "read" : "change"
+        let reach = "The guest could \(access) the images, clones, and pool state in it."
+        if data.starts(with: share) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes macpool's data directory \(root.path(percentEncoded: false)). \
+            \(reach) Share a narrower directory.
+            """)
+        }
+        if share.starts(with: data) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) lies inside macpool's data directory \(root.path(percentEncoded: false)). \
+            \(reach) Share a directory outside it.
+            """)
+        }
+        // The guest could replace any symbolic link that the path passes through inside the share,
+        // so the check follows the path one entry at a time and tests every entry it visits.
+        // With `strictly` set, an entry that is the share itself does not count.
+        func isShared(_ path: String, strictly: Bool = false) throws(PoolError) -> Bool {
+            // A URL would resolve a relative link target against the current directory, so the
+            // names come from splitting the text.
+            var pending = path.split(separator: "/").map(String.init).reversed() as [String]
+            var directory = "/"
+            var links = 0
+            while let name = pending.popLast() {
+                if name == "." {
+                    continue
+                }
+                if name == ".." {
+                    directory = URL(filePath: directory).deletingLastPathComponent().path(percentEncoded: false)
+                    continue
+                }
+                let visited = try resolved(directory) + [PoolDaemon.caselessBytes(of: name)[...]]
+                if visited.starts(with: share), !strictly || visited.count > share.count {
+                    return true
+                }
+                let entry = URL(filePath: directory).appending(path: name).path(percentEncoded: false)
+                guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: entry) else {
+                    directory = entry
+                    continue
+                }
+                links += 1
+                guard links <= MAXSYMLINKS else {
+                    throw .invalidRequest(reason: "macpool cannot follow the symbolic links in \(path)")
+                }
+                if target.hasPrefix("/") {
+                    directory = "/"
+                }
+                pending += target.split(separator: "/").map(String.init).reversed()
+            }
+            return false
+        }
+        if try isShared(shared, strictly: true) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) passes through a symbolic link inside itself. The guest could \
+            replace the link and change what a later boot shares. Share the directory by its real path.
+            """)
+        }
+        for source in sources where try isShared(source) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes the source \(source). The guest could \(access) its disk and \
+            guest account. Share a narrower directory.
+            """)
+        }
+        if let executable, !isReadOnly, try isShared(executable.path(percentEncoded: false)) {
+            throw .invalidRequest(reason: """
+            the shared directory \(shared) includes the macpool executable \
+            \(executable.path(percentEncoded: false)). \
+            The guest could replace it and run code on this Mac. \
+            Share a narrower directory or share it read-only.
+            """)
+        }
+    }
+
+    /// Splits a path into components after resolving symbolic links and firmlinks.
+    ///
+    /// The kernel names an open directory by its path on its volume, in the letter case and
+    /// normalization form that the volume stores. The components then pass through
+    /// ``PoolDaemon/caselessBytes(of:)`` for volumes that keep the spelling of a request. If the
+    /// path does not exist, the components after its longest existing prefix stay as written.
+    ///
+    /// - Parameter path: An absolute path.
+    /// - Returns: The components as case-folded, decomposed UTF-8 bytes, or `nil` if the path
+    ///   exists but cannot be opened as a directory.
+    private static func physicalComponents(of path: String) -> [ArraySlice<UInt8>]? {
+        // Search permission is enough to open a directory this way, so a directory that the user
+        // cannot read still resolves.
+        let descriptor = open(path, O_SEARCH | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let failure = errno
+            let url = URL(filePath: path)
+            let parent = url.deletingLastPathComponent().path(percentEncoded: false)
+            guard failure == ENOENT, parent.count < path.count, let resolved = physicalComponents(of: parent) else {
+                return nil
+            }
+            return resolved + [PoolDaemon.caselessBytes(of: url.lastPathComponent)[...]]
+        }
+        defer { close(descriptor) }
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH_NOFIRMLINK, &buffer) != -1 else {
+            return nil
+        }
+        let resolved = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        return PoolDaemon.caselessBytes(of: resolved).split(separator: UInt8(ascii: "/"))
+    }
+
     /// The default data directory, `~/Library/Application Support/macpool`.
     public static var standard: PoolDirectory {
         let support = FileManager.default.homeDirectoryForCurrentUser

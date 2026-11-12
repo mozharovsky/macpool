@@ -8,7 +8,10 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     /// - Parameter error: The library's error.
     case library(MacpoolError)
 
-    /// A signal interrupted the command, which removed what it had created.
+    /// A signal interrupted the command.
+    ///
+    /// The command removed what it had created, unless `image xcode --keep-failed` kept the
+    /// failed image.
     case interrupted
 
     /// The bundle has never booted, and its only provisioning boot would go unused.
@@ -85,6 +88,14 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: Why the step failed.
     case imageStep(step: String, reason: String)
 
+    /// An image build that did not finish left its clone or its inputs behind.
+    ///
+    /// - Parameters:
+    ///   - name: The image's name.
+    ///   - building: The clone's directory.
+    ///   - inputs: The directory of the inputs that the guest reads.
+    case unfinishedImageBuild(name: String, building: String, inputs: String)
+
     /// A supervised VM's boot or run failed.
     ///
     /// - Parameter reason: The failure.
@@ -112,7 +123,7 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
         case let .timedOut(step, seconds):
             "no \(step) after \(seconds) s"
         case let .stopped(event):
-            "VM stopped: \(event)"
+            event.summary
         case .stopRequested:
             "a stop was requested before the VM was ready"
         case let .noLease(macAddress):
@@ -127,6 +138,9 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             reason
         case let .imageStep(step, reason):
             "building the image failed while \(step): \(reason)"
+        case let .unfinishedImageBuild(name, building, inputs):
+            "an earlier build of \(name) did not finish and may have left \(building) and \(inputs). "
+                + "If no image xcode command is building \(name) now, delete both and build again"
         }
     }
 }
@@ -201,5 +215,20 @@ func pool<T>(_ operation: () async throws(PoolError) -> T) async throws(CommandE
         return try await operation()
     } catch {
         throw .pool(error)
+    }
+}
+
+/// The wording of VM events in command errors.
+extension MachineEvent {
+    /// A clause that says how the VM stopped, such as `the guest shut down`.
+    var summary: String {
+        switch self {
+        case .guestStopped:
+            "the guest shut down"
+        case let .stoppedWithError(description):
+            "the VM stopped with an error: \(description)"
+        case let .networkDisconnected(description):
+            "the VM's network disconnected: \(description)"
+        }
     }
 }

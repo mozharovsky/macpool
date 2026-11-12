@@ -45,18 +45,48 @@ struct ImageWorkspace {
         return name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
     }
 
+    /// Requires that the archive and the runtime be readable regular files.
+    ///
+    /// - Parameters:
+    ///   - xcode: The Xcode archive.
+    ///   - runtime: The simulator runtime disk image.
+    /// - Throws: ``CommandError/invalidValue(_:)`` when an input, after its symbolic links
+    ///   resolve, is missing, unreadable, or not a regular file, such as `Xcode.app`.
+    static func checkInputs(xcode: URL, runtime: URL) throws(CommandError) {
+        let inputs = [("--xcode", xcode, ".xip archive"), ("--runtime", runtime, ".dmg disk image")]
+        for (option, url, kind) in inputs {
+            let path = url.resolvingSymlinksInPath().path(percentEncoded: false)
+            let type = (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType
+            guard type == .typeRegular, FileManager.default.isReadableFile(atPath: path) else {
+                throw .invalidValue(
+                    "\(option) \(url.path(percentEncoded: false)) is not a readable file. Pass the \(kind) itself",
+                )
+            }
+        }
+    }
+
     /// Creates the `images` directory and checks that the build can start.
     ///
     /// - Parameter base: The stopped bundle to clone.
     /// - Returns: The base's settings.
-    /// - Throws: ``CommandError/fileExists(path:)`` when the image or a file of an earlier build
-    ///   exists. ``CommandError/invalidValue(_:)`` when the base never booted, its disk is smaller
-    ///   than 128 GiB, or it lies on another volume than the data directory.
+    /// - Throws: ``CommandError/fileExists(path:)`` when the image exists.
+    ///   ``CommandError/unfinishedImageBuild(name:building:inputs:)`` when ``building`` or
+    ///   ``inputs`` exists. ``CommandError/invalidValue(_:)`` when the base never booted, its disk
+    ///   is smaller than 128 GB, or it lies on another volume than the data directory.
     ///   ``CommandError/library(_:)`` when the base cannot be read or its rotation did not finish.
     func prepare(base: VMBundle) throws(CommandError) -> BundleSettings {
         let manager = FileManager.default
-        for url in [image, building.root, inputs] where manager.fileExists(atPath: url.path(percentEncoded: false)) {
-            throw .fileExists(path: url.path(percentEncoded: false))
+        if manager.fileExists(atPath: image.path(percentEncoded: false)) {
+            throw .fileExists(path: image.path(percentEncoded: false))
+        }
+        // A running build and one that ended without cleanup leave the same files. The command
+        // cannot tell them apart and deletes neither.
+        if [building.root, inputs].contains(where: { manager.fileExists(atPath: $0.path(percentEncoded: false)) }) {
+            throw .unfinishedImageBuild(
+                name: name,
+                building: building.root.path(percentEncoded: false),
+                inputs: inputs.path(percentEncoded: false),
+            )
         }
         let settings = try library { () throws(MacpoolError) in try base.settings() }
         let basePath = base.root.path(percentEncoded: false)
@@ -69,9 +99,9 @@ struct ImageWorkspace {
         }
         let diskBytes = (try? manager.attributesOfItem(atPath: base.disk.path(percentEncoded: false))[.size]) as? UInt64
         guard let diskBytes, diskBytes >= Self.minimumDiskBytes else {
-            let size = diskBytes.map { "\($0 >> 30) GiB" } ?? "no readable size"
+            let size = diskBytes.map { "\($0 >> 30) GB" } ?? "no readable size"
             throw .invalidValue(
-                "the base's disk has \(size), and Xcode with a simulator runtime needs a disk of 128 GiB. "
+                "the base's disk has \(size), and Xcode with a simulator runtime needs a disk of 128 GB. "
                     + "Create the base with --disk-gb 128",
             )
         }
@@ -114,52 +144,57 @@ struct ImageWorkspace {
             try clone.assignIdentity()
             try clone.writeImageRecord(ImageRecord(isReady: false))
         } catch {
-            discard()
+            removeIncompleteImage()
             throw .library(error)
         }
     }
 
     /// Builds the image from a stopped base and publishes it as ``image``.
     ///
-    /// The method clones the base, stages the inputs, and calls `inGuest` with the clone and
-    /// ``inputs``. If every step succeeds, the clone becomes ``image`` with a ready record. If a
-    /// step fails or `interrupted` is set, the method deletes the clone. With `keepFailed` it
-    /// publishes the clone with a record that is not ready instead. The method always deletes
-    /// ``inputs``.
+    /// The method checks the inputs and the base, starts watching signals, clones the base, stages
+    /// the inputs, and calls `inGuest` with the clone, ``inputs``, and the flag that a signal
+    /// sets. If every step succeeds, the clone becomes ``image`` with a ready record. If a step
+    /// fails or a signal arrives, the method deletes the clone. With `keepFailed` it publishes the
+    /// clone with a record that is not ready instead. The method always deletes ``inputs``.
     ///
     /// - Parameters:
     ///   - base: The stopped bundle to clone.
     ///   - xcode: The Xcode archive.
     ///   - runtime: The simulator runtime disk image.
     ///   - keepFailed: Whether a failed build keeps its clone.
-    ///   - interrupted: The flag that a signal sets.
+    ///   - watchSignals: Starts watching signals that set the flag it receives. It returns the
+    ///     function that stops the watch. The method calls that function before it returns.
     ///   - inGuest: The guest part of the build. It returns the builds that the guest reports.
-    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before the build ends.
-    ///   The errors of ``prepare(base:)``, ``cloneBase(_:)``, ``stageInputs(xcode:runtime:interrupted:)``,
-    ///   `inGuest`, and ``finish(_:)`` otherwise.
+    /// - Throws: ``CommandError/interrupted`` when a signal arrives before the build ends. The
+    ///   errors of ``checkInputs(xcode:runtime:)``, ``prepare(base:)``, ``cloneBase(_:)``,
+    ///   ``stageInputs(xcode:runtime:interrupted:)``, `inGuest`, and ``finish(_:)`` otherwise.
     func build(
         from base: VMBundle,
         xcode: URL,
         runtime: URL,
         keepFailed: Bool,
-        interrupted: StopFlag,
-        inGuest: (VMBundle, URL) async throws(CommandError) -> XcodeImageBuilds,
+        watchSignals: (StopFlag) -> @Sendable () -> Void,
+        inGuest: (VMBundle, URL, StopFlag) async throws(CommandError) -> XcodeImageBuilds,
     ) async throws(CommandError) {
+        try Self.checkInputs(xcode: xcode, runtime: runtime)
         let settings = try prepare(base: base)
+        // From the clone on, a signal must reach the cleanup below instead of ending the process.
+        let interrupted = StopFlag()
+        let stopWatching = watchSignals(interrupted)
+        defer { stopWatching() }
         try cloneBase(base)
         defer { removeInputs() }
         let builds: XcodeImageBuilds
         do throws(CommandError) {
             try stageInputs(xcode: xcode, runtime: runtime, interrupted: interrupted)
             try Self.check(interrupted)
-            builds = try await inGuest(building, inputs)
+            builds = try await inGuest(building, inputs, interrupted)
             try Self.check(interrupted)
         } catch {
             if keepFailed, (try? finish(ImageRecord(isReady: false, createdAt: Date()))) != nil {
                 Report.line("kept the failed image \(image.path(percentEncoded: false))")
             } else {
-                discard()
-                Report.line("removed the incomplete image \(building.root.path(percentEncoded: false))")
+                removeIncompleteImage()
             }
             throw interrupted.isSet ? .interrupted : error
         }
@@ -167,7 +202,7 @@ struct ImageWorkspace {
             try finish(ImageRecord(isReady: true, builds: builds.record(macOS: settings.build), createdAt: Date()))
         } catch {
             // An unpublished clone would block the next build with the same name.
-            discard()
+            removeIncompleteImage()
             throw error
         }
     }
@@ -176,13 +211,14 @@ struct ImageWorkspace {
     ///
     /// The method copies the target of a symbolic link, because the guest cannot follow a link out
     /// of the shared directory. On the same APFS volume the files are clones and take no space. On
-    /// another volume they are copies, and a signal takes effect only after the current copy.
+    /// another volume they are copies in the data directory until the build ends.
     ///
     /// - Parameters:
     ///   - xcode: The Xcode archive.
     ///   - runtime: The simulator runtime disk image.
-    ///   - interrupted: The flag that a signal sets. The method checks it before each copy.
-    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before a copy.
+    ///   - interrupted: The flag that a signal sets. Once it is set, no copy starts and a running
+    ///     copy stops.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set before or during a copy.
     ///   ``CommandError/library(_:)`` when the directory or a file cannot be created.
     func stageInputs(xcode: URL, runtime: URL, interrupted: StopFlag) throws(CommandError) {
         do {
@@ -200,18 +236,81 @@ struct ImageWorkspace {
         }
         for (link, name) in [(xcode, "Xcode.xip"), (runtime, "Runtime.dmg")] {
             try Self.check(interrupted)
-            let source = link.resolvingSymlinksInPath()
-            let destination = inputs.appending(path: name).path(percentEncoded: false)
             // COPYFILE_CLONE clones when the volume allows it and copies otherwise.
-            guard copyfile(source.path(percentEncoded: false), destination, nil, copyfile_flags_t(COPYFILE_CLONE)) == 0
-            else {
-                throw .library(.fileSystem(
-                    operation: "copying \(source.path(percentEncoded: false)) to",
-                    path: destination,
-                    reason: String(cString: strerror(errno)),
-                ))
-            }
+            try Self.copy(
+                link.resolvingSymlinksInPath(),
+                to: inputs.appending(path: name),
+                flags: copyfile_flags_t(COPYFILE_CLONE),
+                interrupted: interrupted,
+            )
         }
+    }
+
+    /// Copies a file with `copyfile` and stops the copy once a signal arrives.
+    ///
+    /// A clone ends at once and calls no callback. A data copy calls the status callback after
+    /// each write. The callback stops the copy once `interrupted` is set or a write fails. If the
+    /// copy stops, its partial file stays at `destination`.
+    ///
+    /// - Parameters:
+    ///   - source: The file to copy.
+    ///   - destination: The new file. It must not exist.
+    ///   - flags: The `copyfile` flags.
+    ///   - interrupted: The flag that a signal sets.
+    /// - Throws: ``CommandError/interrupted`` when `interrupted` is set during the copy.
+    ///   ``CommandError/library(_:)`` when the copy fails.
+    static func copy(
+        _ source: URL,
+        to destination: URL,
+        flags: copyfile_flags_t,
+        interrupted: StopFlag,
+    ) throws(CommandError) {
+        let sourcePath = source.path(percentEncoded: false)
+        let destinationPath = destination.path(percentEncoded: false)
+        let failure = { (reason: String) -> CommandError in
+            .library(.fileSystem(operation: "copying \(sourcePath) to", path: destinationPath, reason: reason))
+        }
+        guard let state: copyfile_state_t = copyfile_state_alloc() else {
+            throw failure("no copy state")
+        }
+        defer { copyfile_state_free(state) }
+        let callback: copyfile_callback_t = { _, stage, _, _, _, context in
+            let isInterrupted = context.map { Unmanaged<StopFlag>.fromOpaque($0).takeUnretainedValue().isSet }
+            return ImageWorkspace.copyDecision(stage: stage, isInterrupted: isInterrupted ?? false)
+        }
+        let status = withExtendedLifetime(interrupted) {
+            copyfile_state_set(
+                state,
+                UInt32(COPYFILE_STATE_STATUS_CB),
+                unsafeBitCast(callback, to: UnsafeRawPointer.self),
+            )
+            copyfile_state_set(
+                state,
+                UInt32(COPYFILE_STATE_STATUS_CTX),
+                UnsafeRawPointer(Unmanaged.passUnretained(interrupted).toOpaque()),
+            )
+            return copyfile(sourcePath, destinationPath, state, flags)
+        }
+        let code = errno
+        guard status == 0 else {
+            // COPYFILE_QUIT leaves errno unchanged at some stages. The flag decides instead.
+            if interrupted.isSet {
+                throw .interrupted
+            }
+            throw failure(String(cString: strerror(code)))
+        }
+    }
+
+    /// Decides whether a copy goes on after one of its steps.
+    ///
+    /// - Parameters:
+    ///   - stage: The `copyfile` stage of the step, such as `COPYFILE_PROGRESS` or `COPYFILE_ERR`.
+    ///   - isInterrupted: Whether a signal set the build's flag.
+    /// - Returns: `COPYFILE_QUIT` after a failed step or a signal, otherwise `COPYFILE_CONTINUE`.
+    static func copyDecision(stage: Int32, isInterrupted: Bool) -> Int32 {
+        // After a failed write, COPYFILE_CONTINUE makes copyfile write again. A full disk then
+        // keeps it retrying forever.
+        stage == COPYFILE_ERR || isInterrupted ? COPYFILE_QUIT : COPYFILE_CONTINUE
     }
 
     /// Records the build's outcome in the clone and moves the clone to ``image``.
@@ -243,12 +342,43 @@ struct ImageWorkspace {
     }
 
     /// Deletes the clone of a failed build.
-    func discard() {
-        try? FileManager.default.removeItem(at: building.root)
+    ///
+    /// - Returns: Whether the clone is gone.
+    @discardableResult
+    func discard() -> Bool {
+        do {
+            try FileManager.default.removeItem(at: building.root)
+            return true
+        } catch {
+            return !FileManager.default.fileExists(atPath: building.root.path(percentEncoded: false))
+        }
     }
 
-    /// Deletes ``inputs`` with the archive and runtime copies in it.
-    func removeInputs() {
-        try? FileManager.default.removeItem(at: inputs)
+    /// Deletes the clone of a failed build and reports whether it is gone.
+    private func removeIncompleteImage() {
+        let path = building.root.path(percentEncoded: false)
+        if discard() {
+            Report.line("removed the incomplete image \(path)")
+        } else {
+            Report.line("could not remove the incomplete image \(path). Delete it before you build \(name) again")
+        }
+    }
+
+    /// Deletes ``inputs`` with the archive and runtime copies in it, and reports a failure.
+    ///
+    /// - Returns: Whether ``inputs`` is gone.
+    @discardableResult
+    func removeInputs() -> Bool {
+        do {
+            try FileManager.default.removeItem(at: inputs)
+            return true
+        } catch {
+            guard FileManager.default.fileExists(atPath: inputs.path(percentEncoded: false)) else {
+                return true
+            }
+            let path = inputs.path(percentEncoded: false)
+            Report.line("could not remove \(path). Delete it before you build \(name) again")
+            return false
+        }
     }
 }
