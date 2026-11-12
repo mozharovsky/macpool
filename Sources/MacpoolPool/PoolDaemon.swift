@@ -1104,7 +1104,7 @@ public actor PoolDaemon {
         }
     }
 
-    /// Removes the record of the paired Mac that sent the request and closes the Mac's
+    /// Removes the record of the paired Mac that sent the request and closes the Mac's other
     /// connections.
     ///
     /// The daemon saves the list before it changes anything else. If the save fails, the Mac
@@ -1114,7 +1114,7 @@ public actor PoolDaemon {
     ///   - key: The fingerprint of the Mac's key.
     ///   - endLeases: Whether the daemon ends the Mac's leases.
     ///   - client: The connection that sent the request. It receives
-    ///     ``PoolReply/forgotten(leases:)``.
+    ///     ``PoolReply/forgotten(leases:)``, and `serve(_:owner:on:)` closes it.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when the Mac has leases and `endLeases` is
     ///   not set, or when the list cannot be read or saved. The reason names no host path.
     private func forget(_ key: KeyFingerprint, endLeases: Bool, from client: ClientID) throws(PoolError) {
@@ -1142,7 +1142,9 @@ public actor PoolDaemon {
             "connections": "\(ended.connections)",
             "leases": "\(ended.leases)",
         ])
-        disconnect(client, sending: .forgotten(leases: ended.leases))
+        // serve(_:owner:on:) finishes this connection. If a second finish started here first, the
+        // close at the end of serve(_:owner:on:) would drop the reply.
+        stopServing(client, sending: .forgotten(leases: ended.leases))
     }
 
     /// Logs a revocation that closed a Mac's connections but could not block the Mac.
@@ -1207,20 +1209,35 @@ public actor PoolDaemon {
 
     /// Sends a last reply to a paired client and closes its connection.
     ///
-    /// The daemon withdraws the client's waiting requests and ends its attached leases at once,
-    /// as when the client disconnects. A paired client holds no invitation, because only the local
-    /// user may invite.
+    /// When the client sent the request that the daemon is handling, use
+    /// `stopServing(_:sending:)` instead. The `serve(_:owner:on:)` loop finishes that connection.
     ///
     /// - Parameters:
     ///   - client: The client.
     ///   - last: The reply that the client receives before the connection closes.
     private func disconnect(_ client: ClientID, sending last: PoolReply) {
+        guard let channel = clients[client]?.channel else {
+            return
+        }
+        stopServing(client, sending: last)
+        Task { await channel.finish() }
+    }
+
+    /// Queues a last reply to a paired client and stops serving the client.
+    ///
+    /// The daemon withdraws the client's waiting requests and ends its attached leases at once,
+    /// as when the client disconnects. A paired client holds no invitation, because only the local
+    /// user may invite. The caller finishes the client's connection.
+    ///
+    /// - Parameters:
+    ///   - client: The client.
+    ///   - last: The reply that the client receives before the connection closes.
+    private func stopServing(_ client: ClientID, sending last: PoolReply) {
         guard let connection = clients.removeValue(forKey: client) else {
             return
         }
         perform(ledger.clientDisconnected(client, now: configuration.now()))
         try? connection.channel.send(visible(last, to: connection.owner))
-        Task { await connection.channel.finish() }
     }
 
     /// Returns the one Mac that a person's key names.
