@@ -376,6 +376,8 @@ struct PeerConnectionTests {
             )
             #expect(boundAddresses(port: listener.port) == [address])
             listener.close()
+            // The next listener may get the same port, so this socket must be gone first.
+            #expect(await eventually { boundAddresses(port: listener.port).isEmpty })
         }
         // If the listener skipped the parser, `127.1` would still bind only to the loopback address.
         await #expect(throws: PoolError.connection(
