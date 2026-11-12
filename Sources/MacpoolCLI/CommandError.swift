@@ -123,7 +123,7 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
         case let .timedOut(step, seconds):
             "no \(step) after \(seconds) s"
         case let .stopped(event):
-            "VM stopped: \(event)"
+            event.summary
         case .stopRequested:
             "a stop was requested before the VM was ready"
         case let .noLease(macAddress):
@@ -215,5 +215,20 @@ func pool<T>(_ operation: () async throws(PoolError) -> T) async throws(CommandE
         return try await operation()
     } catch {
         throw .pool(error)
+    }
+}
+
+/// The wording of VM events in command errors.
+extension MachineEvent {
+    /// A clause that says how the VM stopped, such as `the guest shut down`.
+    var summary: String {
+        switch self {
+        case .guestStopped:
+            "the guest shut down"
+        case let .stoppedWithError(description):
+            "the VM stopped with an error: \(description)"
+        case let .networkDisconnected(description):
+            "the VM's network disconnected: \(description)"
+        }
     }
 }

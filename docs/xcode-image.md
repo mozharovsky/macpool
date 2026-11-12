@@ -107,6 +107,3 @@ One build of Xcode 27.0 with the iOS 27.0 runtime took 273 seconds on a Mac with
   the build fails after it expands the archive.
 - When the archive or the runtime is on another volume, the build copies it to the data directory.
   The copy takes its full size there until the build ends.
-- A signal during such a copy takes effect only when the copy ends.
-- After a signal during a guest step, the command can wait about 30 seconds before it cleans up.
-  The step's `ssh` notices the stopped VM only through its keepalive.

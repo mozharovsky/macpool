@@ -446,6 +446,83 @@ struct XcodeImageTests {
         #expect(left.isEmpty)
     }
 
+    /// Stops a data copy once a signal arrives, and copies the whole file without one.
+    @Test func stopsCopyOnSignal() throws {
+        let folder = try ImageFolder()
+        let directory = folder.base.root.deletingLastPathComponent()
+        let source = directory.appending(path: "large.xip")
+        try Data(repeating: 7, count: 4 << 20).write(to: source)
+        // Without COPYFILE_CLONE the copy writes data, as it does across volumes.
+        let flags = copyfile_flags_t(COPYFILE_DATA)
+        let whole = directory.appending(path: "whole.xip")
+        try ImageWorkspace.copy(source, to: whole, flags: flags, interrupted: StopFlag())
+        #expect(FileManager.default.contents(atPath: whole.path(percentEncoded: false))?.count == 4 << 20)
+
+        let interrupted = StopFlag()
+        interrupted.set()
+        #expect(throws: CommandError.interrupted) {
+            try ImageWorkspace.copy(
+                source,
+                to: directory.appending(path: "stopped.xip"),
+                flags: flags,
+                interrupted: interrupted,
+            )
+        }
+        let stopped = FileManager.default
+            .contents(atPath: directory.appending(path: "stopped.xip").path(percentEncoded: false))
+        #expect((stopped?.count ?? 0) < 4 << 20)
+    }
+
+    /// Names the step that a stopped VM ended, and accepts a shutdown that stops the VM before its
+    /// command returns.
+    @Test func namesStepThatTheVMStopped() async throws {
+        let stopped = XcodeImageSteps(guest: ScriptedGuest(replies: ["xip --expand": .cancelled]), deviceName: nil)
+        await #expect(throws: CommandError.imageStep(step: "expanding Xcode", reason: "the VM stopped")) {
+            try await stopped.run()
+        }
+        #expect(XcodeImageCommand.vmStopped(
+            .stoppedWithError(description: "disk error"),
+            during: .imageStep(step: "expanding Xcode", reason: "the VM stopped"),
+        ).description == "building the image failed while expanding Xcode: the VM stopped with an error: disk error")
+        let unnamed = XcodeImageCommand.vmStopped(.guestStopped, during: .library(.guestCommandCancelled))
+        #expect(unnamed == .stopped(.guestStopped))
+        #expect(CommandError.stopped(.guestStopped).description == "the guest shut down")
+
+        let guest = ScriptedGuest()
+        try await XcodeImageSteps(guest: guest, deviceName: nil).shutDown()
+        let shutdown = GuestCall(
+            command: "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+            asRoot: true,
+            timeLimit: .seconds(60),
+        )
+        #expect(await guest.calls == [shutdown])
+
+        // The build cancels the steps once the VM stops, and a guest that shut down that early
+        // still did what the step asked.
+        let early = XcodeImageSteps(guest: ScriptedGuest(replies: ["shutdown -h": .cancelled]), deviceName: nil)
+        let cancelled = await Task { () async -> CommandError? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do throws(CommandError) {
+                try await early.shutDown()
+                return nil
+            } catch {
+                return error
+            }
+        }.value
+        #expect(cancelled == nil)
+        await #expect(throws: CommandError.imageStep(step: "shutting down the guest", reason: "the VM stopped")) {
+            try await early.shutDown()
+        }
+    }
+
+    /// Stops a copy after a failed write instead of letting `copyfile` write again.
+    @Test func stopsCopyAfterFailedWrite() {
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_START, isInterrupted: false) == COPYFILE_CONTINUE)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_PROGRESS, isInterrupted: false) == COPYFILE_CONTINUE)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_PROGRESS, isInterrupted: true) == COPYFILE_QUIT)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_ERR, isInterrupted: false) == COPYFILE_QUIT)
+    }
+
     /// Publishes a ready image with the builds of the guest and the base.
     @Test func buildsImage() async throws {
         let folder = try ImageFolder()
@@ -628,6 +705,9 @@ private enum GuestReply {
 
     /// The command exits with the code and prints the error output.
     case failure(Int32, String)
+
+    /// The build cancelled the command, as it does after the VM stops.
+    case cancelled
 }
 
 /// A guest that records each command and replies as if every step works.
@@ -681,6 +761,8 @@ private actor ScriptedGuest: ImageGuest {
             GuestCommandResult(status: .exited(0), output: output, errorOutput: "")
         case let .failure(code, errorOutput):
             GuestCommandResult(status: .exited(code), output: "", errorOutput: errorOutput)
+        case .cancelled:
+            throw .guestCommandCancelled
         }
     }
 
