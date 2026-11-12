@@ -289,4 +289,14 @@ extension TrustList where Record == TrustedClient {
     var admittedKeys: Set<KeyFingerprint> {
         Set(records.filter { !$0.isBlocked }.map(\.key))
     }
+
+    /// Marks a client as blocked and keeps the other fields of its record.
+    ///
+    /// - Parameter key: The client's fingerprint. If the list has no record of it, the call does
+    ///   nothing.
+    mutating func block(_ key: KeyFingerprint) {
+        if let index = records.firstIndex(where: { $0.key == key }) {
+            records[index].isBlocked = true
+        }
+    }
 }

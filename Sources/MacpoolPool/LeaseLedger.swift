@@ -376,6 +376,14 @@ struct LeaseLedger {
         queue.count { $0.owner == owner }
     }
 
+    /// Returns the leases of an owner that have not begun to end.
+    ///
+    /// - Parameter owner: The local user or a paired client.
+    /// - Returns: The leases' identifiers in ascending order.
+    func liveLeases(of owner: LeaseOwner) -> [LeaseID] {
+        leases.values.filter { $0.owner == owner && $0.phase != .stopping }.map(\.id).sorted()
+    }
+
     /// Withdraws a disconnected client's requests and ends the leases that needed it.
     ///
     /// - Parameters:
