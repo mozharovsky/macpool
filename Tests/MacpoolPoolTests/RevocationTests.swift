@@ -142,7 +142,7 @@ struct RevocationTests {
             Issue.record("the revocation succeeded without a saved block")
         } catch let .daemonRefused(message) {
             #expect(message
-                .hasPrefix("the host closed the Mac's connections, but it cannot record that the Mac is blocked"))
+                .hasPrefix("the host closed the Mac's connections, but the save of the block failed"))
             #expect(message.hasSuffix(Self.staysBlocked))
         }
         #expect(try await next(remote) == Self.notAccepted)

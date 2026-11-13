@@ -154,6 +154,10 @@ example, the host's reply may never arrive. The host then leaves its record of t
 unchanged, and the inviting connection receives ``PoolReply/alreadyPaired(_:)``. A blocked client
 cannot pair again.
 
+If the save of `clients.json` fails, the daemon reads the list again, because a save can fail after
+the rename that puts the new list in place. When the list holds the new record unchanged, the
+pairing succeeds. Otherwise the pairing fails, and only the inviting connection receives the reason.
+
 Each Mac gives the other its name, and both names follow the same rule. A name has 1 to 64 Unicode
 scalars. It has no control, format, private-use, unassigned, or default-ignorable scalars and no
 line or paragraph separators. Format scalars include the controls that reverse the direction of

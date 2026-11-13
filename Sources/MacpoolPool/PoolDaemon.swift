@@ -740,6 +740,11 @@ public actor PoolDaemon {
 
     /// Records a client whose secret was right and returns the reply to it.
     ///
+    /// If the save of the list fails, the daemon reads the list again. When the list holds the new
+    /// record as a save stores it, the pairing succeeds as after a save that succeeded. Otherwise
+    /// the client and the inviting connection receive failures, and only the inviting connection
+    /// learns the reason.
+    ///
     /// - Parameters:
     ///   - client: The new record, with the key that the client proved and the invitation's
     ///     priority ceiling.
@@ -761,7 +766,20 @@ public actor PoolDaemon {
                 return .paired(host)
             }
             clients.insert(client)
-            try clients.save(to: configuration.directory)
+            if let saveError = save(clients) {
+                configuration.logger.error("The host cannot save the list of paired Macs for a pairing", metadata: [
+                    "key": "\(key)",
+                    "reason": "\(saveError)",
+                ])
+                // A save can fail after the rename that puts the new list in place, for example
+                // when the directory cannot be flushed. The host then trusts the Mac, and a
+                // refusal would hide that from both sides. The record must equal the new one, so
+                // the daemon still refuses a Mac that someone blocked in the meantime.
+                let saved = try? TrustList<TrustedClient>.load(from: configuration.directory)
+                guard saved?.holds(client) == true else {
+                    throw saveError
+                }
+            }
             // A new code from the host's user ends a block that the daemon kept only in memory.
             unsavedBlocks.remove(key)
         } catch {
@@ -1043,8 +1061,8 @@ public actor PoolDaemon {
         if let saveError {
             unsavedBlocks.insert(record.key)
             logUnblocked(record.key, ended, reason: "\(saveError)")
-            throw .invalidRequest(reason: "the host closed the Mac's connections, but it cannot record that the Mac "
-                + "is blocked: \(saveError). \(Self.revokeAgain)")
+            throw .invalidRequest(reason: "the host closed the Mac's connections, but the save of the block "
+                + "failed: \(saveError). \(Self.revokeAgain)")
         }
         unsavedBlocks.remove(record.key)
         configuration.logger.notice("Revoked a paired Mac", metadata: [

@@ -290,6 +290,134 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Pairs a Mac when the save fails after the rename that puts the list with the Mac's record
+    /// in place. Both sides receive the replies of a saved pairing, and the pairing ends the block
+    /// that the daemon kept only in memory.
+    @Test func pairsWhenTheSaveFailsAfterTheRename() async throws {
+        let host = try await PairingHost()
+        let client = try host.clientDirectory()
+        let first = try await host.invite()
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: client)
+        let identity = try MacIdentity.loadOrCreate(in: client)
+        let clientKey = KeyFingerprint(digest: identity.keyDigest)
+        let directory = host.fixture.directory
+        try RevocationTests.setImmutable(true, listIn: directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: clientKey.shortKey), to: directory)
+        }
+        try RevocationTests.setImmutable(false, listIn: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        try FileManager.default.removeItem(at: TrustList<TrustedHost>.file(in: client))
+        try RevocationTests.setImmutable(true, listIn: directory)
+        // The file keeps whole seconds. The stored record then differs from the record in memory.
+        host.fixture.clock.advance(by: 0.25)
+        let record = TrustedClient(
+            key: clientKey,
+            name: "runner",
+            pairedAt: host.fixture.clock.now,
+            isBlocked: false,
+            priorityCeiling: 3,
+        )
+        // No test can fail the flush after the rename. The rename fails on the immutable file
+        // instead, and the test then saves the list with the record. The file then matches the
+        // file after a rename and a failed flush.
+        host.fixture.logs.whenLogged("The host cannot save the list of paired Macs for a pairing") {
+            try? RevocationTests.setImmutable(false, listIn: directory)
+            var list = TrustList<TrustedClient>()
+            list.insert(record)
+            try? list.save(to: directory)
+        }
+
+        let second = try await host.invite(priorityCeiling: 3)
+        let paired = try await PoolClient.pair(using: second.code, name: "runner", directory: client)
+        #expect(paired == PairedMac(name: "example", key: host.key))
+        #expect(try await next(second.channel) == .paired(PairedMac(name: "runner", key: clientKey)))
+        let clients = try TrustList<TrustedClient>.load(from: directory)
+        #expect(clients.records.map(\.key) == [clientKey])
+        #expect(clients[clientKey]?.isBlocked == false)
+        #expect(try TrustList<TrustedHost>.load(from: client)[host.key] != nil)
+        #expect(await host.daemon.unsavedBlocks.isEmpty)
+        let logs = host.fixture.logs
+        #expect(logs.entries("The host cannot save the list of paired Macs for a pairing").map(\.level) == [.error])
+        #expect(logs.entries("The host cannot record a paired Mac").isEmpty)
+        let channel = try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        try channel.send(PoolRequest.status)
+        guard case .status = try await next(channel) else {
+            Issue.record("the host did not serve the Mac that paired")
+            return
+        }
+        channel.close()
+        await host.stop()
+    }
+
+    /// Refuses a pairing without host paths when the save fails before the rename. The list keeps
+    /// no record of the Mac, and only the inviting connection receives the reason.
+    @Test func refusesWhenTheSaveFailsBeforeTheRename() async throws {
+        let host = try await PairingHost()
+        let directory = host.fixture.directory
+        try TrustList<TrustedClient>().save(to: directory)
+        try RevocationTests.setImmutable(true, listIn: directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        let invitation = try await host.invite()
+        let client = try host.clientDirectory()
+
+        await #expect(throws: PoolError.daemonRefused(message: "the host cannot record the pairing")) {
+            try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
+        }
+        guard case let .failure(reason) = try await next(invitation.channel) else {
+            Issue.record("the inviting connection received no reason")
+            return
+        }
+        #expect(reason.hasPrefix("the pairing failed: "))
+        #expect(try TrustList<TrustedClient>.load(from: directory).records.isEmpty)
+        #expect(try TrustList<TrustedHost>.load(from: client).records.isEmpty)
+        let logs = host.fixture.logs
+        #expect(logs.entries("The host cannot save the list of paired Macs for a pairing").map(\.level) == [.error])
+        #expect(logs.entries("The host cannot record a paired Mac").map(\.level) == [.error])
+        #expect(logs.entries("Paired a Mac").isEmpty)
+        await host.stop()
+    }
+
+    /// Refuses a pairing when the save fails and the list that the daemon reads again holds a
+    /// blocked record of the Mac. Someone blocked the Mac while the daemon saved the list.
+    @Test func refusesAMacBlockedWhileTheSaveFails() async throws {
+        let host = try await PairingHost()
+        let directory = host.fixture.directory
+        try TrustList<TrustedClient>().save(to: directory)
+        try RevocationTests.setImmutable(true, listIn: directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        let invitation = try await host.invite()
+        let client = try host.clientDirectory()
+        let clientKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: client).keyDigest)
+        let record = TrustedClient(
+            key: clientKey,
+            name: "runner",
+            pairedAt: host.fixture.clock.now,
+            isBlocked: true,
+            priorityCeiling: 0,
+        )
+        host.fixture.logs.whenLogged("The host cannot save the list of paired Macs for a pairing") {
+            try? RevocationTests.setImmutable(false, listIn: directory)
+            var list = TrustList<TrustedClient>()
+            list.insert(record)
+            try? list.save(to: directory)
+        }
+
+        await #expect(throws: PoolError.daemonRefused(message: "the host cannot record the pairing")) {
+            try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
+        }
+        guard case let .failure(reason) = try await next(invitation.channel) else {
+            Issue.record("the inviting connection received no reason")
+            return
+        }
+        #expect(reason.hasPrefix("the pairing failed: "))
+        #expect(try TrustList<TrustedClient>.load(from: directory)[clientKey]?.isBlocked == true)
+        #expect(try TrustList<TrustedHost>.load(from: client).records.isEmpty)
+        #expect(host.fixture.logs.entries("Paired a Mac").isEmpty)
+        await host.stop()
+    }
+
     /// Records the priority ceiling of the code with the new client.
     @Test func recordsTheCeilingOfTheCode() async throws {
         let host = try await PairingHost()
