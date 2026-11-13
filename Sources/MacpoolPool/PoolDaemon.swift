@@ -741,9 +741,14 @@ public actor PoolDaemon {
     /// Records a client whose secret was right and returns the reply to it.
     ///
     /// If the save of the list fails, the daemon reads the list again. When the list holds the new
-    /// record as a save stores it, the pairing succeeds as after a save that succeeded. Otherwise
-    /// the client and the inviting connection receive failures, and only the inviting connection
-    /// learns the reason.
+    /// record as a save stores it, the pairing succeeds as after a save that succeeded. When the
+    /// list holds no such record, the client and the inviting connection receive failures, and only
+    /// the inviting connection learns the reason. When the list cannot be read again, the client
+    /// also receives a failure. The inviting connection then learns that the list may name the
+    /// client.
+    ///
+    /// A success after a failed save may not survive a loss of power, because the file system may
+    /// not have stored the rename yet. The client then pairs again with a new code.
     ///
     /// - Parameters:
     ///   - client: The new record, with the key that the client proved and the invitation's
@@ -773,10 +778,28 @@ public actor PoolDaemon {
                 ])
                 // A save can fail after the rename that puts the new list in place, for example
                 // when the directory cannot be flushed. The host then trusts the Mac, and a
-                // refusal would hide that from both sides. The record must equal the new one, so
-                // the daemon still refuses a Mac that someone blocked in the meantime.
-                let saved = try? TrustList<TrustedClient>.load(from: configuration.directory)
-                guard saved?.holds(client) == true else {
+                // refusal would hide that from both sides. No other request of this daemon runs
+                // between the save and this read. Only a person who edits the file can change it
+                // here. The daemon cannot tell who wrote a record, and the record must therefore
+                // equal the new one in every field.
+                let saved: TrustList<TrustedClient>
+                do throws(PoolError) {
+                    saved = try TrustList<TrustedClient>.load(from: configuration.directory)
+                } catch {
+                    configuration.logger.error(
+                        "The host cannot read the list of paired Macs after a failed save",
+                        metadata: [
+                            "key": "\(key)",
+                            "reason": "\(error)",
+                        ],
+                    )
+                    let reason = "the host cannot tell whether it recorded the pairing: \(saveError). Reading its "
+                        + "list of paired Macs again failed: \(error). The list may name the Mac. Check the list "
+                        + "once it can be read, or pair the Mac again with a new code"
+                    reply(.failure(reason), to: inviter)
+                    return .failure("the host cannot record the pairing")
+                }
+                guard saved.holds(client) else {
                     throw saveError
                 }
             }

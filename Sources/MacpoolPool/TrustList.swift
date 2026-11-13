@@ -296,7 +296,8 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
     /// - Parameter record: The record to look for.
     /// - Returns: `true` when the list's record of the same key equals the stored form of `record`.
     ///   `false` when the records differ, when the list has no record of the key, or when
-    ///   `record` cannot be encoded.
+    ///   `record` cannot be encoded or its encoding cannot be decoded again. For example, a
+    ///   ``TrustedClient`` with a negative priority ceiling does not decode.
     func holds(_ record: Record) -> Bool {
         guard let data = try? MessageCoding.encoder.encode(record),
               let stored = try? MessageCoding.decoder.decode(Record.self, from: data)
