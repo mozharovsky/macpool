@@ -18,6 +18,10 @@ enum PeerLogLine: Hashable, Sendable {
     /// A paired client's request found the list of paired clients unreadable.
     case unreadableClientList
 
+    /// A paired client asked the host to forget it, and the host could not update the list of
+    /// paired clients.
+    case unsavedClientList
+
     /// A paired client asked for an offered source whose settings cannot be read.
     ///
     /// The value is the source's name in ``PoolDaemon/Configuration/offeredSources``.

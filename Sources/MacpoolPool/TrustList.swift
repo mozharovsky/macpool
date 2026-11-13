@@ -38,8 +38,8 @@ public struct TrustedClient: TrustRecord {
 
     /// Whether the host refuses the client.
     ///
-    /// A blocked client opens no new connection. The record stays, so a person sees which key
-    /// the host refuses.
+    /// A blocked client opens no new connection, and its open connections close at their next
+    /// request. The record stays. A person then sees which key the host refuses.
     public var isBlocked: Bool
 
     /// The highest priority that the client may ask for, 0 or more.
@@ -189,6 +189,13 @@ struct TrustList<Record: TrustRecord>: Sendable, Equatable {
         }
     }
 
+    /// Removes the record of a key, if the list has one.
+    ///
+    /// - Parameter key: The fingerprint of a paired Mac's key.
+    mutating func remove(_ key: KeyFingerprint) {
+        records.removeAll { $0.key == key }
+    }
+
     /// Returns the list's file.
     ///
     /// - Parameter directory: The data directory.
@@ -302,6 +309,16 @@ extension TrustList where Record == TrustedClient {
     /// The keys of the clients that are not blocked.
     var admittedKeys: Set<KeyFingerprint> {
         Set(records.filter { !$0.isBlocked }.map(\.key))
+    }
+
+    /// Marks a client as blocked and keeps the other fields of its record.
+    ///
+    /// - Parameter key: The client's fingerprint. If the list has no record of it, the call does
+    ///   nothing.
+    mutating func block(_ key: KeyFingerprint) {
+        if let index = records.firstIndex(where: { $0.key == key }) {
+            records[index].isBlocked = true
+        }
     }
 }
 

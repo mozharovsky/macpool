@@ -255,6 +255,41 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Pairs a revoked Mac again with a new code after a person deleted its record. The daemon
+    /// kept the Mac's block only in memory. The new pairing ends that block.
+    @Test func pairsAgainAfterAnUnsavedBlock() async throws {
+        let host = try await PairingHost()
+        let client = try host.clientDirectory()
+        let first = try await host.invite()
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: client)
+        let identity = try MacIdentity.loadOrCreate(in: client)
+        let clientKey = KeyFingerprint(digest: identity.keyDigest)
+        let directory = host.fixture.directory
+        try RevocationTests.setImmutable(true, listIn: directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: clientKey.shortKey), to: directory)
+        }
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        } != nil)
+
+        try RevocationTests.setImmutable(false, listIn: directory)
+        try TrustList<TrustedClient>().save(to: directory)
+        let second = try await host.invite()
+        _ = try await PoolClient.pair(using: second.code, name: "runner", directory: client)
+        #expect(try await next(second.channel) == .paired(PairedMac(name: "runner", key: clientKey)))
+        #expect(await host.daemon.unsavedBlocks.isEmpty)
+        let channel = try await PoolClient.connect(to: host.endpoint, as: identity, hostKey: host.key)
+        try channel.send(PoolRequest.status)
+        guard case .status = try await next(channel) else {
+            Issue.record("the host did not serve the Mac that paired again")
+            return
+        }
+        channel.close()
+        await host.stop()
+    }
+
     /// Records the priority ceiling of the code with the new client.
     @Test func recordsTheCeilingOfTheCode() async throws {
         let host = try await PairingHost()
@@ -294,12 +329,8 @@ struct PairingTests {
         let unreadable = PoolReply.failure(
             PoolError.invalidRequest(reason: "the host cannot read its list of paired Macs").description,
         )
-        #expect(replies == [
-            unreadable,
-            unreadable,
-            .failure(PoolError.invalidRequest(reason: "only the host's own user can invite Macs").description),
-            .failure("the host cannot record the pairing"),
-        ])
+        // The paired connection stays open after each refusal.
+        #expect(replies == [unreadable, unreadable, unreadable, .failure("the host cannot record the pairing")])
         guard case let .failure(reason) = try await next(invitation.channel) else {
             Issue.record("the inviting connection received no reason")
             return
@@ -309,7 +340,7 @@ struct PairingTests {
         #expect(reason.contains(String(root.dropLast())))
         // A paired Mac that repeats its requests writes one error a minute.
         let levels = host.fixture.logs.entries("The list of paired clients cannot be read").map(\.level)
-        #expect(levels == [.error, .debug])
+        #expect(levels == [.error, .debug, .debug])
         pairedChannel.close()
         strangerChannel.close()
         await host.stop()
@@ -448,6 +479,8 @@ struct PairingTests {
         #expect(try await next(asking) == .failure("this Mac is not paired with the host, so it can only pair"))
         #expect(try await asking.receive(PoolReply.self) == nil)
 
+        // Each silent wait starts after this point, however long the connections take.
+        let start = ContinuousClock.now
         var silent: [MessageChannel] = []
         for _ in 0 ..< PoolDaemon.pairingConnectionLimit {
             try await silent.append(PoolClient.connect(to: host.endpoint, as: makeIdentity(), hostKey: host.key))
@@ -456,7 +489,6 @@ struct PairingTests {
         #expect(await refusal { () async throws(PoolError) in
             try await PoolClient.connect(to: host.endpoint, as: extra, hostKey: host.key)
         } == "the host refused the connection: other Macs are pairing with the host, so try again shortly")
-        let start = ContinuousClock.now
         for channel in silent {
             #expect(try await channel.receive(PoolReply.self) == nil)
             channel.close()

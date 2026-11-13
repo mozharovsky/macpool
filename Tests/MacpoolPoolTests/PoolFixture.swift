@@ -325,10 +325,15 @@ struct ReceivedSignal: Sendable, Equatable {
 ///
 /// A fake supervisor holds the lease's ``SupervisorLock`` with a fake process identifier and the
 /// clone's ``BundleLock``, serves the lease's socket, and reports the VM ready at once with its own
-/// address. A stop command and `SIGTERM` end it the way a real supervisor ends after a requested
-/// stop, and `SIGKILL` ends it like ``crash(_:)``. A signal reaches a supervisor only when the
-/// daemon passes the identifier from its lock. ``FakeBehavior`` values from ``plan(_:)`` change
-/// how the next launches behave.
+/// address. A stop command ends it the way a real supervisor ends after a requested stop.
+/// `SIGTERM` ends its run the same way, and `SIGKILL` ends it like ``crash(_:)``. A signal reaches
+/// a supervisor only when the daemon passes the identifier from its lock. ``FakeBehavior`` values
+/// from ``plan(_:)`` change how the next launches behave.
+///
+/// A supervisor that a signal ends releases its locks before ``send(_:to:of:in:)`` returns. The
+/// daemon waits for the lock with the real clock. A later release would let the machine's speed
+/// decide whether the daemon sends the next signal. The socket closes in the background, and the
+/// next launch of the lease waits for that close.
 final class FakeLauncher: SupervisorLauncher {
     /// One fake supervisor process.
     private struct Supervisor {
@@ -350,6 +355,16 @@ final class FakeLauncher: SupervisorLauncher {
         var identifications = 0
     }
 
+    /// What a supervisor does after its run ended.
+    private struct EndedRun {
+        /// The close of the socket, or `nil` when the supervisor did not listen.
+        let closing: Task<Void, Never>?
+        /// How long the supervisor keeps its lock after the close.
+        let linger: Duration
+        /// The supervisor whose lock goes after the linger.
+        let processID: Int32
+    }
+
     /// The running supervisors and the launch history.
     private struct State {
         /// The supervisors that hold their locks.
@@ -366,6 +381,8 @@ final class FakeLauncher: SupervisorLauncher {
         var identifications = 0
         /// The start times that the daemon passed to the process checks, in order.
         var startTimes: [RecordedStartTime] = []
+        /// The latest close of each lease's socket, which removes the socket file when it ends.
+        var closings: [LeaseID: Task<Void, Never>] = [:]
     }
 
     /// The launcher's state.
@@ -380,6 +397,9 @@ final class FakeLauncher: SupervisorLauncher {
 
     /// Takes the lease's locks and serves its socket, at once or after the planned gate opens.
     ///
+    /// The launch first waits until an earlier supervisor of the lease closed its socket, so that
+    /// the close cannot remove the new socket file.
+    ///
     /// - Parameter launch: What to boot.
     /// - Returns: The fake process identifier, which is 10000 plus the launch's number. The lock
     ///   records ``startTime(of:)`` of that identifier.
@@ -388,6 +408,7 @@ final class FakeLauncher: SupervisorLauncher {
     func launch(_ launch: SupervisorLaunch) async throws(PoolError) -> Int32 {
         let id = launch.lease
         let directory = launch.directory
+        await state.withLock { $0.closings[id] }?.value
         let (number, behavior) = state.withLock { state in
             state.total += 1
             return (state.total, state.plans.isEmpty ? FakeBehavior() : state.plans.removeFirst())
@@ -493,24 +514,25 @@ final class FakeLauncher: SupervisorLauncher {
     ///   - id: The lease.
     ///   - directory: The data directory.
     func send(_ signal: SupervisorSignal, to processID: Int32, of id: LeaseID, in directory: PoolDirectory) {
-        // A copy of the supervisor would hold its lock, so only the facts leave the state.
-        let target = state.withLock { state -> (ignoresTerminate: Bool, hasExited: Bool)? in
+        // A copy of the supervisor would hold its lock, so only the fact leaves the state.
+        let ignoresTerminate = state.withLock { state -> Bool? in
             state.signals.append(ReceivedSignal(lease: id, signal: signal, processID: processID))
             guard let supervisor = state.supervisors[id], supervisor.processID == processID else {
                 return nil
             }
-            return (supervisor.behavior.ignoresTerminate, supervisor.hasExited)
+            return supervisor.behavior.ignoresTerminate
         }
-        guard let target else {
+        guard let ignoresTerminate else {
             return
         }
         switch signal {
-        case .terminate where target.ignoresTerminate:
+        case .terminate where ignoresTerminate:
             return
-        case .terminate where !target.hasExited:
+        case .terminate:
             exit(id, .requested, directory: directory)
-        case .terminate, .kill:
-            Task { await self.crash(id) }
+            end(id)
+        case .kill:
+            end(id)
         }
     }
 
@@ -546,15 +568,12 @@ final class FakeLauncher: SupervisorLauncher {
         state.withLock { $0.supervisors[id]?.server }?.publish(status)
     }
 
-    /// Ends a supervisor without a report, as a crash or `SIGKILL` does.
+    /// Ends a supervisor without a report, as a crash or `SIGKILL` does, and waits until its
+    /// socket closed.
     ///
     /// - Parameter id: The lease.
     func crash(_ id: LeaseID) async {
-        guard let supervisor = state.withLock({ $0.supervisors.removeValue(forKey: id) }) else {
-            return
-        }
-        await supervisor.server?.close()
-        withExtendedLifetime(supervisor) {}
+        await end(id)?.value
     }
 
     /// Closes a supervisor's socket and every connection while the supervisor keeps running.
@@ -585,7 +604,8 @@ final class FakeLauncher: SupervisorLauncher {
     /// Ends a supervisor's run the way a real supervisor does.
     ///
     /// The supervisor releases the clone, writes its exit record, reports the outcome, and closes
-    /// its socket. It releases its lock last, after its planned linger.
+    /// its socket. It releases its lock last, after its planned linger. A signal can end the
+    /// supervisor before that.
     ///
     /// - Parameters:
     ///   - id: The lease.
@@ -593,27 +613,35 @@ final class FakeLauncher: SupervisorLauncher {
     ///   - directory: The data directory.
     func exit(_ id: LeaseID, _ outcome: MachineOutcome, directory: PoolDirectory) {
         // The task below must not hold a copy of the supervisor, which would keep its lock.
-        let ended = state.withLock { state -> (server: SupervisorServer?, linger: Duration, processID: Int32)? in
+        // A signal that ends the supervisor meanwhile must find the close recorded.
+        let ended = state.withLock { state -> EndedRun? in
             guard var supervisor = state.supervisors[id], !supervisor.hasExited else {
                 return nil
             }
+            let server = supervisor.server
             supervisor.hasExited = true
             supervisor.cloneLock = nil
+            supervisor.server = nil
             supervisor.status = SupervisorStatus(
                 phase: .exited,
                 outcome: outcome,
                 protocolVersion: supervisor.behavior.protocolVersion,
             )
             state.supervisors[id] = supervisor
-            return (supervisor.server, supervisor.behavior.lingerAfterExit, supervisor.processID)
+            try? directory.writeExitRecord(outcome, for: id)
+            server?.publish(SupervisorStatus(phase: .exited, outcome: outcome))
+            let closing = Self.close(server, of: id, in: &state)
+            return EndedRun(
+                closing: closing,
+                linger: supervisor.behavior.lingerAfterExit,
+                processID: supervisor.processID,
+            )
         }
         guard let ended else {
             return
         }
-        try? directory.writeExitRecord(outcome, for: id)
-        ended.server?.publish(SupervisorStatus(phase: .exited, outcome: outcome))
         Task {
-            await ended.server?.close()
+            await ended.closing?.value
             try? await Task.sleep(for: ended.linger)
             self.state.withLock { state in
                 if state.supervisors[id]?.processID == ended.processID {
@@ -621,6 +649,47 @@ final class FakeLauncher: SupervisorLauncher {
                 }
             }
         }
+    }
+
+    /// Ends a supervisor at once, as `SIGKILL` does.
+    ///
+    /// The supervisor's locks go before the call returns, and its socket closes in the background.
+    ///
+    /// - Parameter id: The lease.
+    /// - Returns: The close of the socket, or `nil` when the supervisor does not run or does not
+    ///   listen.
+    @discardableResult
+    private func end(_ id: LeaseID) -> Task<Void, Never>? {
+        state.withLock { state in
+            // The removed value is the last copy of the supervisor, so its locks go with it here.
+            guard let supervisor = state.supervisors.removeValue(forKey: id) else {
+                return nil
+            }
+            return Self.close(supervisor.server, of: id, in: &state)
+        }
+    }
+
+    /// Starts closing a supervisor's socket and records the close for the next launch.
+    ///
+    /// The caller holds the state's lock while it ends the supervisor and records the close. A
+    /// launch therefore cannot start between the two and miss the close.
+    ///
+    /// - Parameters:
+    ///   - server: The socket, or `nil` when the supervisor does not listen.
+    ///   - id: The lease.
+    ///   - state: The launcher's state.
+    /// - Returns: The close, or `nil` without a socket.
+    private static func close(
+        _ server: SupervisorServer?,
+        of id: LeaseID,
+        in state: inout State,
+    ) -> Task<Void, Never>? {
+        guard let server else {
+            return nil
+        }
+        let closing = Task { await server.close() }
+        state.closings[id] = closing
+        return closing
     }
 
     /// Serves a supervisor's socket with its current status.
@@ -671,7 +740,8 @@ extension PoolReply {
         switch self {
         case let .starting(lease), let .ready(lease), let .restarting(lease, _), let .renewed(lease):
             lease
-        case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode:
+        case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode,
+             .revoked, .forgotten:
             nil
         }
     }
@@ -697,6 +767,28 @@ func next(_ client: MessageChannel, within timeout: Duration = .seconds(10)) asy
     }
     defer { watchdog.cancel() }
     return try #require(await client.receive(PoolReply.self), "no reply within \(timeout)")
+}
+
+/// Waits until the daemon closes a client connection.
+///
+/// A receive does not end on task cancellation. The call therefore closes the connection itself
+/// when it stays open too long. The test then fails instead of hanging.
+///
+/// - Parameters:
+///   - client: The client's connection.
+///   - timeout: The longest wait.
+/// - Returns: `true` when the connection ended within `timeout` without another reply.
+/// - Throws: ``PoolError`` when a line is not a reply.
+func isClosed(_ client: MessageChannel, within timeout: Duration = .seconds(10)) async throws -> Bool {
+    let watchdog = Task {
+        try await Task.sleep(for: timeout)
+        client.close()
+        return true
+    }
+    let reply = try await client.receive(PoolReply.self)
+    watchdog.cancel()
+    let timedOut = await (try? watchdog.value) == true
+    return reply == nil && !timedOut
 }
 
 /// Waits until a condition holds.
@@ -756,11 +848,28 @@ final class LogRecorder: Sendable {
     /// The messages in the order of logging.
     private let entries = Mutex<[LogEntry]>([])
 
-    /// Adds a message.
+    /// The actions that run once when a message is logged, keyed by the message's text.
+    private let actions = Mutex<[String: @Sendable () -> Void]>([:])
+
+    /// Adds a message and runs the action that waits for its text.
     ///
     /// - Parameter entry: The message.
     func record(_ entry: LogEntry) {
         entries.withLock { $0.append(entry) }
+        let action = actions.withLock { $0.removeValue(forKey: entry.message) }
+        action?()
+    }
+
+    /// Runs an action once, the next time a logger writes a message.
+    ///
+    /// The action runs before the logging call returns. A test can therefore change the file
+    /// system at a known step of the daemon's work.
+    ///
+    /// - Parameters:
+    ///   - message: The text of the message.
+    ///   - action: The action to run.
+    func whenLogged(_ message: String, run action: @escaping @Sendable () -> Void) {
+        actions.withLock { $0[message] = action }
     }
 
     /// Every message in the order of logging.

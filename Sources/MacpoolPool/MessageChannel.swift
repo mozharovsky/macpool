@@ -306,7 +306,7 @@ public final class MessageChannel: Sendable {
             case .channel:
                 state.user = .stream
                 return .success(state.buffer.takeAll())
-            case .ending:
+            case .finishing, .ending:
                 return .failure(.connection(path: peer, reason: "the channel is closing it"))
             case .stream:
                 return .failure(.connection(path: peer, reason: "a byte stream already owns it"))
@@ -318,17 +318,22 @@ public final class MessageChannel: Sendable {
     /// Closes the connection and ends a pending receive.
     ///
     /// Messages that are still queued may be lost. Use ``finish(within:)`` to deliver them first.
+    /// If a finish already began, the call leaves the connection to it. The finish then closes
+    /// the connection after the queued messages left or its time limit passed.
+    ///
     /// A connection that went to a ``ByteStream`` stays open, and ``takeStream()`` refuses the
     /// connection once the close begins.
     public func close() {
-        let ownsConnection = state.withLock { state in
-            guard state.user != .stream else {
+        let cancels = state.withLock { state in
+            switch state.user {
+            case .channel, .ending:
+                state.user = .ending
+                return true
+            case .finishing, .stream:
                 return false
             }
-            state.user = .ending
-            return true
         }
-        if ownsConnection {
+        if cancels {
             connection.cancel()
         }
         releaseWaiters()
@@ -340,19 +345,21 @@ public final class MessageChannel: Sendable {
     /// or when ``close()`` or another finish already ends it. ``takeStream()`` refuses the
     /// connection once the finish begins, so the end never reaches a stream.
     ///
-    /// - Parameter timeout: The longest wait for the queued messages to leave.
+    /// - Parameter timeout: The longest wait for the queued messages to leave. The connection
+    ///   closes after this time even if the peer reads nothing.
     public func finish(within timeout: Duration = .seconds(2)) async {
         let starts = state.withLock { state in
             guard state.user == .channel else {
                 return false
             }
-            state.user = .ending
+            state.user = .finishing
             return true
         }
         guard starts else {
             return
         }
         await connection.sendEnd(within: timeout)
+        state.withLock { $0.user = .ending }
         connection.cancel()
         releaseWaiters()
     }
@@ -399,7 +406,10 @@ private struct DeliveryWaiter {
 private enum ConnectionUser {
     /// The channel sends and receives lines.
     case channel
-    /// The channel began to close the connection, and no stream may take it.
+    /// A finish delivers the queued messages and then closes the connection. No stream may take
+    /// it.
+    case finishing
+    /// The channel closed the connection or began to close it, and no stream may take it.
     case ending
     /// A ``ByteStream`` owns the connection.
     case stream

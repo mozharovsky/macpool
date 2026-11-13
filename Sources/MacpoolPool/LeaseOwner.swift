@@ -87,6 +87,14 @@ public struct KeyFingerprint: Hashable, Sendable, Codable, CustomStringConvertib
         rawValue
     }
 
+    /// Reports whether a person's text names this key.
+    ///
+    /// - Parameter text: A ``shortKey`` or a full fingerprint, in lowercase as the pool shows it.
+    /// - Returns: `true` when the text equals the short key or the fingerprint.
+    func isNamed(by text: String) -> Bool {
+        text == shortKey || text == rawValue
+    }
+
     /// Returns the first bytes of the digest.
     ///
     /// - Parameter count: The number of bytes, at most 32.

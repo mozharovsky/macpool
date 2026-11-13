@@ -11,6 +11,9 @@ import Security
 ///
 /// Connections use TLS 1.3 only. Session resumption and session tickets are off. Every
 /// connection therefore runs a full handshake with both keys and accepts no early data.
+///
+/// Both sides turn on TCP keepalive. If the peer of an idle connection stops answering, TCP closes
+/// the connection about a minute later.
 enum PeerSecurity {
     /// The ALPN name of protocol version 1.
     static let protocolName = "macpool/1"
@@ -20,6 +23,15 @@ enum PeerSecurity {
 
     /// The protocol versions that this build speaks, keyed by their ALPN names.
     static let versions = [protocolName: protocolVersion]
+
+    /// The seconds that a connection stays idle before TCP sends the first keepalive probe.
+    static let keepaliveIdle = 30
+
+    /// The seconds between keepalive probes.
+    static let keepaliveInterval = 10
+
+    /// The number of unanswered keepalive probes after which TCP drops the connection.
+    static let keepaliveCount = 3
 
     /// Creates the parameters of a TCP connection with mutual TLS.
     ///
@@ -64,7 +76,14 @@ enum PeerSecurity {
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
             complete(leafFingerprint(in: metadata).map(admits) ?? false)
         }, DispatchQueue(label: "macpool.peer.verify"))
-        return NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        let tcp = NWProtocolTCP.Options()
+        // A Mac that sleeps or leaves the network mid-request sends no FIN or RST. Without probes,
+        // its connection would stay open until the daemon restarts.
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = keepaliveIdle
+        tcp.keepaliveInterval = keepaliveInterval
+        tcp.keepaliveCount = keepaliveCount
+        return NWParameters(tls: tls, tcp: tcp)
     }
 
     /// Names the key in the first certificate that the peer sent.

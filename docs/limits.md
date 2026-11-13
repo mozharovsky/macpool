@@ -25,8 +25,9 @@ with an iOS simulator runtime doesn't fit on a 64 GB disk.
   the window.
 - Locks are advisory. They coordinate macpool commands and don't stop other tools from changing a
   bundle.
-- The daemon counts only its own VMs. A `run` or `create` beside it can take a VM that macOS
-  allows, and a lease's boot then fails and counts as a crash.
+- The daemon counts only its own VMs. A `run`, `create`, or `image xcode` beside it can take a VM
+  that macOS allows, and a lease's boot then fails and counts as a crash. `image xcode` holds its
+  VM for several minutes.
 - Two daemons with different data directories each count their own slots. Together they can try
   to run more VMs than macOS allows.
 - The daemon runs in the login session of the user who installed it. Its VMs don't start before

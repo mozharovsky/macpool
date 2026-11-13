@@ -11,7 +11,7 @@ ready on SSH. Requests that find no free slot wait in a queue ordered by priorit
 arrival.
 
 If the source has an `ImageRecord` and the image is not ready, the daemon refuses the
-request. It checks the record again right before it clones a queued request. If the image is no
+request. It checks the record again each time it clones the source for a lease. If the image is no
 longer ready, the lease ends without a boot. The daemon also lists the images in its data directory for clients on the same Mac as
 ``ImageSummary`` values.
 
@@ -43,8 +43,9 @@ invitation set another value. At most as many of its requests wait in the queue 
 slots. Requests of equal priority wait in the order they arrive. The local user gets ahead of a
 paired client's waiting request by asking for a higher priority.
 
-The daemon reads the client's record again for every lease request. If the record is gone or
-blocked, the request fails.
+The daemon reads the client's record again before each of its requests. If the record is gone or
+blocked, the request fails and the daemon closes the connection. If the list cannot be read, only
+the request fails.
 
 No reply to a paired client names a host path. The client sees its source by name and sees no
 clone and no guest address. When a VM fails, the client receives a fixed reason, and the host's
@@ -98,9 +99,9 @@ resumption and session tickets are off, so every connection runs a full handshak
 
 The host reads `trust/clients.json` during every handshake and admits the keys of clients that are
 not blocked. While an invitation is open, it also admits keys that the list does not name, so that
-a new client can pair. A key that leaves the list opens no new connection, and connections that are
-already open stay open. If the list cannot be read when the listener starts, the listener does not
-start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
+a new client can pair. A key that leaves the list opens no new connection, and its open connections
+close at their next request. If the list cannot be read when the listener starts, the listener does
+not start. If it cannot be read later, the host admits nobody until it can. A TLS 1.3 client finishes
 its handshake before the host checks the client's key. The host therefore first sends a `hello`
 line. The line names the host's role and the protocol version that ALPN chose. The client sends
 requests only after that line. Both sides then exchange the same lines as on the Unix socket.
@@ -165,6 +166,43 @@ Each Mac checks names with the Unicode tables of its own macOS. If the host's na
 that the client's macOS does not know, the host records the client and
 ``PoolClient/pair(using:name:directory:timeout:)`` throws on the client. Change the host's name
 and pair again with a new code.
+
+### Revoking and forgetting
+
+The local user revokes a client with ``PoolRequest/revoke(key:endLeases:)``. Name the client by its
+short key or its full fingerprint. The daemon takes no name, because each Mac chooses its own name
+and two Macs may choose the same one. If a short key matches two records, the request fails and
+asks for the full key.
+
+A revocation marks the record as blocked and keeps its other fields. The daemon then closes every
+connection of the client. The client's waiting requests leave the queue, and its leases end. Only a
+detached lease whose VM was ready runs on until it expires, unless `endLeases` is set. Nothing
+unblocks a client. It cannot pair again while its record stays in `clients.json`.
+
+If the first save of the block fails, the daemon saves it once more after it closed the connections.
+If that save fails too, the daemon still closes the client's connections and ends the same leases as
+a saved revocation. The request then fails with the reason. The daemon keeps the block in memory and
+refuses the client until the daemon restarts. Revoke the client again once the list can be saved. If
+a person deletes the client's record from `clients.json` and the client pairs again with a new code,
+the daemon drops that block.
+
+If the list cannot be read and a client with the key is connected or holds a lease, the daemon
+closes the client's connections, ends the same leases, and keeps the block in memory. The request
+fails with the reason. If no such client exists, the request fails with the read error and the
+daemon blocks nothing. Revoke the client again once the list can be read.
+
+If the list has no record of the key, the daemon still closes the connections of a client with
+that key and ends the same leases. The request then fails, and the client can pair again with a new
+code.
+
+A paired client asks the host to forget it with ``PoolRequest/forget(endLeases:)``. If it holds
+leases and `endLeases` is not set, the request fails. Otherwise the daemon first saves the list
+without the record. It then ends the leases and closes every connection of the client. If the list
+cannot be read, the request fails and the daemon changes nothing. If the save fails, the daemon
+reads the list again, because a save can fail after the rename that puts the new list in place.
+When the list no longer names the client, the daemon forgets the client. Otherwise the request
+fails and the daemon changes nothing. The daemon refuses this request from a blocked client. A
+blocked record therefore stays.
 
 ### Supervisors
 

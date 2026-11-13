@@ -8,7 +8,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct ClientRightsTests {
     /// Lets a paired client ask for priorities up to the ceiling in its record. The daemon reads
-    /// the record again for every lease request.
+    /// the record again for every request.
     @Test func capsPrioritiesAtTheCeiling() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start(offeredSources: ["base": pool.source])
@@ -27,12 +27,7 @@ struct ClientRightsTests {
         try Self.record(owner, priorityCeiling: 0, in: pool.directory)
         try remote.send(PoolRequest.lease(terms(1)))
         #expect(try await next(remote) == .failure(Self.refusal("this Mac may ask for a priority of at most 0")))
-        try Self.record(owner, priorityCeiling: 0, isBlocked: true, in: pool.directory)
-        try remote.send(PoolRequest.lease(terms(0)))
-        #expect(try await next(remote) == .failure(Self.refusal("the host no longer accepts this Mac")))
-        try TrustList<TrustedClient>().save(to: pool.directory)
-        try remote.send(PoolRequest.lease(terms(0)))
-        #expect(try await next(remote) == .failure(Self.refusal("the host no longer accepts this Mac")))
+        remote.close()
         await daemon.shutdown()
     }
 
@@ -183,6 +178,18 @@ struct ClientRightsTests {
         try await replies.append(receive())
         #expect(replies.last == .failure("the host could not read the request"))
 
+        try Self.expectNoHostPath(in: replies, of: pool)
+        await daemon.shutdown()
+    }
+
+    /// Checks that no reply names the fixture's root or the home directory. Also checks that the
+    /// daemon replaced no reply because it named a host path.
+    ///
+    /// - Parameters:
+    ///   - replies: The replies that paired clients received.
+    ///   - pool: The fixture of the host.
+    /// - Throws: `EncodingError` when a reply cannot be encoded.
+    static func expectNoHostPath(in replies: [PoolReply], of pool: PoolFixture) throws {
         let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
         let paths = [pool.root.url.path(percentEncoded: false), home]
             .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
@@ -193,7 +200,6 @@ struct ClientRightsTests {
             #expect(!paths.contains { text.contains($0) }, "\(text)")
         }
         #expect(pool.logs.entries("A reply to a paired Mac named a host path").isEmpty)
-        await daemon.shutdown()
     }
 
     /// Replaces a reply to a paired client that names a host path with a failure, and logs it.

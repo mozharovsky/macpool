@@ -376,6 +376,8 @@ struct PeerConnectionTests {
             )
             #expect(boundAddresses(port: listener.port) == [address])
             listener.close()
+            // The next listener may get the same port, so this socket must be gone first.
+            #expect(await eventually { boundAddresses(port: listener.port).isEmpty })
         }
         // If the listener skipped the parser, `127.1` would still bind only to the loopback address.
         await #expect(throws: PoolError.connection(
@@ -566,8 +568,9 @@ struct PeerConnectionTests {
         }
     }
 
-    /// Keeps a connection open after its key is blocked and refuses the key's new connections.
-    @Test func keepsAnOpenConnectionOfABlockedKey() async throws {
+    /// Refuses the new connections of a blocked key and closes its open connection at the next
+    /// request.
+    @Test func closesABlockedKeyAtItsNextRequest() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
         let clientKey = KeyFingerprint(digest: client.keyDigest)
@@ -581,11 +584,54 @@ struct PeerConnectionTests {
             try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
         } != nil)
         try open.send(PoolRequest.status)
-        guard case .status? = try await open.receive(PoolReply.self) else {
-            Issue.record("the open connection did not answer")
-            return
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
+        await daemon.shutdown()
+    }
+
+    /// Closes the connection of a revoked Mac at once and refuses its new connections.
+    @Test func revokesAConnectedMac() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let open = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+
+        let revoked = try await PoolClient.send(.revoke(key: clientKey.shortKey), to: fixture.directory)
+        #expect(revoked == .revoked(PairedMac(name: "client", key: clientKey), connections: 1, leases: 0))
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        } != nil)
+        await daemon.shutdown()
+    }
+
+    /// Refuses new connections of a revoked Mac while the daemon keeps a block that it could not
+    /// save.
+    @Test func refusesAMacWithAnUnsavedBlock() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let hostKey = try listClients([clientKey], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let open = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        try RevocationTests.setImmutable(true, listIn: fixture.directory)
+        defer { try? RevocationTests.setImmutable(false, listIn: fixture.directory) }
+
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: clientKey.shortKey), to: fixture.directory)
         }
-        open.close()
+        #expect(try await next(open) == RevocationTests.notAccepted)
+        #expect(try await isClosed(open))
+        try RevocationTests.setImmutable(false, listIn: fixture.directory)
+        #expect(await refusal { () async throws(PoolError) in
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        } != nil)
+        #expect(try TrustList<TrustedClient>.load(from: fixture.directory)[clientKey]?.isBlocked == false)
         await daemon.shutdown()
     }
 

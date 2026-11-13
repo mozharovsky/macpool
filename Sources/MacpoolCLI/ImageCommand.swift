@@ -20,9 +20,9 @@ struct ImageCommand: AsyncParsableCommand {
 /// first launch packages, the runtime, and the free space. The guest shuts itself down, and the
 /// clone becomes `images/NAME` in the data directory with a ready image record.
 ///
-/// If the build fails or a signal interrupts it, the command deletes the clone. With
-/// `--keep-failed` it keeps the clone as `images/NAME` with a record that is not ready. The daemon
-/// refuses to lease such an image.
+/// If the build fails, or `SIGINT`, `SIGTERM`, or `SIGHUP` interrupts it, the command stops the VM
+/// and deletes the clone. With `--keep-failed` it keeps the clone as `images/NAME` with a record
+/// that is not ready. The daemon refuses to lease such an image.
 struct XcodeImageCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -109,30 +109,40 @@ struct XcodeImageCommand: AsyncParsableCommand {
     private func perform() async throws(CommandError) {
         let clock = ContinuousClock()
         let started = clock.now
-        let xcodeURL = URL(filePath: xcode).absoluteURL
-        let runtimeURL = URL(filePath: runtime).absoluteURL
-        for url in [xcodeURL, runtimeURL]
-            where !FileManager.default.isReadableFile(atPath: url.path(percentEncoded: false)) {
-            throw .invalidValue("\(url.path(percentEncoded: false)) is not a readable file")
-        }
         let base = VMBundle(root: URL(filePath: from).absoluteURL)
         let workspace = ImageWorkspace(directory: location.directory, name: name)
-        // The watch starts before the clone, so a signal during the copy still reaches cleanup.
-        let interrupted = StopFlag()
-        let signals = SignalWatch { _ in interrupted.set() }
-        defer { signals.cancel() }
         let deviceName = device
         try await workspace.build(
             from: base,
-            xcode: xcodeURL,
-            runtime: runtimeURL,
+            xcode: URL(filePath: xcode).absoluteURL,
+            runtime: URL(filePath: runtime).absoluteURL,
             keepFailed: keepFailed,
-            interrupted: interrupted,
-        ) { building, inputs async throws(CommandError) in
+            watchSignals: Self.watchSignals,
+        ) { building, inputs, interrupted async throws(CommandError) in
             try await buildInGuest(building, inputs: inputs, device: deviceName, interrupted: interrupted)
         }
         Report.measure("image_seconds", Report.seconds(clock.now - started, decimals: 1))
         Report.line("image=\(workspace.image.path(percentEncoded: false))")
+    }
+
+    /// Starts watching the signals that interrupt a build.
+    ///
+    /// `SIGINT`, `SIGTERM`, and `SIGHUP` set `interrupted`. Closing the terminal sends `SIGHUP`, and
+    /// the build then continues with a dead standard output. If the process already ignores a
+    /// signal, for example `SIGHUP` under `nohup`, the signal does not interrupt the build.
+    ///
+    /// The function also prepares the output for the rest of the process. `SIGPIPE` stays ignored,
+    /// and ``Report/line(_:)`` drops lines that it cannot write. The cleanup and the lines after a
+    /// published image then finish with a closed pipe or terminal.
+    ///
+    /// - Parameter interrupted: The flag that the signals set.
+    /// - Returns: The function that stops the watch and restores the earlier signal actions.
+    static func watchSignals(_ interrupted: StopFlag) -> @Sendable () -> Void {
+        signal(SIGPIPE, SIG_IGN)
+        Report.dropUnwritableLines()
+        let signals = (SignalWatch.signals + [SIGHUP]).filter { !SignalWatch.isIgnored($0) }
+        let watch = SignalWatch(signals: signals) { _ in interrupted.set() }
+        return { watch.cancel() }
     }
 
     /// Boots the clone, runs the build in the guest, and waits until the guest shuts down.
@@ -143,8 +153,8 @@ struct XcodeImageCommand: AsyncParsableCommand {
     ///   - device: The simulator to boot once, or `nil` for the first available iPhone.
     ///   - interrupted: The flag that a signal sets. Once it is set, the VM stops.
     /// - Returns: The builds of Xcode and of the simulator runtime.
-    /// - Throws: ``CommandError`` when the VM does not become ready, a step fails, the guest does
-    ///   not shut down, or a signal stops the VM.
+    /// - Throws: ``CommandError`` when the VM does not become ready, a step fails, the VM stops
+    ///   during a step, the guest does not shut down, or a signal stops the VM.
     private func buildInGuest(
         _ building: VMBundle,
         inputs: URL,
@@ -181,28 +191,39 @@ struct XcodeImageCommand: AsyncParsableCommand {
             }
             throw .invalidValue("the VM stopped before it was ready")
         }
-        let builds: XcodeImageBuilds
-        do throws(CommandError) {
-            let guest = try library { () throws(MacpoolError) in
-                try GuestSession(bundle: building, address: address)
+        let steps = Task { () async -> Result<XcodeImageBuilds, CommandError> in
+            do throws(CommandError) {
+                return try await .success(runSteps(building, address: address, device: device))
+            } catch {
+                return .failure(error)
             }
-            builds = try await XcodeImageSteps(guest: guest, deviceName: device).run()
-            Report.line("step: shutting down the guest")
-            // The delay lets ssh report the status before the guest drops the connection.
-            let shutdown = try await library { () async throws(MacpoolError) in
-                try await guest.runStep(
-                    "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
-                    asRoot: true,
-                    timeLimit: .seconds(60),
-                )
-            }
-            guard shutdown.succeeded else {
-                throw .imageStep(step: "shutting down the guest", reason: shutdown.failureSummary)
-            }
-        } catch {
-            stop.set()
+        }
+        // The VM stops within a second of a signal. Without this cancel, the running step's ssh
+        // would notice the stop only through its keepalive.
+        Task {
             _ = await running.value
-            throw error
+            steps.cancel()
+        }
+        let builds: XcodeImageBuilds
+        switch await steps.value {
+        case let .success(value):
+            builds = value
+        case let .failure(error):
+            // Read before the stop. After the VM stops, the watcher cancels the finished task too.
+            let wasCancelled = steps.isCancelled
+            stop.set()
+            // A VM that stopped by itself explains a failed step better than the step's ssh does.
+            // The session ends with `.stopped` only after this stop request or a signal.
+            switch await running.value {
+            case let .failure(.stopped(event)):
+                throw Self.vmStopped(event, during: error)
+            case .success(.guestStopped):
+                throw Self.vmStopped(.guestStopped, during: error)
+            case let .failure(stopError) where wasCancelled:
+                throw stopError
+            case .failure, .success(.stopped):
+                throw error
+            }
         }
         let watchdog = Task {
             try? await Task.sleep(for: Self.shutdownTimeout)
@@ -218,6 +239,39 @@ struct XcodeImageCommand: AsyncParsableCommand {
         case let .failure(error):
             throw error
         }
+    }
+
+    /// Runs the build's steps in the guest and asks the guest to shut down.
+    ///
+    /// - Parameters:
+    ///   - building: The clone of the base.
+    ///   - address: The guest's address.
+    ///   - device: The simulator to boot once, or `nil` for the first available iPhone.
+    /// - Returns: The builds of Xcode and of the simulator runtime.
+    /// - Throws: ``CommandError`` when a step fails or the shutdown command fails.
+    private func runSteps(_ building: VMBundle, address: String, device: String?) async throws(CommandError)
+        -> XcodeImageBuilds {
+        let guest = try library { () throws(MacpoolError) in
+            try GuestSession(bundle: building, address: address)
+        }
+        let steps = XcodeImageSteps(guest: guest, deviceName: device)
+        let builds = try await steps.run()
+        try await steps.shutDown()
+        return builds
+    }
+
+    /// Describes a VM that stopped by itself while a step ran.
+    ///
+    /// - Parameters:
+    ///   - event: The event that reported the stop.
+    ///   - error: The error of the step that the stop ended.
+    /// - Returns: The step's error with the stop as its reason, or ``CommandError/stopped(_:)``
+    ///   when `error` names no step.
+    static func vmStopped(_ event: MachineEvent, during error: CommandError) -> CommandError {
+        guard case let .imageStep(step, _) = error else {
+            return .stopped(event)
+        }
+        return .imageStep(step: step, reason: event.summary)
     }
 
     /// The longest wait for the guest to stop after the shutdown command.

@@ -15,17 +15,70 @@ struct XcodeImageTests {
         #expect(builds.record(macOS: "26B123") == ["xcode": "27A266a", "ios_runtime": "24A434", "macos": "26B123"])
 
         let calls = await guest.calls
-        let rootCommands = calls.filter(\.asRoot).map(\.command)
-        #expect(rootCommands.count == 4)
-        #expect(rootCommands[0].contains("mv -- *.app /Applications/Xcode_27A266a.app"))
-        #expect(rootCommands[1] == "/usr/bin/xcodebuild -license accept")
-        #expect(rootCommands[2] == "/usr/bin/xcodebuild -runFirstLaunch")
-        #expect(rootCommands[3] == "rm -rf \(XcodeImageSteps.workDirectory)")
-        #expect(calls.first { $0.command.contains("xip --expand") }?.timeLimit == .seconds(3600))
-        #expect(calls.contains { $0.command == "/usr/bin/xcrun simctl bootstatus \(ScriptedGuest.iPhone) -b" })
-        let license = try #require(calls.firstIndex { $0.command.hasSuffix("-license accept") })
-        let firstLaunch = try #require(calls.firstIndex { $0.command.hasSuffix("-runFirstLaunch") })
-        #expect(license < firstLaunch)
+        let shared = XcodeImageSteps.sharedDirectory
+        let work = XcodeImageSteps.workDirectory
+        let app = "/Applications/Xcode_27A266a.app"
+        let expected = [
+            GuestCall(
+                command: "for i in $(seq 60); do test -r '\(shared)/Xcode.xip' && test -r '\(shared)/Runtime.dmg' "
+                    + "&& exit 0; sleep 2; done; exit 1",
+                asRoot: false,
+                timeLimit: .seconds(180),
+            ),
+            GuestCall(
+                command: "rm -rf \(work) && mkdir \(work) && cd \(work) && /usr/bin/xip --expand '\(shared)/Xcode.xip'",
+                asRoot: false,
+                timeLimit: .seconds(3600),
+            ),
+            GuestCall(
+                command: "cd \(work) && set -- *.app && [ $# -eq 1 ] && [ -d \"$1\" ] "
+                    + "&& /usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' \"$1/Contents/version.plist\"",
+                asRoot: false,
+                timeLimit: .seconds(120),
+            ),
+            GuestCall(
+                command: "test ! -e \(app) && cd \(work) && mv -- *.app \(app) && /usr/bin/xcode-select -s \(app)",
+                asRoot: true,
+                timeLimit: .seconds(300),
+            ),
+            GuestCall(command: "/usr/bin/xcodebuild -license accept", asRoot: true, timeLimit: .seconds(120)),
+            GuestCall(command: "/usr/bin/xcodebuild -runFirstLaunch", asRoot: true, timeLimit: .seconds(1200)),
+            GuestCall(
+                command: "/usr/bin/xcrun simctl runtime add '\(shared)/Runtime.dmg'",
+                asRoot: false,
+                timeLimit: .seconds(1800),
+            ),
+            GuestCall(command: "/usr/bin/xcrun simctl list runtimes --json", asRoot: false, timeLimit: .seconds(120)),
+            GuestCall(
+                command: "/usr/bin/xcrun simctl list devices available --json",
+                asRoot: false,
+                timeLimit: .seconds(120),
+            ),
+            GuestCall(
+                command: "/usr/bin/xcrun simctl bootstatus \(ScriptedGuest.iPhone) -b",
+                asRoot: false,
+                timeLimit: .seconds(900),
+            ),
+            GuestCall(
+                command: "/usr/bin/xcrun simctl shutdown \(ScriptedGuest.iPhone)",
+                asRoot: false,
+                timeLimit: .seconds(120),
+            ),
+            GuestCall(command: "/usr/bin/xcodebuild -version", asRoot: false, timeLimit: .seconds(120)),
+            GuestCall(command: "/usr/bin/xcodebuild -license check", asRoot: false, timeLimit: .seconds(120)),
+            GuestCall(
+                command: "/usr/bin/xcodebuild -checkFirstLaunchStatus",
+                asRoot: false,
+                timeLimit: .seconds(120),
+            ),
+            GuestCall(
+                command: "/bin/df -k /System/Volumes/Data | /usr/bin/awk 'NR == 2 { print $4 }'",
+                asRoot: false,
+                timeLimit: .seconds(120),
+            ),
+            GuestCall(command: "rm -rf \(work)", asRoot: true, timeLimit: .seconds(120)),
+        ]
+        #expect(calls == expected)
     }
 
     /// Boots the simulator that `--device` names.
@@ -82,12 +135,12 @@ struct XcodeImageTests {
         }
     }
 
-    /// Fails when the guest has less than 40 GiB free, and survives a free size beyond 64 bits.
+    /// Fails when the guest has less than 40 GB free, and survives a free size beyond 64 bits.
     @Test func checksFreeSpace() async {
         let low = ScriptedGuest(replies: ["df -k": .success("\((39 << 30) / 1024)\n")])
         await #expect(throws: CommandError.imageStep(
             step: "checking the free space",
-            reason: "the guest has 39 GiB free, less than 40 GiB",
+            reason: "the guest has 39 GB free, less than 40 GB",
         )) {
             try await XcodeImageSteps(guest: low, deviceName: nil).run()
         }
@@ -143,7 +196,7 @@ struct XcodeImageTests {
         }
     }
 
-    /// Refuses an existing image, a base that never booted, and a disk below 128 GiB.
+    /// Refuses an existing image, a base that never booted, and a disk below 128 GB.
     @Test func refusesUnfitBase() throws {
         let unbooted = try ImageFolder(hasBooted: false)
         let unbootedPath = unbooted.base.root.path(percentEncoded: false)
@@ -155,7 +208,7 @@ struct XcodeImageTests {
 
         let small = try ImageFolder(diskBytes: 64 << 30)
         #expect(throws: CommandError.invalidValue(
-            "the base's disk has 64 GiB, and Xcode with a simulator runtime needs a disk of 128 GiB. "
+            "the base's disk has 64 GB, and Xcode with a simulator runtime needs a disk of 128 GB. "
                 + "Create the base with --disk-gb 128",
         )) {
             try small.workspace.prepare(base: small.base)
@@ -165,6 +218,176 @@ struct XcodeImageTests {
         try FileManager.default.createDirectory(at: taken.workspace.image, withIntermediateDirectories: true)
         #expect(throws: CommandError.fileExists(path: taken.workspace.image.path(percentEncoded: false))) {
             try taken.workspace.prepare(base: taken.base)
+        }
+    }
+
+    /// Names both leftovers of an unfinished build when either one exists, and deletes neither.
+    @Test func refusesLeftoversOfUnfinishedBuild() throws {
+        for leftover in [\ImageWorkspace.building.root, \ImageWorkspace.inputs] {
+            let folder = try ImageFolder()
+            let workspace = folder.workspace
+            let path = workspace[keyPath: leftover]
+            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+            #expect(throws: CommandError.unfinishedImageBuild(
+                name: "xcode",
+                building: workspace.building.root.path(percentEncoded: false),
+                inputs: workspace.inputs.path(percentEncoded: false),
+            )) {
+                try workspace.prepare(base: folder.base)
+            }
+            #expect(FileManager.default.fileExists(atPath: path.path(percentEncoded: false)))
+        }
+    }
+
+    /// Refuses a directory or a missing file as an input before it clones the base.
+    @Test func refusesInputThatIsNoFile() async throws {
+        let folder = try ImageFolder()
+        let app = folder.base.root.deletingLastPathComponent().appending(path: "Xcode.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let missing = folder.base.root.deletingLastPathComponent().appending(path: "missing.dmg")
+        let cases = [
+            (
+                app,
+                folder.runtime,
+                "--xcode \(app.path(percentEncoded: false)) is not a readable file. "
+                    + "Pass the .xip archive itself",
+            ),
+            (
+                folder.xcode,
+                missing,
+                "--runtime \(missing.path(percentEncoded: false)) is not a readable file. "
+                    + "Pass the .dmg disk image itself",
+            ),
+        ]
+        for (xcode, runtime, message) in cases {
+            await #expect(throws: CommandError.invalidValue(message)) {
+                try await folder.workspace.build(
+                    from: folder.base,
+                    xcode: xcode,
+                    runtime: runtime,
+                    keepFailed: false,
+                    watchSignals: Self.noSignals,
+                ) { _, _, _ async throws(CommandError) in
+                    Issue.record("the guest part ran with an input that is no file")
+                    return XcodeImageBuilds(xcode: "1", iosRuntime: "1")
+                }
+            }
+            #expect(!FileManager.default.fileExists(atPath: folder.workspace.building.root.path(percentEncoded: false)))
+        }
+    }
+
+    /// Accepts a symbolic link to a file and refuses a file that the user cannot read.
+    @Test func checksInputs() throws {
+        let folder = try ImageFolder()
+        let directory = folder.base.root.deletingLastPathComponent()
+        let link = directory.appending(path: "link.xip")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder.xcode)
+        #expect(throws: Never.self) {
+            try ImageWorkspace.checkInputs(xcode: link, runtime: folder.runtime)
+        }
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0],
+            ofItemAtPath: folder.runtime.path(percentEncoded: false),
+        )
+        #expect(throws: CommandError.invalidValue(
+            "--runtime \(folder.runtime.path(percentEncoded: false)) is not a readable file. "
+                + "Pass the .dmg disk image itself",
+        )) {
+            try ImageWorkspace.checkInputs(xcode: folder.xcode, runtime: folder.runtime)
+        }
+    }
+
+    /// Finishes the cleanup after `SIGHUP` and prints later lines when standard output is a closed
+    /// terminal or a pipe without a reader.
+    @Test(arguments: [false, true]) func cleansUpWithClosedOutput(throughPipe: Bool) async {
+        await #expect(processExitsWith: .success) { [throughPipe] in
+            // _exit skips the exit work of the harness and of stdio. That work would write to the closed output.
+            let output = throughPipe ? closedPipe() : closedTerminal()
+            guard dup2(output, STDOUT_FILENO) >= 0, dup2(output, STDERR_FILENO) >= 0 else {
+                _exit(2)
+            }
+            guard let folder = try? ImageFolder() else {
+                _exit(3)
+            }
+            let workspace = folder.workspace
+            do throws(CommandError) {
+                try await workspace.build(
+                    from: folder.base,
+                    xcode: folder.xcode,
+                    runtime: folder.runtime,
+                    keepFailed: false,
+                    watchSignals: XcodeImageCommand.watchSignals,
+                ) { _, _, interrupted async throws(CommandError) in
+                    kill(getpid(), SIGHUP)
+                    while !interrupted.isSet {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    throw .imageStep(step: "expanding Xcode", reason: "the VM stopped")
+                }
+                _exit(4)
+            } catch {
+                guard error == .interrupted else {
+                    _exit(5)
+                }
+            }
+            // A published image prints its lines after the watch ends.
+            Report.line("image=\(workspace.image.path(percentEncoded: false))")
+            let manager = FileManager.default
+            let isClean = !manager.fileExists(atPath: workspace.building.root.path(percentEncoded: false))
+                && !manager.fileExists(atPath: workspace.inputs.path(percentEncoded: false))
+            try? manager.removeItem(at: folder.base.root.deletingLastPathComponent())
+            _exit(isClean ? 0 : 6)
+        }
+    }
+
+    /// Leaves a build running when `SIGHUP` arrives under `nohup`, and keeps the signal ignored after
+    /// the watch ends.
+    @Test func keepsIgnoredHangup() async {
+        await #expect(processExitsWith: .success) {
+            signal(SIGHUP, SIG_IGN)
+            let interrupted = StopFlag()
+            let stopWatching = XcodeImageCommand.watchSignals(interrupted)
+            kill(getpid(), SIGHUP)
+            // A watched signal reaches its handler on a background queue within milliseconds.
+            usleep(300_000)
+            guard !interrupted.isSet else {
+                _exit(2)
+            }
+            stopWatching()
+            guard SignalWatch.isIgnored(SIGHUP) else {
+                _exit(3)
+            }
+            kill(getpid(), SIGHUP)
+            usleep(100_000)
+            _exit(0)
+        }
+    }
+
+    /// Restores the action that a signal had before the watch, instead of the default action.
+    @Test func restoresEarlierSignalAction() async {
+        await #expect(processExitsWith: .success) {
+            signal(SIGUSR1, SIG_IGN)
+            SignalWatch(signals: [SIGUSR1]) { _ in }.cancel()
+            // The default action of SIGUSR1 ends the process. Delivery to another thread can
+            // take a moment.
+            kill(getpid(), SIGUSR1)
+            usleep(100_000)
+            _exit(0)
+        }
+    }
+
+    /// Ends the process when a line cannot be written, unless an image build drops such lines.
+    @Test(arguments: [false, true]) func reportsUnwritableLine(dropping: Bool) async {
+        await #expect(processExitsWith: dropping ? .success : .failure) { [dropping] in
+            let output = closedTerminal()
+            guard dup2(output, STDOUT_FILENO) >= 0, dup2(output, STDERR_FILENO) >= 0 else {
+                _exit(2)
+            }
+            if dropping {
+                Report.dropUnwritableLines()
+            }
+            Report.line("measure probe_seconds=1.0")
+            _exit(0)
         }
     }
 
@@ -223,6 +446,83 @@ struct XcodeImageTests {
         #expect(left.isEmpty)
     }
 
+    /// Stops a data copy once a signal arrives, and copies the whole file without one.
+    @Test func stopsCopyOnSignal() throws {
+        let folder = try ImageFolder()
+        let directory = folder.base.root.deletingLastPathComponent()
+        let source = directory.appending(path: "large.xip")
+        try Data(repeating: 7, count: 4 << 20).write(to: source)
+        // Without COPYFILE_CLONE the copy writes data, as it does across volumes.
+        let flags = copyfile_flags_t(COPYFILE_DATA)
+        let whole = directory.appending(path: "whole.xip")
+        try ImageWorkspace.copy(source, to: whole, flags: flags, interrupted: StopFlag())
+        #expect(FileManager.default.contents(atPath: whole.path(percentEncoded: false))?.count == 4 << 20)
+
+        let interrupted = StopFlag()
+        interrupted.set()
+        #expect(throws: CommandError.interrupted) {
+            try ImageWorkspace.copy(
+                source,
+                to: directory.appending(path: "stopped.xip"),
+                flags: flags,
+                interrupted: interrupted,
+            )
+        }
+        let stopped = FileManager.default
+            .contents(atPath: directory.appending(path: "stopped.xip").path(percentEncoded: false))
+        #expect((stopped?.count ?? 0) < 4 << 20)
+    }
+
+    /// Names the step that a stopped VM ended, and accepts a shutdown that stops the VM before its
+    /// command returns.
+    @Test func namesStepThatTheVMStopped() async throws {
+        let stopped = XcodeImageSteps(guest: ScriptedGuest(replies: ["xip --expand": .cancelled]), deviceName: nil)
+        await #expect(throws: CommandError.imageStep(step: "expanding Xcode", reason: "the VM stopped")) {
+            try await stopped.run()
+        }
+        #expect(XcodeImageCommand.vmStopped(
+            .stoppedWithError(description: "disk error"),
+            during: .imageStep(step: "expanding Xcode", reason: "the VM stopped"),
+        ).description == "building the image failed while expanding Xcode: the VM stopped with an error: disk error")
+        let unnamed = XcodeImageCommand.vmStopped(.guestStopped, during: .library(.guestCommandCancelled))
+        #expect(unnamed == .stopped(.guestStopped))
+        #expect(CommandError.stopped(.guestStopped).description == "the guest shut down")
+
+        let guest = ScriptedGuest()
+        try await XcodeImageSteps(guest: guest, deviceName: nil).shutDown()
+        let shutdown = GuestCall(
+            command: "(sleep 1; /sbin/shutdown -h now) >/dev/null 2>&1 &",
+            asRoot: true,
+            timeLimit: .seconds(60),
+        )
+        #expect(await guest.calls == [shutdown])
+
+        // The build cancels the steps once the VM stops, and a guest that shut down that early
+        // still did what the step asked.
+        let early = XcodeImageSteps(guest: ScriptedGuest(replies: ["shutdown -h": .cancelled]), deviceName: nil)
+        let cancelled = await Task { () async -> CommandError? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do throws(CommandError) {
+                try await early.shutDown()
+                return nil
+            } catch {
+                return error
+            }
+        }.value
+        #expect(cancelled == nil)
+        await #expect(throws: CommandError.imageStep(step: "shutting down the guest", reason: "the VM stopped")) {
+            try await early.shutDown()
+        }
+    }
+
+    /// Stops a copy after a failed write instead of letting `copyfile` write again.
+    @Test func stopsCopyAfterFailedWrite() {
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_START, isInterrupted: false) == COPYFILE_CONTINUE)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_PROGRESS, isInterrupted: false) == COPYFILE_CONTINUE)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_PROGRESS, isInterrupted: true) == COPYFILE_QUIT)
+        #expect(ImageWorkspace.copyDecision(stage: COPYFILE_ERR, isInterrupted: false) == COPYFILE_QUIT)
+    }
+
     /// Publishes a ready image with the builds of the guest and the base.
     @Test func buildsImage() async throws {
         let folder = try ImageFolder()
@@ -232,8 +532,8 @@ struct XcodeImageTests {
             xcode: folder.xcode,
             runtime: folder.runtime,
             keepFailed: false,
-            interrupted: StopFlag(),
-        ) { building, inputs async throws(CommandError) in
+            watchSignals: Self.noSignals,
+        ) { building, inputs, _ async throws(CommandError) in
             #expect(building == workspace.building)
             #expect(FileManager.default.fileExists(atPath: inputs.appending(path: "Runtime.dmg").path))
             return XcodeImageBuilds(xcode: "27A266a", iosRuntime: "24A434")
@@ -244,29 +544,70 @@ struct XcodeImageTests {
         #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
     }
 
-    /// Deletes the clone when a signal arrives during the clone, or keeps it with `keepFailed`.
+    /// Watches signals from before the clone until after the cleanup, and deletes the clone after
+    /// a signal or keeps it with `keepFailed`.
     @Test func cleansUpAfterSignal() async throws {
         for keepFailed in [false, true] {
             let folder = try ImageFolder()
             let workspace = folder.workspace
-            let interrupted = StopFlag()
-            interrupted.set()
+            let stopped = StopFlag()
             await #expect(throws: CommandError.interrupted) {
                 try await workspace.build(
                     from: folder.base,
                     xcode: folder.xcode,
                     runtime: folder.runtime,
                     keepFailed: keepFailed,
-                    interrupted: interrupted,
-                ) { _, _ async throws(CommandError) in
+                    watchSignals: { interrupted in
+                        #expect(
+                            !FileManager.default
+                                .fileExists(atPath: workspace.building.root.path(percentEncoded: false)),
+                            "the signal watch started after the clone",
+                        )
+                        // The signal arrives as soon as the watch exists. That moment is before the clone.
+                        interrupted.set()
+                        let inputs = workspace.inputs.path(percentEncoded: false)
+                        return {
+                            #expect(
+                                !FileManager.default.fileExists(atPath: inputs),
+                                "the watch stopped before the cleanup",
+                            )
+                            stopped.set()
+                        }
+                    },
+                ) { _, _, _ async throws(CommandError) in
                     Issue.record("the guest part ran after the signal")
                     return XcodeImageBuilds(xcode: "1", iosRuntime: "1")
                 }
             }
+            #expect(stopped.isSet)
             #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
             #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
-            let kept = try VMBundle(root: workspace.image).imageRecord()
-            #expect(kept?.isReady == (keepFailed ? false : nil))
+            let failedRecord = try VMBundle(root: workspace.image).imageRecord()
+            #expect(failedRecord?.isReady == (keepFailed ? false : nil))
+        }
+    }
+
+    /// Keeps a failed step's error, and deletes the clone or keeps it with `keepFailed`.
+    @Test func cleansUpAfterFailedStep() async throws {
+        let failure = CommandError.imageStep(step: "expanding Xcode", reason: "ssh exited(1): no space")
+        for keepFailed in [false, true] {
+            let folder = try ImageFolder()
+            let workspace = folder.workspace
+            await #expect(throws: failure) {
+                try await workspace.build(
+                    from: folder.base,
+                    xcode: folder.xcode,
+                    runtime: folder.runtime,
+                    keepFailed: keepFailed,
+                    watchSignals: Self.noSignals,
+                ) { _, _, _ async throws(CommandError) in
+                    throw failure
+                }
+            }
+            #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
+            #expect(!FileManager.default.fileExists(atPath: workspace.inputs.path(percentEncoded: false)))
+            let failedRecord = try VMBundle(root: workspace.image).imageRecord()
+            #expect(failedRecord?.isReady == (keepFailed ? false : nil))
         }
     }
 
@@ -280,8 +621,8 @@ struct XcodeImageTests {
                 xcode: folder.xcode,
                 runtime: folder.runtime,
                 keepFailed: false,
-                interrupted: StopFlag(),
-            ) { _, _ async throws(CommandError) in
+                watchSignals: Self.noSignals,
+            ) { _, _, _ async throws(CommandError) in
                 // Another process takes the name while the guest builds.
                 try? FileManager.default.createDirectory(at: workspace.image, withIntermediateDirectories: true)
                 return XcodeImageBuilds(xcode: "27A266a", iosRuntime: "24A434")
@@ -295,15 +636,54 @@ struct XcodeImageTests {
         #expect(!FileManager.default.fileExists(atPath: workspace.building.root.path(percentEncoded: false)))
     }
 
-    /// Deletes the clone of a failed build.
+    /// Deletes the clone and the inputs of a failed build, and reports when it could not.
     @Test func discardsClone() throws {
         let folder = try ImageFolder()
         _ = try folder.workspace.prepare(base: folder.base)
         try folder.workspace.cloneBase(folder.base)
-        folder.workspace.discard()
+        try FileManager.default.createDirectory(at: folder.workspace.inputs, withIntermediateDirectories: false)
+        let images = folder.directory.imagesDirectory.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images)
+        #expect(!folder.workspace.discard())
+        #expect(!folder.workspace.removeInputs())
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images)
+        #expect(folder.workspace.discard())
+        #expect(folder.workspace.removeInputs())
         #expect(!FileManager.default.fileExists(atPath: folder.workspace.building.root.path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: folder.base.root.path(percentEncoded: false)))
     }
+
+    /// Starts a signal watch that never sets the flag it receives.
+    ///
+    /// - Returns: The function that stops the watch.
+    private static func noSignals(_: StopFlag) -> @Sendable () -> Void {
+        {}
+    }
+}
+
+/// Opens a terminal and closes its controlling side, as closing a terminal window does.
+///
+/// - Returns: The descriptor of the terminal's other side. A write to it fails with `EIO`.
+private func closedTerminal() -> Int32 {
+    var primary: Int32 = -1
+    var secondary: Int32 = -1
+    guard openpty(&primary, &secondary, nil, nil, nil) == 0 else {
+        _exit(7)
+    }
+    close(primary)
+    return secondary
+}
+
+/// Opens a pipe and closes its read end, as a `tee` that ended does.
+///
+/// - Returns: The write end. A write to it raises `SIGPIPE` or fails with `EPIPE`.
+private func closedPipe() -> Int32 {
+    var ends: [Int32] = [-1, -1]
+    guard pipe(&ends) == 0 else {
+        _exit(8)
+    }
+    close(ends[0])
+    return ends[1]
 }
 
 /// One recorded guest command.
@@ -325,6 +705,9 @@ private enum GuestReply {
 
     /// The command exits with the code and prints the error output.
     case failure(Int32, String)
+
+    /// The build cancelled the command, as it does after the VM stops.
+    case cancelled
 }
 
 /// A guest that records each command and replies as if every step works.
@@ -378,6 +761,8 @@ private actor ScriptedGuest: ImageGuest {
             GuestCommandResult(status: .exited(0), output: output, errorOutput: "")
         case let .failure(code, errorOutput):
             GuestCommandResult(status: .exited(code), output: "", errorOutput: errorOutput)
+        case .cancelled:
+            throw .guestCommandCancelled
         }
     }
 

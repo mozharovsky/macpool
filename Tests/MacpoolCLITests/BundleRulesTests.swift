@@ -16,6 +16,25 @@ struct BundleRulesTests {
         #expect(!FileManager.default.fileExists(atPath: directory.bundle.guestAccountFile.path(percentEncoded: false)))
     }
 
+    /// Refuses shares that include the default data directory, the bundle, or the executable.
+    @Test func refusesSharesThatReachHostFiles() async throws {
+        let directory = try BundleDirectory(hasBooted: false)
+        let shares = try [
+            (FileManager.default.homeDirectoryForCurrentUser, "macpool's data directory"),
+            (directory.bundle.root.deletingLastPathComponent(), "includes the source"),
+            (Executable.current().deletingLastPathComponent(), "includes the macpool executable"),
+        ]
+        for (shared, reason) in shares {
+            let arguments = ["run", "--bundle", directory.path, "--share", shared.path(percentEncoded: false)]
+            let command = try #require(try Macpool.parseAsRoot(arguments) as? RunCommand)
+            await #expect {
+                try await command.run()
+            } throws: { error in
+                "\(error)".contains(reason)
+            }
+        }
+    }
+
     /// Refuses provisioning that a booted guest would ignore, before it writes an account.
     @Test func refusesProvisioningAfterFirstBoot() async throws {
         let directory = try BundleDirectory(hasBooted: true)
