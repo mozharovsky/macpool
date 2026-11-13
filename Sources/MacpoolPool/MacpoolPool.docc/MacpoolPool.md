@@ -159,7 +159,8 @@ the rename that puts the new list in place. When the list holds the new record u
 pairing succeeds. Otherwise the pairing fails, and only the inviting connection receives the reason.
 If the list cannot be read again, the list may still name the client. The inviting connection then
 receives a reason that says so. Check the list once it can be read, or pair the client again with a
-new code.
+new code. If the daemon keeps an unsaved block of the client, a new code works only after the daemon
+restarts, and the reason says so.
 
 A pairing that succeeds after a failed save may not survive a loss of power, because the file system
 may not have stored the rename yet. The client then pairs again with a new code.

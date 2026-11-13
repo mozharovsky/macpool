@@ -793,9 +793,14 @@ public actor PoolDaemon {
                             "reason": "\(error)",
                         ],
                     )
+                    // A new code fails for a Mac with an unsaved block until a restart clears the block.
+                    let advice = unsavedBlocks.contains(key)
+                        ? "The host refuses the Mac until the daemon restarts, because it could not save an earlier "
+                        + "revocation. Check the list once it can be read, and pair the Mac again with a new code "
+                        + "after the restart"
+                        : "Check the list once it can be read, or pair the Mac again with a new code"
                     let reason = "the host cannot tell whether it recorded the pairing: \(saveError). Reading its "
-                        + "list of paired Macs again failed: \(error). The list may name the Mac. Check the list "
-                        + "once it can be read, or pair the Mac again with a new code"
+                        + "list of paired Macs again failed: \(error). The list may name the Mac. \(advice)"
                     reply(.failure(reason), to: inviter)
                     return .failure("the host cannot record the pairing")
                 }
