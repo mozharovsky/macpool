@@ -210,8 +210,11 @@ struct RevocationTests {
     }
 
     /// Keeps the block in memory and advises another revocation when the save fails and the list
-    /// cannot be read again.
-    @Test func reportsABlockWhenTheListCannotBeReadAfterAFailedSave() async throws {
+    /// read again holds no block of the Mac.
+    ///
+    /// - Parameter list: The list that the daemon reads after the failed save.
+    @Test(arguments: ListAfterAFailedSave.allCases)
+    func reportsABlockThatTheListDoesNotHold(_ list: ListAfterAFailedSave) async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
         let owner = try LeaseLedgerTests.paired("a")
@@ -219,14 +222,12 @@ struct RevocationTests {
             return
         }
         let remote = try await pool.pairedClient(of: daemon, owner: owner)
-        try Self.failSaves(in: pool) { directory in
-            try Data("{".utf8).write(to: TrustList<TrustedClient>.file(in: directory))
-        }
+        try Self.failSaves(in: pool) { try list.write(in: $0) }
         defer { try? Self.setImmutable(false, listIn: pool.directory) }
 
         do {
             _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
-            Issue.record("the revocation succeeded without a readable list")
+            Issue.record("the revocation succeeded without a block in the list")
         } catch let .daemonRefused(message) {
             #expect(message
                 .hasPrefix("the host closed the Mac's connections, but the save of the block failed"))
@@ -235,8 +236,33 @@ struct RevocationTests {
         #expect(try await next(remote) == Self.notAccepted)
         #expect(try await isClosed(remote))
         #expect(await daemon.unsavedBlocks == [key])
-        #expect(pool.logs.entries(Self.unblocked).map(\.level) == [.error])
+        let logs = pool.logs
+        #expect(logs.entries(Self.unblocked).map(\.level) == [.error])
+        let unread = logs.entries("The host cannot read the list of paired Macs after a failed save")
+        #expect(unread.map(\.level) == (list == .unreadable ? [.error] : []))
         await daemon.shutdown()
+    }
+
+    /// A list without a block of the revoked Mac that a test writes after a failed save.
+    enum ListAfterAFailedSave: CaseIterable, Sendable {
+        /// A file that holds no list.
+        case unreadable
+        /// A list without a record of the Mac. A person who edits the list during the save can
+        /// write it.
+        case withoutTheRecord
+
+        /// Writes the list's file.
+        ///
+        /// - Parameter directory: The host's data directory.
+        /// - Throws: An error when the file cannot be written.
+        func write(in directory: PoolDirectory) throws {
+            switch self {
+            case .unreadable:
+                try Data("{".utf8).write(to: TrustList<TrustedClient>.file(in: directory))
+            case .withoutTheRecord:
+                try TrustList<TrustedClient>().save(to: directory)
+            }
+        }
     }
 
     /// Saves a block a second time after the revocation ended the Mac's leases. Here the first

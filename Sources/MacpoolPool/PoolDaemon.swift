@@ -269,8 +269,9 @@ public actor PoolDaemon {
     /// The keys of revoked Macs whose block the daemon could not save.
     ///
     /// The daemon refuses these keys like blocked records until it restarts. It removes a key
-    /// when a later revocation saves the block. It also removes the key when a person deletes the
-    /// Mac's record and the Mac pairs again with a new code.
+    /// when a later revocation saves the block, or when that save fails and the list read again
+    /// holds the block. It also removes the key when a person deletes the Mac's record and the Mac
+    /// pairs again with a new code.
     private(set) var unsavedBlocks: Set<KeyFingerprint> = []
 
     /// The connected clients.
@@ -1057,9 +1058,9 @@ public actor PoolDaemon {
     ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
     /// - Returns: The reply to the local user.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key, when a short
-    ///   key names more than one Mac, or when the daemon closed the connections without saving a
-    ///   block. The errors of ``TrustList/load(from:)`` propagate when no connected Mac or owner of
-    ///   a lease has the key.
+    ///   key names more than one Mac, or when the daemon closed the connections and its list holds
+    ///   no block of the Mac. The errors of ``TrustList/load(from:)`` propagate when no connected
+    ///   Mac or owner of a lease has the key.
     private func revoke(_ text: String, endLeases: Bool) throws(PoolError) -> PoolReply {
         let list: TrustList<TrustedClient>
         do throws(PoolError) {
@@ -1099,7 +1100,19 @@ public actor PoolDaemon {
             // the directory cannot be flushed. The file then holds the block, and the advice to
             // revoke again would be wrong. The check reads only the record's flag, because only the
             // flag decides whether the host refuses the Mac.
-            let saved = try? TrustList<TrustedClient>.load(from: configuration.directory)
+            let saved: TrustList<TrustedClient>?
+            do throws(PoolError) {
+                saved = try TrustList<TrustedClient>.load(from: configuration.directory)
+            } catch {
+                configuration.logger.error(
+                    "The host cannot read the list of paired Macs after a failed save",
+                    metadata: [
+                        "key": "\(record.key)",
+                        "reason": "\(error)",
+                    ],
+                )
+                saved = nil
+            }
             guard saved?[record.key]?.isBlocked == true else {
                 unsavedBlocks.insert(record.key)
                 logUnblocked(record.key, ended, reason: "\(saveError)")
