@@ -109,13 +109,7 @@ struct ListCommand: AsyncParsableCommand {
             throw .pool(.malformedMessage(reason: "unexpected reply to list"))
         }
         if json {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            encoder.dateEncodingStrategy = .iso8601
-            guard let data = try? encoder.encode(summary) else {
-                throw .pool(.malformedMessage(reason: "the pool summary cannot be encoded"))
-            }
-            Report.line(String(decoding: data, as: UTF8.self))
+            try Report.line(LeaseOutput.json(summary, describing: "the pool summary"))
         } else {
             for line in LeaseOutput.table(summary) {
                 Report.line(line)
@@ -147,6 +141,26 @@ enum LeaseOutput {
     /// - Returns: The time, such as `2026-11-09T18:20:00Z`.
     static func timestamp(_ date: Date) -> String {
         date.formatted(.iso8601)
+    }
+
+    /// Encodes a value as JSON with sorted keys and ISO 8601 times.
+    ///
+    /// Strings keep their exact text. Scalars that a terminal would act on appear as escapes. See
+    /// ``PeerText/escapedJSON(_:)``.
+    ///
+    /// - Parameters:
+    ///   - value: The value to encode.
+    ///   - name: What the value holds, for the error message, such as `the pool summary`.
+    /// - Returns: The JSON text.
+    /// - Throws: ``CommandError/pool(_:)`` when the value cannot be encoded.
+    static func json(_ value: some Encodable, describing name: String) throws(CommandError) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(value) else {
+            throw .pool(.malformedMessage(reason: "\(name) cannot be encoded"))
+        }
+        return PeerText.escapedJSON(String(decoding: data, as: UTF8.self))
     }
 
     /// Formats the pool as tables of leases and images, with one line per queued request.
@@ -186,15 +200,20 @@ enum LeaseOutput {
 
     /// Pads every column but the last to its widest cell.
     ///
+    /// The isolates of ``PeerText`` take no room in a terminal and add nothing to a width.
+    ///
     /// - Parameter rows: The rows, each with the same number of cells.
     /// - Returns: One line per row, with two spaces between columns.
-    private static func aligned(_ rows: [[String]]) -> [String] {
-        let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
+    static func aligned(_ rows: [[String]]) -> [String] {
+        // String.padding(toLength:) counts UTF-16 units and would cut a name with an emoji.
+        let width = { (cell: String) in
+            cell.count { $0 != PeerText.isolateStart && $0 != PeerText.isolateEnd }
+        }
+        let widths = rows[0].indices.map { column in rows.map { width($0[column]) }.max() ?? 0 }
         return rows.map { row in
             row.indices.map { column in
-                // String.padding(toLength:) counts UTF-16 units and would cut a name with an emoji.
                 column == row.count - 1 ? row[column]
-                    : row[column] + String(repeating: " ", count: widths[column] - row[column].count)
+                    : row[column] + String(repeating: " ", count: widths[column] - width(row[column]))
             }.joined(separator: "  ")
         }
     }

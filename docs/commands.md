@@ -1,8 +1,8 @@
 # Commands
 
-This page lists the commands that prepare, boot, and clone VMs, and the scripts that reach a
-guest. The daemon's commands are in [Leases and the daemon](leases.md), and `image xcode` is in
-[Xcode images](xcode-image.md).
+This page lists the commands that prepare, boot, and clone VMs, the commands that list paired
+Macs, and the scripts that reach a guest. The daemon's commands are in
+[Leases and the daemon](leases.md), and `image xcode` is in [Xcode images](xcode-image.md).
 
 `macpool --help` lists the commands, and `macpool help COMMAND` shows a command's options.
 `macpool --version` prints the version. The examples keep images and bundles in the ignored
@@ -106,6 +106,40 @@ Scripts/shutdown.sh .cache/vms/job1
 
 `Scripts/shutdown.sh` returns before the guest stops. Wait until `run` exits, and then delete the
 clone with `rm -rf .cache/vms/job1`.
+
+## host list
+
+`macpool host list` prints the Macs that paired with this Mac as clients. It reads
+`trust/clients.json` in the data directory and needs no running daemon. Without paired clients it
+prints `no paired clients`.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory that holds the list. |
+| `--json` | off | Prints the records as one JSON array. |
+
+Each row shows when the client paired, whether this Mac blocks it, its priority ceiling, its short
+key, such as `mzxw-6ytb-oi2d-k3lq`, and its name. Names aren't unique, so compare the short key in
+the `KEY` column. A name can contain text that looks like a short key.
+
+The other Mac chose its name. The table shows each character that pairing refuses in a name as an
+escape such as `\u{202E}`, and a backslash as two. These are control and format characters, line
+and paragraph separators, private-use and unassigned characters, and invisible characters such as
+variation selectors. The table also puts the name between the invisible isolates U+2068 and U+2069.
+Right-to-left letters then don't reorder the columns.
+
+`--json` keeps the exact names and the full keys. It writes the same characters as JSON escapes
+such as `\u202E`. A JSON parser reads them back as the original text.
+
+## pool list
+
+`macpool pool list` prints the hosts that this Mac paired with. It reads `trust/hosts.json` in the
+data directory and needs no running daemon. Without paired hosts it prints `no paired hosts`. It
+takes the same `--data-dir` and `--json` options as `host list`.
+
+Each row shows when this Mac paired, the host's address and port from the pairing code, the host's
+short key, and its name. The host chose its name and its address. The table escapes and isolates
+both like a client's name in `host list`.
 
 ## Scripts
 
