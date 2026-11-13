@@ -530,6 +530,20 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
     case revoke(key: String, endLeases: Bool = false)
 
+    /// Asks the host to forget the sending Mac.
+    ///
+    /// Only a paired Mac may send this request. If the Mac has leases and `endLeases` is not set,
+    /// the daemon refuses the request. Otherwise it removes the Mac's record, ends the leases,
+    /// replies with ``PoolReply/forgotten(leases:)``, and closes every connection of the Mac. The
+    /// Mac can then return only with a new pairing code.
+    ///
+    /// If the daemon cannot read its list of paired Macs, it refuses the request and changes
+    /// nothing. The same holds when a save fails and the list still names the Mac. If a save
+    /// fails after the rename that removed the Mac's record, the daemon forgets the Mac.
+    ///
+    /// - Parameter endLeases: Whether the daemon ends the Mac's leases.
+    case forget(endLeases: Bool = false)
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -548,7 +562,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case name
         /// The key of a Mac to revoke.
         case key
-        /// Whether a revocation ends detached leases.
+        /// Whether a revocation or a request to forget ends leases.
         case endLeases = "end_leases"
     }
 
@@ -585,6 +599,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
                 key: container.decode(String.self, forKey: .key),
                 endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false,
             )
+        case "forget":
+            self = try .forget(endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false)
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -626,6 +642,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case let .revoke(key, endLeases):
             try container.encode("revoke", forKey: .request)
             try container.encode(key, forKey: .key)
+            try container.encode(endLeases, forKey: .endLeases)
+        case let .forget(endLeases):
+            try container.encode("forget", forKey: .request)
             try container.encode(endLeases, forKey: .endLeases)
         }
     }
@@ -830,6 +849,11 @@ public enum PoolReply: Sendable, Equatable, Codable {
     ///   - leases: The number of the Mac's leases that the revocation ended.
     case revoked(PairedMac, connections: Int, leases: Int)
 
+    /// The host forgot the sending Mac and closes its connections.
+    ///
+    /// - Parameter leases: The number of the Mac's leases that the request ended.
+    case forgotten(leases: Int)
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -852,7 +876,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case mac
         /// The number of connections that a revocation closed.
         case connections
-        /// The number of leases that a revocation ended.
+        /// The number of leases that a revocation or a request to forget ended.
         case leases
     }
 
@@ -905,6 +929,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
                 connections: container.decode(Int.self, forKey: .connections),
                 leases: container.decode(Int.self, forKey: .leases),
             )
+        case "forgotten":
+            self = try .forgotten(leases: container.decode(Int.self, forKey: .leases))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -931,6 +957,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case .alreadyPaired: "already_paired"
         case .wrongCode: "wrong_code"
         case .revoked: "revoked"
+        case .forgotten: "forgotten"
         }
     }
 
@@ -968,6 +995,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case let .revoked(mac, connections, leases):
             try container.encode(mac, forKey: .mac)
             try container.encode(connections, forKey: .connections)
+            try container.encode(leases, forKey: .leases)
+        case let .forgotten(leases):
             try container.encode(leases, forKey: .leases)
         }
     }
