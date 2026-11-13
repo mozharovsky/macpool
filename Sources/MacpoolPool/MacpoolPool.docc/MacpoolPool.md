@@ -191,11 +191,15 @@ detached lease whose VM was ready runs on until it expires, unless `endLeases` i
 unblocks a client. It cannot pair again while its record stays in `clients.json`.
 
 If the first save of the block fails, the daemon saves it once more after it closed the connections.
-If that save fails too, the daemon still closes the client's connections and ends the same leases as
-a saved revocation. The request then fails with the reason. The daemon keeps the block in memory and
-refuses the client until the daemon restarts. Revoke the client again once the list can be saved. If
-a person deletes the client's record from `clients.json` and the client pairs again with a new code,
-the daemon drops that block.
+If that save fails too, the daemon reads the list again, because a save can fail after the rename
+that puts the new list in place. When the client's record is blocked, the revocation succeeds. Such
+a block may not survive a loss of power, because the file system may not have stored the rename yet.
+
+When the list read again has no blocked record of the client or cannot be read, the daemon still
+closes the client's connections and ends the same leases as a saved revocation. The request then
+fails with the reason. The daemon keeps the block in memory and refuses the client until the daemon
+restarts. Revoke the client again once the list can be saved. If a person deletes the client's
+record from `clients.json` and the client pairs again with a new code, the daemon drops that block.
 
 If the list cannot be read and a client with the key is connected or holds a lease, the daemon
 closes the client's connections, ends the same leases, and keeps the block in memory. The request

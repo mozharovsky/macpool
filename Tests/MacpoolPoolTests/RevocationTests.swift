@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 @testable import MacpoolPool
 import Testing
 
@@ -12,6 +13,12 @@ struct RevocationTests {
     /// The end of a revocation's failure when the daemon keeps the block only in memory.
     static let staysBlocked = "The Mac stays blocked until the daemon restarts. Revoke it again once the list can be "
         + "saved"
+
+    /// The log message of a revocation's last failed save.
+    static let failedSave = "The host cannot save the list of paired Macs for a revocation"
+
+    /// The log message of a revocation that keeps the block only in memory or blocks nothing.
+    static let unblocked = "The host closed a revoked Mac's connections but cannot block it"
 
     /// Blocks a Mac with two connections, a waiting request, an attached lease, and a detached
     /// lease. The connections close, the request leaves the queue, and the attached lease ends.
@@ -149,6 +156,9 @@ struct RevocationTests {
         #expect(try await isClosed(remote))
         #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == false)
         #expect(await daemon.unsavedBlocks == [key])
+        let logs = pool.logs
+        #expect(logs.entries(Self.failedSave).map(\.level) == [.error])
+        #expect(logs.entries(Self.unblocked).map(\.level) == [.error])
 
         try Self.setImmutable(false, listIn: pool.directory)
         let late = try await pool.pairedClient(of: daemon, owner: owner)
@@ -160,6 +170,99 @@ struct RevocationTests {
         #expect(await daemon.unsavedBlocks.isEmpty)
         #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
         await daemon.shutdown()
+    }
+
+    /// Revokes a Mac when the save fails after the rename that puts the list with the block in
+    /// place. The reply is the reply of a saved block, and the revocation ends the block that an
+    /// earlier revocation kept in memory. The log records the failed save at the error level and
+    /// no unsaved block.
+    @Test func revokesWhenTheSaveFailsAfterTheRename() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        }
+        #expect(try await next(remote) == Self.notAccepted)
+        #expect(try await isClosed(remote))
+        #expect(await daemon.unsavedBlocks == [key])
+        try Self.failSaves(in: pool) { directory in
+            var list = try TrustList<TrustedClient>.load(from: directory)
+            list.block(key)
+            try list.save(to: directory)
+        }
+
+        let revoked = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        #expect(revoked == .revoked(PairedMac(name: "client", key: key), connections: 0, leases: 0))
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
+        #expect(await daemon.unsavedBlocks.isEmpty)
+        let logs = pool.logs
+        #expect(logs.entries(Self.failedSave).map(\.level) == [.error, .error])
+        #expect(logs.entries(Self.unblocked).count == 1)
+        #expect(logs.entries("Revoked a paired Mac").count == 1)
+        await daemon.shutdown()
+    }
+
+    /// Keeps the block in memory and advises another revocation when the save fails and the list
+    /// read again holds no block of the Mac.
+    ///
+    /// - Parameter list: The list that the daemon reads after the failed save.
+    @Test(arguments: ListAfterAFailedSave.allCases)
+    func reportsABlockThatTheListDoesNotHold(_ list: ListAfterAFailedSave) async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let remote = try await pool.pairedClient(of: daemon, owner: owner)
+        try Self.failSaves(in: pool) { try list.write(in: $0) }
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+
+        do {
+            _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+            Issue.record("the revocation succeeded without a block in the list")
+        } catch let .daemonRefused(message) {
+            #expect(message
+                .hasPrefix("the host closed the Mac's connections, but the save of the block failed"))
+            #expect(message.hasSuffix(Self.staysBlocked))
+        }
+        #expect(try await next(remote) == Self.notAccepted)
+        #expect(try await isClosed(remote))
+        #expect(await daemon.unsavedBlocks == [key])
+        let logs = pool.logs
+        #expect(logs.entries(Self.unblocked).map(\.level) == [.error])
+        let unread = logs.entries("The host cannot read the list of paired Macs after a failed save")
+        #expect(unread.map(\.level) == (list == .unreadable ? [.error] : []))
+        await daemon.shutdown()
+    }
+
+    /// A list without a block of the revoked Mac that a test writes after a failed save.
+    enum ListAfterAFailedSave: CaseIterable, Sendable {
+        /// A file that holds no list.
+        case unreadable
+        /// A list without a record of the Mac. A person who edits the list during the save can
+        /// write it.
+        case withoutTheRecord
+
+        /// Writes the list's file.
+        ///
+        /// - Parameter directory: The host's data directory.
+        /// - Throws: An error when the file cannot be written.
+        func write(in directory: PoolDirectory) throws {
+            switch self {
+            case .unreadable:
+                try Data("{".utf8).write(to: TrustList<TrustedClient>.file(in: directory))
+            case .withoutTheRecord:
+                try TrustList<TrustedClient>().save(to: directory)
+            }
+        }
     }
 
     /// Saves a block a second time after the revocation ended the Mac's leases. Here the first
@@ -388,6 +491,28 @@ struct RevocationTests {
         #expect(records.map(\.key) == [blockedKey])
         #expect(records.map(\.isBlocked) == [true])
         await daemon.shutdown()
+    }
+
+    /// Makes the saves of a revocation fail and changes the list after the last failed save.
+    ///
+    /// No test can fail the flush after the rename. The rename fails on the immutable file
+    /// instead, and `change` then writes the file. A list with the block then matches the file
+    /// after a rename and a failed flush.
+    ///
+    /// - Parameters:
+    ///   - pool: The host whose saves fail.
+    ///   - change: Writes the list's file after the flag is cleared.
+    /// - Throws: `POSIXError` when the flag cannot be set.
+    static func failSaves(
+        in pool: PoolFixture,
+        then change: @escaping @Sendable (PoolDirectory) throws -> Void,
+    ) throws {
+        let directory = pool.directory
+        try setImmutable(true, listIn: directory)
+        pool.logs.whenLogged(failedSave) {
+            try? setImmutable(false, listIn: directory)
+            try? change(directory)
+        }
     }
 
     /// Sets or clears the user immutable flag of the list of paired clients.

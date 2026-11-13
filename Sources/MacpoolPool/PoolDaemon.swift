@@ -269,8 +269,9 @@ public actor PoolDaemon {
     /// The keys of revoked Macs whose block the daemon could not save.
     ///
     /// The daemon refuses these keys like blocked records until it restarts. It removes a key
-    /// when a later revocation saves the block. It also removes the key when a person deletes the
-    /// Mac's record and the Mac pairs again with a new code.
+    /// when a later revocation saves the block, or when that save fails and the list read again
+    /// holds the block. It also removes the key when a person deletes the Mac's record and the Mac
+    /// pairs again with a new code.
     private(set) var unsavedBlocks: Set<KeyFingerprint> = []
 
     /// The connected clients.
@@ -1041,7 +1042,11 @@ public actor PoolDaemon {
     ///
     /// If `endLeases` is set, the daemon also ends the Mac's detached leases. If the first save of
     /// the block fails, the daemon saves it once more after it closed the connections. If that
-    /// save also fails, the daemon keeps the block in ``unsavedBlocks`` and reports the failure.
+    /// save also fails, the daemon reads the list again. When the Mac's record in the list is
+    /// blocked, the revocation succeeds as after a save that succeeded. Otherwise the daemon keeps
+    /// the block in ``unsavedBlocks`` and reports the failure. A block that the daemon finds this
+    /// way may not survive a loss of power, because the file system may not have stored the
+    /// rename yet.
     ///
     /// If the list cannot be read or has no record of the key, the daemon looks for the key among
     /// the connected Macs and the owners of leases. It closes that Mac's connections and ends the
@@ -1053,9 +1058,9 @@ public actor PoolDaemon {
     ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
     /// - Returns: The reply to the local user.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key, when a short
-    ///   key names more than one Mac, or when the daemon closed the connections without saving a
-    ///   block. The errors of ``TrustList/load(from:)`` propagate when no connected Mac or owner of
-    ///   a lease has the key.
+    ///   key names more than one Mac, or when the daemon closed the connections and its list holds
+    ///   no block of the Mac. The errors of ``TrustList/load(from:)`` propagate when no connected
+    ///   Mac or owner of a lease has the key.
     private func revoke(_ text: String, endLeases: Bool) throws(PoolError) -> PoolReply {
         let list: TrustList<TrustedClient>
         do throws(PoolError) {
@@ -1087,10 +1092,33 @@ public actor PoolDaemon {
             saveError = save(blocked)
         }
         if let saveError {
-            unsavedBlocks.insert(record.key)
-            logUnblocked(record.key, ended, reason: "\(saveError)")
-            throw .invalidRequest(reason: "the host closed the Mac's connections, but the save of the block "
-                + "failed: \(saveError). \(Self.revokeAgain)")
+            configuration.logger.error("The host cannot save the list of paired Macs for a revocation", metadata: [
+                "key": "\(record.key)",
+                "reason": "\(saveError)",
+            ])
+            // A save can fail after the rename that puts the new list in place, for example when
+            // the directory cannot be flushed. The file then holds the block, and the advice to
+            // revoke again would be wrong. The check reads only the record's flag, because only the
+            // flag decides whether the host refuses the Mac.
+            let saved: TrustList<TrustedClient>?
+            do throws(PoolError) {
+                saved = try TrustList<TrustedClient>.load(from: configuration.directory)
+            } catch {
+                configuration.logger.error(
+                    "The host cannot read the list of paired Macs after a failed save",
+                    metadata: [
+                        "key": "\(record.key)",
+                        "reason": "\(error)",
+                    ],
+                )
+                saved = nil
+            }
+            guard saved?[record.key]?.isBlocked == true else {
+                unsavedBlocks.insert(record.key)
+                logUnblocked(record.key, ended, reason: "\(saveError)")
+                throw .invalidRequest(reason: "the host closed the Mac's connections, but the save of the block "
+                    + "failed: \(saveError). \(Self.revokeAgain)")
+            }
         }
         unsavedBlocks.remove(record.key)
         configuration.logger.notice("Revoked a paired Mac", metadata: [
