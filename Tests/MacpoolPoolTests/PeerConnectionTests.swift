@@ -646,6 +646,32 @@ struct PeerConnectionTests {
         await daemon.shutdown()
     }
 
+    /// Keeps serving the local socket and opens no listener for paired Macs while the process may
+    /// open fewer than 1024 files. A request for an invitation names the reason.
+    @Test func keepsTheLocalSocketWithFewOpenFiles() async throws {
+        let fixture = try PoolFixture()
+        let daemon = try fixture.daemon(peers: loopbackSettings())
+        try await daemon.start(openFileLimit: 512)
+
+        let reason = "the daemon may open only 512 files, and the listener for paired Macs needs 1024"
+        let failures = { fixture.logs.entries("The listener for paired Macs cannot start") }
+        #expect(await eventually { !failures().isEmpty })
+        #expect(failures().map { $0.metadata["reason"] } == [reason])
+        guard case .status = try await PoolClient.send(.status, to: fixture.directory) else {
+            Issue.record("the local socket did not answer")
+            return
+        }
+        let refusal = PoolError.invalidRequest(reason: "the host does not listen for paired Macs: \(reason)")
+        await #expect(throws: PoolError.daemonRefused(message: refusal.description)) {
+            try await PoolClient.send(.invite(address: "127.0.0.1"), to: fixture.directory)
+        }
+        // Several attempts fail the same way and log once.
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(failures().count == 1)
+        #expect(await daemon.peerPort == nil)
+        await daemon.shutdown()
+    }
+
     /// Refuses the new connections of a blocked key and closes its open connection at the next
     /// request.
     @Test func closesABlockedKeyAtItsNextRequest() async throws {

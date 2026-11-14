@@ -43,6 +43,11 @@ import Synchronization
 /// paired Mac proves its key in a TLS handshake, receives a greeting with the protocol version,
 /// and then exchanges the same lines as a local client.
 ///
+/// ``start()`` raises the process's soft limit of open files to 4096, or to the hard limit or
+/// `kern.maxfilesperproc` when either is lower. It never lowers the limit. If the process may
+/// open fewer than 1024 files, the daemon does not listen for paired Macs and serves only the
+/// local socket.
+///
 /// After the daemon handles a request, it waits until the messages that it sent to the client so
 /// far left, and only then reads the next request. Lease events sent later do not extend the
 /// wait. A client that stops reading therefore stalls only its own connection.
@@ -236,6 +241,10 @@ public actor PoolDaemon {
     /// The listener for paired Macs while it listens.
     private var peerListener: PeerListener?
 
+    /// The number of files that the process may open, which ``start()`` reads after it raised
+    /// the limit, or `nil` when the limit cannot be read.
+    private var openFileLimit: rlim_t?
+
     /// Why the listener for paired Macs last failed to start, or `nil` after it started.
     ///
     /// The daemon logs a failure only when its reason differs from this one. A failure that
@@ -366,10 +375,22 @@ public actor PoolDaemon {
         loggedPhases = ledger.leases.mapValues(\.phase)
     }
 
-    /// Resumes the stored leases and starts accepting clients.
+    /// Raises the limit of open files, resumes the stored leases, and starts accepting clients.
     ///
     /// - Throws: ``PoolError`` when the client socket cannot listen.
     public func start() async throws(PoolError) {
+        try await start(openFileLimit: OpenFileLimit.raise())
+    }
+
+    /// Resumes the stored leases and starts accepting clients with a given limit of open files.
+    ///
+    /// Tests pass a low limit here instead of lowering the limit of their own process.
+    ///
+    /// - Parameter openFileLimit: The number of files that the process may open, or `nil` when
+    ///   the limit cannot be read.
+    /// - Throws: ``PoolError`` when the client socket cannot listen.
+    func start(openFileLimit: rlim_t?) async throws(PoolError) {
+        self.openFileLimit = openFileLimit
         removeOrphans()
         pruneLogs()
         perform(ledger.recover(now: configuration.now()))
@@ -379,6 +400,7 @@ public actor PoolDaemon {
             "socket": "\(configuration.directory.daemonSocket.path(percentEncoded: false))",
             "slots": "\(configuration.policy.slots)",
             "leases": "\(ledger.leases.count)",
+            "open_files": openFileLimit.map { "\($0)" } ?? "unknown",
         ])
         loops.append(Task { [weak self] in
             for await channel in listener.connections {
@@ -511,11 +533,15 @@ public actor PoolDaemon {
     /// A failure is logged once until its reason changes or the listener starts.
     ///
     /// - Parameter settings: The address and the port.
-    /// - Returns: The listener, ``PeerListenerAttempt/failed`` when the key, the list, or the port
-    ///   failed, or ``PeerListenerAttempt/stopped`` after ``shutdown()``.
+    /// - Returns: The listener, ``PeerListenerAttempt/failed`` when the limit of open files is too
+    ///   low or the key, the list, or the port failed, or ``PeerListenerAttempt/stopped`` after
+    ///   ``shutdown()``.
     private func openPeerListener(_ settings: PeerSettings) async -> PeerListenerAttempt {
         guard !isShutDown else {
             return .stopped
+        }
+        if let refusal = OpenFileLimit.peerRefusal(for: openFileLimit) {
+            return peerListenerFailed(refusal)
         }
         let started: PeerListener
         do throws(PoolError) {
@@ -537,13 +563,7 @@ public actor PoolDaemon {
                 return invitation.isOpen(at: now())
             }
         } catch {
-            if peerListenerFailure != error.description {
-                peerListenerFailure = error.description
-                configuration.logger.error("The listener for paired Macs cannot start", metadata: [
-                    "reason": "\(error)",
-                ])
-            }
-            return .failed
+            return peerListenerFailed(error.description)
         }
         guard !isShutDown else {
             started.close()
@@ -556,6 +576,21 @@ public actor PoolDaemon {
             "port": "\(started.port)",
         ])
         return .listening(started)
+    }
+
+    /// Logs why the listener for paired Macs cannot start, unless the last attempt failed for the
+    /// same reason.
+    ///
+    /// - Parameter reason: Why the listener cannot start.
+    /// - Returns: ``PeerListenerAttempt/failed``.
+    private func peerListenerFailed(_ reason: String) -> PeerListenerAttempt {
+        if peerListenerFailure != reason {
+            peerListenerFailure = reason
+            configuration.logger.error("The listener for paired Macs cannot start", metadata: [
+                "reason": "\(reason)",
+            ])
+        }
+        return .failed
     }
 
     /// Forgets a listener for paired Macs that stopped accepting connections.
