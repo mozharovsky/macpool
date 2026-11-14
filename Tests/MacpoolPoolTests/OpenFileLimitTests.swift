@@ -48,6 +48,43 @@ struct OpenFileLimitTests {
         #expect(OpenFileLimit.peerRefusal(for: nil) == "the daemon cannot read its limit of open files")
     }
 
+    /// Writes the raised soft limit once with the old hard limit and returns the limit that it
+    /// reads back. It writes nothing when the soft limit is high enough, returns the old limit
+    /// after a refused write, and returns `nil` when it cannot read.
+    @Test func raisesTheLimitThroughItsCalls() {
+        let unlimited = Self.unlimited
+        var limits = rlimit(rlim_cur: 256, rlim_max: unlimited)
+        var writes: [rlimit] = []
+        var acceptsWrites = true
+        let raise = { (perProcess: rlim_t) in
+            OpenFileLimit.raise(perProcess: perProcess, read: { limits }, write: { wanted in
+                writes.append(wanted)
+                if acceptsWrites {
+                    limits = wanted
+                }
+            })
+        }
+
+        #expect(raise(245_760) == 4096)
+        #expect(writes.map(\.rlim_cur) == [4096])
+        #expect(writes.map(\.rlim_max) == [unlimited])
+        #expect(limits.rlim_cur == 4096)
+
+        writes = []
+        limits = rlimit(rlim_cur: 1_048_576, rlim_max: unlimited)
+        #expect(raise(245_760) == 245_760)
+        #expect(writes.isEmpty)
+
+        acceptsWrites = false
+        limits = rlimit(rlim_cur: 256, rlim_max: unlimited)
+        #expect(raise(245_760) == 256)
+        #expect(writes.count == 1)
+
+        writes = []
+        #expect(OpenFileLimit.raise(perProcess: 245_760, read: { nil }, write: { writes.append($0) }) == nil)
+        #expect(writes.isEmpty)
+    }
+
     /// Raises the soft limit of the test process as far as the limits allow and returns it.
     ///
     /// The limit only grows, so other tests in the process keep working.

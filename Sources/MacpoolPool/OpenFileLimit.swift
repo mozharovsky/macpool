@@ -14,6 +14,9 @@ enum OpenFileLimit {
     static let target: rlim_t = 4096
 
     /// The lowest limit at which the daemon listens for paired Macs.
+    ///
+    /// With 1024 descriptors, about 200 paired Macs can hold their 4 connections each while the
+    /// daemon still opens its own files.
     static let peerMinimum: rlim_t = 1024
 
     /// Raises the soft limit toward ``target`` and reads the limit back.
@@ -23,18 +26,43 @@ enum OpenFileLimit {
     /// - Returns: The number of files that the process may open, or `nil` when the limit cannot
     ///   be read.
     static func raise() -> rlim_t? {
-        var limit = rlimit()
-        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else {
+        raise(
+            perProcess: maximumPerProcess(),
+            read: {
+                var limit = rlimit()
+                return getrlimit(RLIMIT_NOFILE, &limit) == 0 ? limit : nil
+            },
+            write: { wanted in
+                var limit = wanted
+                // A refusal keeps the old limit, which the next read returns.
+                _ = setrlimit(RLIMIT_NOFILE, &limit)
+            },
+        )
+    }
+
+    /// Raises the soft limit like ``raise()`` through the given calls.
+    ///
+    /// Tests pass their own calls here instead of changing the limit of their process.
+    ///
+    /// - Parameters:
+    ///   - perProcess: The kernel's limit for one process, `kern.maxfilesperproc`.
+    ///   - read: Returns the current limits, or `nil` when they cannot be read.
+    ///   - write: Asks for new limits.
+    /// - Returns: The soft limit that `read` returns after any change, capped at `perProcess`, or
+    ///   `nil` when a read fails.
+    static func raise(
+        perProcess: rlim_t,
+        read: () -> rlimit?,
+        write: (rlimit) -> Void,
+    ) -> rlim_t? {
+        guard let current = read() else {
             return nil
         }
-        let perProcess = maximumPerProcess()
-        let raised = raisedSoftLimit(soft: limit.rlim_cur, hard: limit.rlim_max, perProcess: perProcess)
-        if raised > limit.rlim_cur {
-            var wanted = rlimit(rlim_cur: raised, rlim_max: limit.rlim_max)
-            // A refusal keeps the old limit, which the read below returns.
-            _ = setrlimit(RLIMIT_NOFILE, &wanted)
+        let raised = raisedSoftLimit(soft: current.rlim_cur, hard: current.rlim_max, perProcess: perProcess)
+        if raised > current.rlim_cur {
+            write(rlimit(rlim_cur: raised, rlim_max: current.rlim_max))
         }
-        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else {
+        guard let limit = read() else {
             return nil
         }
         return min(limit.rlim_cur, perProcess)
