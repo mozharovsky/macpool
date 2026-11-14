@@ -577,8 +577,12 @@ public actor PoolDaemon {
     /// the list does not name the key and an invitation is open, the Mac may pair. The daemon
     /// closes any other connection.
     ///
+    /// The connection's handshake place stays taken until this decision. The handshake limit
+    /// therefore also bounds the connections that wait for a busy daemon.
+    ///
     /// - Parameter peer: A connection whose handshake proved a key.
     private func acceptPeer(_ peer: PeerListener.Peer) {
+        defer { peer.place.release() }
         guard !isShutDown, let clients = try? TrustList<TrustedClient>.load(from: configuration.directory) else {
             peer.channel.close()
             return

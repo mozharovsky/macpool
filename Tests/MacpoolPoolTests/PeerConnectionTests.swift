@@ -519,30 +519,38 @@ struct PeerConnectionTests {
     }
 
     /// Cancels the timer of a handshake when the outcome settles, in either order, and frees the
-    /// handshake's place once.
-    @Test func settlesAHandshakeOnce() {
+    /// handshake's place once. A successful handshake keeps its place until the owner releases it,
+    /// and a second release frees nothing.
+    @Test func settlesAHandshakeOnce() throws {
         let count = HandshakeCount(limit: 1)
-        #expect(count.begin())
-        let armedFirst = HandshakeOutcome(count)
+        let armedFirst = try HandshakeOutcome(#require(count.take()))
         let timer = Task { _ = try? await Task.sleep(for: .seconds(60)) }
         armedFirst.arm(timer)
         #expect(!timer.isCancelled)
         #expect(armedFirst.settle())
         #expect(timer.isCancelled)
         #expect(!armedFirst.settle())
+        #expect(armedFirst.succeed() == nil)
 
-        #expect(count.begin())
-        let settledFirst = HandshakeOutcome(count)
+        let settledFirst = try HandshakeOutcome(#require(count.take()))
         #expect(settledFirst.settle())
         let late = Task { _ = try? await Task.sleep(for: .seconds(60)) }
         settledFirst.arm(late)
         #expect(late.isCancelled)
-        #expect(count.begin())
-        #expect(!count.begin())
+
+        let succeeded = try HandshakeOutcome(#require(count.take()))
+        let place = try #require(succeeded.succeed())
+        #expect(!succeeded.settle())
+        #expect(count.take() == nil)
+        place.release()
+        place.release()
+        let next = try #require(count.take())
+        #expect(count.take() == nil)
+        next.release()
     }
 
-    /// Frees a handshake's place when the handshake succeeds, while its connection stays open.
-    @Test func freesAPlaceWhenAHandshakeSucceeds() async throws {
+    /// Frees a connection's place when its owner releases it, while the connection stays open.
+    @Test func freesAPlaceWhenItsOwnerReleasesIt() async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
@@ -561,11 +569,81 @@ struct PeerConnectionTests {
         for _ in 0 ..< 3 {
             try await channels.append(MessageChannel.connect(to: endpoint, using: parameters))
             let peer = try #require(await connections.next())
+            peer.place.release()
             channels.append(peer.channel)
         }
         for channel in channels {
             channel.close()
         }
+    }
+
+    /// Closes a connection whose handshake finishes after the stream of connections ended, and
+    /// frees its place.
+    @Test func freesAPlaceAfterTheStreamEnded() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            admits: { $0 == clientKey },
+            handshakeLimit: 2,
+        )
+        defer { listener.close() }
+        // Cancelling the task that reads the stream ends the stream while the listener accepts.
+        let reader = Task {
+            for await _ in listener.connections {}
+        }
+        reader.cancel()
+        await reader.value
+        let endpoint = try loopback(listener.port)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        for _ in 0 ..< 3 {
+            #expect(await eventually {
+                guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
+                    return false
+                }
+                defer { channel.close() }
+                return await (try? channel.receive(HostGreeting.self)) == nil
+            })
+        }
+    }
+
+    /// Keeps the places of connections that wait while the daemon is busy, and closes the 17th
+    /// connection before its handshake. The daemon frees the places once it decides.
+    @Test func holdsPlacesWhileTheDaemonIsBusy() async throws {
+        let fixture = try PoolFixture()
+        let client = try makeIdentity()
+        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: fixture.directory)
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let endpoint = try await loopback(listeningPort(of: daemon))
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        // The daemon logs this line while it decides about the first connection. Waiting in the
+        // logger keeps the daemon's actor busy until the test signals.
+        let busy = DispatchSemaphore(value: 0)
+        fixture.logs.whenLogged("A paired Mac connected") { busy.wait() }
+        defer { busy.signal() }
+
+        var channels: [MessageChannel] = []
+        for _ in 0 ..< 16 {
+            try await channels.append(MessageChannel.connect(to: endpoint, using: parameters))
+        }
+        await #expect(throws: PoolError.self) {
+            try await MessageChannel.connect(to: endpoint, using: parameters)
+        }
+        busy.signal()
+        #expect(await eventually {
+            guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
+                return false
+            }
+            channels.append(channel)
+            return true
+        })
+        for channel in channels {
+            channel.close()
+        }
+        await daemon.shutdown()
     }
 
     /// Refuses the new connections of a blocked key and closes its open connection at the next
