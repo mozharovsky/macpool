@@ -610,6 +610,43 @@ struct PeerConnectionTests {
         }
     }
 
+    /// Frees the place of a connection that finished its handshake without ALPN, after the
+    /// listener closed it.
+    @Test func freesAPlaceWithoutALPN() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            admits: { $0 == clientKey },
+            handshakeLimit: 2,
+        )
+        defer { listener.close() }
+        let endpoint = try loopback(listener.port)
+        let withoutALPN = try PeerSecurity.parameters(identity: client, protocols: [], isServer: false) {
+            $0 == hostKey
+        }
+        for _ in 0 ..< 3 {
+            #expect(await eventually {
+                guard let channel = try? await MessageChannel.connect(to: endpoint, using: withoutALPN) else {
+                    return false
+                }
+                defer { channel.close() }
+                return await (try? channel.receive(HostGreeting.self)) == nil
+            })
+        }
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        let channel = try await MessageChannel.connect(to: endpoint, using: parameters)
+        var connections = listener.connections.makeAsyncIterator()
+        let peer = try #require(await connections.next())
+        #expect(peer.fingerprint == clientKey)
+        peer.place.release()
+        peer.channel.close()
+        channel.close()
+    }
+
     /// Keeps the places of connections that wait while the daemon is busy, and closes the 17th
     /// connection before its handshake. The daemon frees the places once it decides.
     @Test func holdsPlacesWhileTheDaemonIsBusy() async throws {
