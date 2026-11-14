@@ -234,9 +234,12 @@ final class PeerListener: Sendable {
                 }
                 let channel = MessageChannel(connection: connection, peer: peer, start: false)
                 let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version, place: place)
-                if case .terminated = continuation.yield(admitted) {
+                // The unbounded stream drops nothing today, but a dropped connection needs the
+                // same cleanup as one that an ended stream refuses.
+                guard case .enqueued = continuation.yield(admitted) else {
                     channel.close()
                     place.release()
+                    return
                 }
             case .failed, .waiting:
                 _ = outcome.settle()
