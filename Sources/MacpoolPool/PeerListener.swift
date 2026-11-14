@@ -61,9 +61,13 @@ public struct PeerSettings: Sendable {
 /// version that this build speaks, the listener closes the connection after the handshake.
 ///
 /// A peer proves its key only at the end of the handshake, so anyone who reaches the port can
-/// start one. The listener therefore limits the handshakes that run at once and closes a new
-/// connection beyond the limit before its handshake begins. A connection whose handshake does
-/// not finish in time ends, so a silent peer holds a place for a short time only.
+/// start one. The listener therefore gives each connection one of a limited number of places and
+/// closes a new connection beyond the limit before its handshake begins. A connection whose
+/// handshake does not finish in time ends, so a silent peer holds a place for a short time only.
+///
+/// A connection keeps its place after the handshake until the owner calls
+/// ``HandshakePlace/release()`` on ``Peer/place``. Connections that wait in ``connections`` for
+/// a busy owner therefore count against the limit, and each of them holds a file descriptor.
 ///
 /// ``connections`` ends when ``close()`` runs or the listener fails after it was ready.
 final class PeerListener: Sendable {
@@ -77,6 +81,12 @@ final class PeerListener: Sendable {
 
         /// The protocol version that ALPN chose.
         let version: Int
+
+        /// The connection's place under the listener's handshake limit.
+        ///
+        /// The owner releases it after it decides to serve the connection, let it pair, or close
+        /// it.
+        let place: HandshakePlace
     }
 
     /// The underlying listener.
@@ -104,7 +114,8 @@ final class PeerListener: Sendable {
     ///   - admits: Decides whether a key may connect. The listener calls it during every
     ///     handshake on one serial queue, so a slow call delays every handshake.
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
-    ///   - handshakeLimit: The most handshakes that run at once.
+    ///   - handshakeLimit: The most connections that run their handshake or wait for the owner
+    ///     to release their place.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
     ///   ``PoolError/connection(path:reason:)`` when ``PeerSettings/address`` breaks its rules or
     ///   the listener cannot start, for example because another process holds the port.
@@ -133,13 +144,13 @@ final class PeerListener: Sendable {
             throw .connection(path: place, reason: "\(error)")
         }
         let (connections, continuation) = AsyncStream.makeStream(of: Peer.self)
-        let handshakes = HandshakeCount(limit: handshakeLimit)
+        let places = HandshakeCount(limit: handshakeLimit)
         listener.newConnectionHandler = { connection in
-            guard handshakes.begin() else {
+            guard let place = places.take() else {
                 connection.cancel()
                 return
             }
-            Self.admit(connection, within: handshakeTimeout, counted: handshakes, to: continuation)
+            Self.admit(connection, within: handshakeTimeout, holding: place, to: continuation)
         }
         let failure: String? = await withCheckedContinuation { ready in
             let once = ResumeOnce(ready)
@@ -197,33 +208,35 @@ final class PeerListener: Sendable {
     /// - Parameters:
     ///   - connection: A connection that the listener accepted and that has not started.
     ///   - timeout: The longest wait for the handshake.
-    ///   - handshakes: The count of running handshakes. It already includes this one. The
-    ///     handshake leaves the count once it succeeds, fails, or runs out of time.
+    ///   - place: The connection's place. A failed handshake releases it, and a successful one
+    ///     passes it on with the connection.
     ///   - continuation: Receives the connection after the handshake.
     private static func admit(
         _ connection: NWConnection,
         within timeout: Duration,
-        counted handshakes: HandshakeCount,
+        holding place: HandshakePlace,
         to continuation: AsyncStream<Peer>.Continuation,
     ) {
-        let outcome = HandshakeOutcome(handshakes)
+        let outcome = HandshakeOutcome(place)
         let peer = "\(connection.endpoint)"
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                guard outcome.settle() else {
+                guard let place = outcome.succeed() else {
                     return
                 }
                 // Network finishes the handshake with a client that offers no ALPN at all.
                 guard let fingerprint = PeerSecurity.peerFingerprint(of: connection),
                       let version = PeerSecurity.negotiatedVersion(of: connection) else {
                     connection.cancel()
+                    place.release()
                     return
                 }
                 let channel = MessageChannel(connection: connection, peer: peer, start: false)
-                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version)
+                let admitted = Peer(channel: channel, fingerprint: fingerprint, version: version, place: place)
                 if case .terminated = continuation.yield(admitted) {
                     channel.close()
+                    place.release()
                 }
             case .failed, .waiting:
                 _ = outcome.settle()
@@ -253,44 +266,77 @@ final class PeerListener: Sendable {
     }
 }
 
-/// The number of handshakes that run at once, up to a limit.
+/// The number of connections that hold a handshake place, up to a limit.
 final class HandshakeCount: Sendable {
-    /// The most handshakes that run at once.
+    /// The most places that connections hold at once.
     private let limit: Int
 
-    /// The handshakes that run.
-    private let running = Mutex(0)
+    /// The number of places that connections hold.
+    private let taken = Mutex(0)
 
     /// Creates a count of zero.
     ///
-    /// - Parameter limit: The most handshakes that run at once.
+    /// - Parameter limit: The most places that connections hold at once.
     init(limit: Int) {
         self.limit = limit
     }
 
-    /// Counts a new handshake unless the limit is reached.
+    /// Takes a place for a new connection unless every place is taken.
     ///
-    /// - Returns: Whether the handshake may run. After `true`, a call of ``end()`` must follow.
-    func begin() -> Bool {
-        running.withLock { running in
-            guard running < limit else {
+    /// - Returns: The place, or `nil` when every place is taken. The connection's owner must
+    ///   release the place.
+    func take() -> HandshakePlace? {
+        let isFree = taken.withLock { taken in
+            guard taken < limit else {
                 return false
             }
-            running += 1
+            taken += 1
             return true
         }
+        return isFree ? HandshakePlace(in: self) : nil
     }
 
-    /// Stops counting a handshake that ``begin()`` counted.
-    func end() {
-        running.withLock { $0 -= 1 }
+    /// Frees a place that ``take()`` gave.
+    fileprivate func free() {
+        taken.withLock { $0 -= 1 }
+    }
+}
+
+/// One connection's place in a ``HandshakeCount``.
+///
+/// The place is taken from the moment the listener accepts the connection. It stays taken after
+/// the handshake until the owner of the connection releases it.
+final class HandshakePlace: Sendable {
+    /// The count that includes this place until its release.
+    private let count: HandshakeCount
+
+    /// Whether the place was released.
+    private let isReleased = Mutex(false)
+
+    /// Creates a place that the count already includes.
+    ///
+    /// - Parameter count: The count that includes the place.
+    fileprivate init(in count: HandshakeCount) {
+        self.count = count
+    }
+
+    /// Frees the place unless an earlier call did.
+    func release() {
+        let releases = isReleased.withLock { isReleased in
+            defer { isReleased = true }
+            return !isReleased
+        }
+        if releases {
+            count.free()
+        }
     }
 }
 
 /// Whether a connection's handshake finished or ran out of time, whichever came first.
 ///
-/// The handshake leaves its ``HandshakeCount`` when the outcome settles. Settling also cancels
-/// the timer, because the timer holds the connection until it ends.
+/// A handshake that fails or runs out of time releases its ``HandshakePlace`` when the outcome
+/// settles. A successful handshake keeps the place for the connection. Settling also cancels the
+/// timer, because the timer holds the connection until it ends.
 final class HandshakeOutcome: Sendable {
     /// The state that the lock guards.
     private struct State {
@@ -304,14 +350,14 @@ final class HandshakeOutcome: Sendable {
     /// The outcome's state.
     private let state = Mutex(State())
 
-    /// The count that includes this handshake until the outcome settles.
-    private let handshakes: HandshakeCount
+    /// The place of the handshake's connection.
+    private let place: HandshakePlace
 
     /// Creates an outcome that is not settled yet.
     ///
-    /// - Parameter handshakes: The count that includes this handshake.
-    init(_ handshakes: HandshakeCount) {
-        self.handshakes = handshakes
+    /// - Parameter place: The place of the handshake's connection.
+    init(_ place: HandshakePlace) {
+        self.place = place
     }
 
     /// Keeps the timer of the handshake, or cancels it when the outcome is already settled.
@@ -329,10 +375,31 @@ final class HandshakeOutcome: Sendable {
         }
     }
 
-    /// Settles the outcome unless an earlier call did, and cancels the timer.
+    /// Settles a failed handshake unless an earlier call settled the outcome, cancels the
+    /// timer, and releases the place.
     ///
-    /// - Returns: Whether this call settled it.
+    /// - Returns: Whether this call settled the outcome.
     func settle() -> Bool {
+        let isFirst = settleOnce()
+        if isFirst {
+            place.release()
+        }
+        return isFirst
+    }
+
+    /// Settles a successful handshake unless an earlier call settled the outcome, and cancels
+    /// the timer.
+    ///
+    /// - Returns: The place, or `nil` when an earlier call settled the outcome. The place stays
+    ///   taken.
+    func succeed() -> HandshakePlace? {
+        settleOnce() ? place : nil
+    }
+
+    /// Marks the outcome settled and cancels the timer.
+    ///
+    /// - Returns: Whether this call settled the outcome.
+    private func settleOnce() -> Bool {
         let settled = state.withLock { state -> (isFirst: Bool, timer: Task<Void, Never>?) in
             guard !state.isSettled else {
                 return (false, nil)
@@ -342,9 +409,6 @@ final class HandshakeOutcome: Sendable {
             return (true, state.timer)
         }
         settled.timer?.cancel()
-        if settled.isFirst {
-            handshakes.end()
-        }
         return settled.isFirst
     }
 }
