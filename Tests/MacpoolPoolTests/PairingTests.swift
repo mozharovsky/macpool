@@ -874,7 +874,12 @@ struct PairingTests {
     ) async throws {
         let host = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
-        let listener = try await PeerListener(identity: host, settings: loopbackSettings(), admits: { _ in true })
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            logger: testLogger(),
+            admits: { _ in true },
+        )
         defer { listener.close() }
         let fakeHost = Task {
             for await peer in listener.connections {

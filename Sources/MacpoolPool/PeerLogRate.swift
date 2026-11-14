@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import Synchronization
 
 /// A kind of log line that a Mac on the network can make the daemon write again and again.
 enum PeerLogLine: Hashable, Sendable {
@@ -14,6 +15,12 @@ enum PeerLogLine: Hashable, Sendable {
 
     /// A Mac connected to pair while ``PoolDaemon/pairingConnectionLimit`` Macs paired.
     case tooManyPairings
+
+    /// The listener for paired Macs refused a connection because the connections from its
+    /// ``HandshakeSource`` held the most handshake places that one source may hold.
+    ///
+    /// The line names the address. The rate counts no address, because the Mac chooses it.
+    case tooManyHandshakes
 
     /// A paired client's request found the list of paired clients unreadable.
     case unreadableClientList
@@ -66,5 +73,36 @@ struct PeerLogRate {
         }
         times[line] = now
         return full
+    }
+}
+
+/// A ``PeerLogRate`` that several threads share.
+///
+/// The listener for paired Macs refuses connections on its own queue, outside the daemon's actor.
+/// It keeps its own rate for the lines that it writes.
+final class LockedPeerLogRate: Sendable {
+    /// The rate.
+    private let rate = Mutex(PeerLogRate())
+
+    /// The source of the current time.
+    private let now: @Sendable () -> Date
+
+    /// Creates a rate that has written no line.
+    ///
+    /// - Parameter now: The source of the current time.
+    init(now: @escaping @Sendable () -> Date) {
+        self.now = now
+    }
+
+    /// Returns the level for a line and records the time if the level is the full one.
+    ///
+    /// - Parameters:
+    ///   - line: The kind of line.
+    ///   - full: The level of the line when it is due.
+    /// - Returns: `full` if the line was not written at that level within the last
+    ///   ``PeerLogRate/interval``, or `.debug`.
+    func level(of line: PeerLogLine, full: Logger.Level) -> Logger.Level {
+        let now = now()
+        return rate.withLock { $0.level(of: line, full: full, at: now) }
     }
 }
