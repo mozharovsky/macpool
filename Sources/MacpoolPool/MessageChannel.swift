@@ -429,9 +429,6 @@ struct LineBuffer {
     /// The number of bytes at the start of ``bytes`` that hold no line break.
     private var searchedCount = 0
 
-    /// The number of bytes that searches for a line break examined since the buffer was created.
-    private(set) var examinedCount = 0
-
     /// Creates an empty buffer.
     ///
     /// - Parameter maximumLength: The longest line that the buffer accepts, in bytes.
@@ -453,16 +450,13 @@ struct LineBuffer {
     ///   wait without a line break.
     mutating func takeLine() throws(PoolError) -> Data? {
         let start = bytes.startIndex + searchedCount
-        let unsearched = bytes[start...]
-        guard let newline = unsearched.firstIndex(of: UInt8(ascii: "\n")) else {
-            examinedCount += unsearched.count
+        guard let newline = bytes[start...].firstIndex(of: UInt8(ascii: "\n")) else {
             searchedCount = bytes.count
             guard bytes.count <= maximumLength else {
                 throw .malformedMessage(reason: "a line exceeds \(maximumLength) bytes")
             }
             return nil
         }
-        examinedCount += newline - start + 1
         let line = Data(bytes[bytes.startIndex ..< newline])
         bytes.removeSubrange(bytes.startIndex ... newline)
         searchedCount = 0

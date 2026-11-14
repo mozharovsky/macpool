@@ -28,26 +28,31 @@ struct ChannelStreamTests {
         #expect(throws: PoolError.malformedMessage(reason: "a line exceeds 4 bytes")) { try buffer.takeLine() }
     }
 
-    /// Finds a line that arrives one byte at a time and examines each byte once.
-    @Test func examinesEachByteOnce() throws {
-        let line = Data(repeating: UInt8(ascii: "a"), count: 1000)
-        var buffer = LineBuffer(maximumLength: 4096)
-        var early: [Data] = []
-        for byte in line {
-            buffer.append(Data([byte]))
-            if let taken = try buffer.takeLine() {
-                early.append(taken)
+    /// Finds a line of the longest length that arrives one byte at a time.
+    ///
+    /// A search that started over at the first byte each time would take minutes for this line.
+    /// The test therefore stops after 30 seconds.
+    @Test func findsALongLineThatArrivesByteByByte() throws {
+        let length = MessageChannel.maximumLineLength
+        var buffer = LineBuffer(maximumLength: length)
+        let clock = ContinuousClock()
+        let start = clock.now
+        for _ in 0 ..< length {
+            buffer.append(Data("a".utf8))
+            guard try buffer.takeLine() == nil else {
+                Issue.record("a line ended before its line break")
+                return
+            }
+            guard clock.now - start < .seconds(30) else {
+                Issue.record("the search took longer than 30 seconds")
+                return
             }
         }
-        #expect(early.isEmpty)
-        #expect(buffer.examinedCount == line.count)
         buffer.append(Data("\nb".utf8))
-        #expect(try buffer.takeLine() == line)
+        #expect(try buffer.takeLine() == Data(repeating: UInt8(ascii: "a"), count: length))
         #expect(try buffer.takeLine() == nil)
-        #expect(buffer.examinedCount == line.count + 2)
         buffer.append(Data("c\n".utf8))
         #expect(try buffer.takeLine() == Data("bc".utf8))
-        #expect(buffer.examinedCount == line.count + 4)
     }
 
     /// Exchanges a line over TCP and then raw bytes in both directions until the end of the stream.
