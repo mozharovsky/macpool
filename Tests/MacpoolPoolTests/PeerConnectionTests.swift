@@ -463,9 +463,7 @@ struct PeerConnectionTests {
             MessageChannel.connect(to: endpoint, using: .tcp),
             MessageChannel.connect(to: endpoint, using: .tcp),
         ]
-        await #expect(throws: PoolError.self) {
-            try await MessageChannel.connect(to: endpoint, using: parameters)
-        }
+        #expect(await refusesAtOnce(endpoint, using: parameters))
         // Only a refusal at the source's limit names one address.
         let warned = !logs.entries("Too many handshakes from one address").isEmpty
         #expect(warned == (limits.source < limits.total))
@@ -579,6 +577,10 @@ struct PeerConnectionTests {
         let outside = try HandshakeSource.ipv6Network(#require(IPv6Address("2001:db8:1:3::")))
         #expect(source("2001:db8:1:3:4:5:6:7") == outside)
         #expect(source("2001:db8:1:3::9") == outside)
+        // These addresses differ from the ones above only from the ninth byte on, so a key
+        // longer than /64 would split them.
+        #expect(source("2001:db8:1:3:ff00::1") == outside)
+        #expect(try source("2001:db8:1:2:ff00::1") == .ipv6(#require(IPv6Address("2001:db8:1:2:ff00::1"))))
         #expect(source("fe80::1%lo0") == .linkLocal(interface: "lo0"))
         #expect(source("fe80::2%lo0") == .linkLocal(interface: "lo0"))
         // An IPv4 listener has no /64 of its own.
@@ -586,6 +588,12 @@ struct PeerConnectionTests {
         #expect(try fromIPv4 == .ipv6Network(#require(IPv6Address("2001:db8:1:2::"))))
         #expect(HandshakeSource(.hostPort(host: .name("example.local", nil), port: 1), listener: listener) == nil)
         #expect(HandshakeSource(.unix(path: "/tmp/peer.sock"), listener: listener) == nil)
+    }
+
+    /// Gives the daemon's listener the limits that the documentation states.
+    @Test func keepsTheDocumentedHandshakeLimits() {
+        #expect(PeerListener.handshakeLimit == 16)
+        #expect(PeerListener.sourceHandshakeLimit == 4)
     }
 
     /// Limits places in total and per source, with the total limit first. A refused connection
@@ -646,13 +654,7 @@ struct PeerConnectionTests {
         defer { listener.close() }
         let endpoint = try loopback(listener.port)
         let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
-        let refused = { () async -> Bool in
-            guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
-                return true
-            }
-            channel.close()
-            return false
-        }
+        let refused = { await refusesAtOnce(endpoint, using: parameters) }
         let warnings = { logs.entries("Too many handshakes from one address") }
 
         var silent: [MessageChannel] = []
@@ -670,7 +672,13 @@ struct PeerConnectionTests {
         for channel in silent {
             channel.close()
         }
-        #expect(await eventually(within: .seconds(15)) { await !refused() })
+        #expect(await eventually(within: .seconds(15)) {
+            guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
+                return false
+            }
+            channel.close()
+            return true
+        })
     }
 
     /// Frees a connection's place when its owner releases it, while the connection stays open.
@@ -800,9 +808,7 @@ struct PeerConnectionTests {
         for _ in 0 ..< 4 {
             try await channels.append(MessageChannel.connect(to: endpoint, using: parameters))
         }
-        await #expect(throws: PoolError.self) {
-            try await MessageChannel.connect(to: endpoint, using: parameters)
-        }
+        #expect(await refusesAtOnce(endpoint, using: parameters))
         #expect(fixture.logs.entries("Too many handshakes from one address").map(\.level) == [.warning])
         busy.signal()
         #expect(await eventually {
@@ -1091,6 +1097,35 @@ struct PlaceLimits: Sendable, CustomTestStringConvertible {
     /// The limits in the test's name.
     var testDescription: String {
         "\(total) places, \(source) per source"
+    }
+}
+
+/// Connects and reports whether the host closed the connection before it was ready.
+///
+/// A host that closes the connection makes it fail with an error from Network. A host that
+/// leaves the connection open makes the client give up after `timeout` instead, with a reason
+/// that names the timeout. The difference shows a prompt refusal without measuring time.
+///
+/// - Parameters:
+///   - endpoint: The host's endpoint.
+///   - parameters: The client's TLS parameters.
+///   - timeout: The client's longest wait.
+/// - Returns: Whether the connection failed, and failed for a reason other than the client's
+///   timeout.
+func refusesAtOnce(
+    _ endpoint: NWEndpoint,
+    using parameters: NWParameters,
+    timeout: Duration = .seconds(5),
+) async -> Bool {
+    do throws(PoolError) {
+        let channel = try await MessageChannel.connect(to: endpoint, using: parameters, timeout: timeout)
+        channel.close()
+        return false
+    } catch {
+        guard case let .connection(_, reason) = error else {
+            return false
+        }
+        return reason != "no answer within \(timeout)"
     }
 }
 

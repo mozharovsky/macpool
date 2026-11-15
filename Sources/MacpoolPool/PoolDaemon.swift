@@ -567,6 +567,8 @@ public actor PoolDaemon {
                     // A Mac that the host does not know gets in only to pair.
                     return invitation.isOpen(at: now())
                 },
+                handshakeLimit: PeerListener.handshakeLimit,
+                sourceHandshakeLimit: PeerListener.sourceHandshakeLimit,
             )
         } catch {
             return peerListenerFailed(error.description)

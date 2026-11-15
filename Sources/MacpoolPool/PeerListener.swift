@@ -112,6 +112,12 @@ final class PeerListener: Sendable {
     /// The continuation that feeds ``connections``.
     private let continuation: AsyncStream<Peer>.Continuation
 
+    /// The most connections that hold a handshake place at once in the daemon's listener.
+    static let handshakeLimit = 16
+
+    /// The most of those connections from one ``HandshakeSource`` in the daemon's listener.
+    static let sourceHandshakeLimit = 4
+
     /// Starts listening and waits until the listener is ready.
     ///
     /// - Parameters:
@@ -136,8 +142,8 @@ final class PeerListener: Sendable {
         now: @escaping @Sendable () -> Date = { Date() },
         admits: @escaping @Sendable (KeyFingerprint) -> Bool,
         handshakeTimeout: Duration = .seconds(5),
-        handshakeLimit: Int = 16,
-        sourceHandshakeLimit: Int = 4,
+        handshakeLimit: Int = PeerListener.handshakeLimit,
+        sourceHandshakeLimit: Int = PeerListener.sourceHandshakeLimit,
     ) async throws(PoolError) {
         let place = "\(settings.address):\(settings.port)"
         guard let host = Self.listeningHost(for: settings.address) else {
