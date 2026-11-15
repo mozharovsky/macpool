@@ -639,7 +639,9 @@ struct PeerConnectionTests {
             logger: testLogger(logs),
             now: { clock.now },
             admits: { $0 == clientKey },
-            handshakeTimeout: .seconds(3),
+            // The silent connections must keep their places until the last refusal, however
+            // slowly a loaded Mac runs the test. Closing them frees the places sooner.
+            handshakeTimeout: .seconds(40),
         )
         defer { listener.close() }
         let endpoint = try loopback(listener.port)
@@ -668,7 +670,7 @@ struct PeerConnectionTests {
         for channel in silent {
             channel.close()
         }
-        #expect(await eventually { await !refused() })
+        #expect(await eventually(within: .seconds(15)) { await !refused() })
     }
 
     /// Frees a connection's place when its owner releases it, while the connection stays open.
