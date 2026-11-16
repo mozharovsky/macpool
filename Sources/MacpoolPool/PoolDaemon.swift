@@ -552,16 +552,24 @@ public actor PoolDaemon {
             let clients = ClientListReader(directory: configuration.directory, logger: configuration.logger)
             let invitation = invitation
             let now = configuration.now
-            started = try await PeerListener(identity: identity, settings: settings) { key in
-                guard let list = clients.read() else {
-                    return false
-                }
-                if let record = list[key] {
-                    return !record.isBlocked
-                }
-                // A Mac that the host does not know gets in only to pair.
-                return invitation.isOpen(at: now())
-            }
+            started = try await PeerListener(
+                identity: identity,
+                settings: settings,
+                logger: configuration.logger,
+                now: now,
+                admits: { key in
+                    guard let list = clients.read() else {
+                        return false
+                    }
+                    if let record = list[key] {
+                        return !record.isBlocked
+                    }
+                    // A Mac that the host does not know gets in only to pair.
+                    return invitation.isOpen(at: now())
+                },
+                handshakeLimit: PeerListener.handshakeLimit,
+                sourceHandshakeLimit: PeerListener.sourceHandshakeLimit,
+            )
         } catch {
             return peerListenerFailed(error.description)
         }

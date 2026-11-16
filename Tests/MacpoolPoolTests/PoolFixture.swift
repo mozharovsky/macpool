@@ -100,7 +100,7 @@ final class PoolFixture {
             reconnectWindow: reconnectWindow,
             signalGrace: signalGrace,
             releaseTimeout: releaseTimeout,
-            logger: Logger(label: "macpool.tests") { _ in RecordingLogHandler(recorder: logs) },
+            logger: testLogger(logs),
         ))
     }
 
@@ -884,6 +884,14 @@ final class LogRecorder: Sendable {
     func entries(_ message: String) -> [LogEntry] {
         entries.withLock { $0.filter { $0.message == message } }
     }
+}
+
+/// Creates a logger that keeps every message in a recorder.
+///
+/// - Parameter recorder: The recorder of the messages.
+/// - Returns: The logger.
+func testLogger(_ recorder: LogRecorder = LogRecorder()) -> Logger {
+    Logger(label: "macpool.tests") { _ in RecordingLogHandler(recorder: recorder) }
 }
 
 /// A log handler that keeps every message in a ``LogRecorder``.

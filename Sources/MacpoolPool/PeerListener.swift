@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Network
 import Synchronization
 
@@ -65,9 +66,14 @@ public struct PeerSettings: Sendable {
 /// closes a new connection beyond the limit before its handshake begins. A connection whose
 /// handshake does not finish in time ends, so a silent peer holds a place for a short time only.
 ///
+/// The connections from one ``HandshakeSource`` hold fewer places than the total limit. One
+/// address therefore cannot keep every place taken by opening new connections. The listener
+/// closes a connection beyond its source's limit before the handshake, and that connection takes
+/// no place.
+///
 /// A connection keeps its place after the handshake until the owner calls
 /// ``HandshakePlace/release()`` on ``Peer/place``. Connections that wait in ``connections`` for
-/// a busy owner therefore count against the limit, and each of them holds a file descriptor.
+/// a busy owner therefore count against both limits, and each of them holds a file descriptor.
 ///
 /// ``connections`` ends when ``close()`` runs or the listener fails after it was ready.
 final class PeerListener: Sendable {
@@ -106,25 +112,38 @@ final class PeerListener: Sendable {
     /// The continuation that feeds ``connections``.
     private let continuation: AsyncStream<Peer>.Continuation
 
+    /// The most connections that hold a handshake place at once in the daemon's listener.
+    static let handshakeLimit = 16
+
+    /// The most of those connections from one ``HandshakeSource`` in the daemon's listener.
+    static let sourceHandshakeLimit = 4
+
     /// Starts listening and waits until the listener is ready.
     ///
     /// - Parameters:
     ///   - identity: This Mac's key and certificate.
     ///   - settings: The address and the port.
+    ///   - logger: Receives a warning when a source's connections hold `sourceHandshakeLimit`
+    ///     places and the listener refuses another one.
+    ///   - now: The source of the current time for the rate of that warning.
     ///   - admits: Decides whether a key may connect. The listener calls it during every
     ///     handshake on one serial queue, so a slow call delays every handshake.
     ///   - handshakeTimeout: The longest wait for a connection's handshake.
     ///   - handshakeLimit: The most connections that run their handshake or wait for the owner
     ///     to release their place.
+    ///   - sourceHandshakeLimit: The most of those connections from one ``HandshakeSource``.
     /// - Throws: ``PoolError/unusableIdentity(path:reason:)`` when Security rejects the key, or
     ///   ``PoolError/connection(path:reason:)`` when ``PeerSettings/address`` breaks its rules or
     ///   the listener cannot start, for example because another process holds the port.
     init(
         identity: MacIdentity,
         settings: PeerSettings,
+        logger: Logger,
+        now: @escaping @Sendable () -> Date = { Date() },
         admits: @escaping @Sendable (KeyFingerprint) -> Bool,
         handshakeTimeout: Duration = .seconds(5),
-        handshakeLimit: Int = 16,
+        handshakeLimit: Int = PeerListener.handshakeLimit,
+        sourceHandshakeLimit: Int = PeerListener.sourceHandshakeLimit,
     ) async throws(PoolError) {
         let place = "\(settings.address):\(settings.port)"
         guard let host = Self.listeningHost(for: settings.address) else {
@@ -144,9 +163,23 @@ final class PeerListener: Sendable {
             throw .connection(path: place, reason: "\(error)")
         }
         let (connections, continuation) = AsyncStream.makeStream(of: Peer.self)
-        let places = HandshakeCount(limit: handshakeLimit)
+        let places = HandshakeCount(limit: handshakeLimit, sourceLimit: sourceHandshakeLimit)
+        let rate = LockedPeerLogRate(now: now)
         listener.newConnectionHandler = { connection in
-            guard let place = places.take() else {
+            guard let source = HandshakeSource(connection.endpoint, listener: host) else {
+                connection.cancel()
+                return
+            }
+            let place: HandshakePlace
+            do throws(HandshakeRefusal) {
+                place = try places.take(from: source)
+            } catch {
+                if error == .sourceFull {
+                    let level = rate.level(of: .tooManyHandshakes, full: .warning)
+                    logger.log(level: level, "Too many handshakes from one address", metadata: [
+                        "address": "\(connection.endpoint)",
+                    ])
+                }
                 connection.cancel()
                 return
             }
@@ -269,39 +302,90 @@ final class PeerListener: Sendable {
     }
 }
 
-/// The number of connections that hold a handshake place, up to a limit.
+/// Why a connection gets no handshake place.
+enum HandshakeRefusal: Error, Equatable {
+    /// Connections hold every place.
+    case full
+
+    /// Connections from the new connection's source hold the most places that one source may
+    /// hold.
+    case sourceFull
+}
+
+/// The connections that hold a handshake place, in total and from each ``HandshakeSource``, up
+/// to two limits.
+///
+/// One lock guards both counts. A source has an entry only while one of its connections holds a
+/// place. The counts therefore stay small while peers change addresses.
 final class HandshakeCount: Sendable {
+    /// The state that the lock guards.
+    private struct Counts {
+        /// The number of places that connections hold.
+        var total = 0
+
+        /// The number of places that the connections from each source hold. A source that holds
+        /// none has no entry.
+        var bySource: [HandshakeSource: Int] = [:]
+    }
+
     /// The most places that connections hold at once.
     private let limit: Int
 
-    /// The number of places that connections hold.
-    private let taken = Mutex(0)
+    /// The most places that the connections from one source hold at once.
+    private let sourceLimit: Int
 
-    /// Creates a count of zero.
+    /// Both counts.
+    private let counts = Mutex(Counts())
+
+    /// Creates counts of zero.
     ///
-    /// - Parameter limit: The most places that connections hold at once.
-    init(limit: Int) {
+    /// - Parameters:
+    ///   - limit: The most places that connections hold at once.
+    ///   - sourceLimit: The most places that the connections from one source hold at once.
+    init(limit: Int, sourceLimit: Int) {
         self.limit = limit
+        self.sourceLimit = sourceLimit
     }
 
-    /// Takes a place for a new connection unless every place is taken.
+    /// The number of sources whose connections hold places.
     ///
-    /// - Returns: The place, or `nil` when every place is taken. The connection's owner must
-    ///   release the place.
-    func take() -> HandshakePlace? {
-        let isFree = taken.withLock { taken in
-            guard taken < limit else {
-                return false
-            }
-            taken += 1
-            return true
-        }
-        return isFree ? HandshakePlace(in: self) : nil
+    /// It stays at most the number of places that connections hold.
+    var sourceCount: Int {
+        counts.withLock { $0.bySource.count }
     }
 
-    /// Frees a place that ``take()`` gave.
-    fileprivate func free() {
-        taken.withLock { $0 -= 1 }
+    /// Takes a place for a new connection unless a limit is reached.
+    ///
+    /// The total limit comes first. A refused connection takes no place.
+    ///
+    /// - Parameter source: The source of the connection.
+    /// - Returns: The place. The connection's owner must release it.
+    /// - Throws: ``HandshakeRefusal/full`` when every place is taken, or
+    ///   ``HandshakeRefusal/sourceFull`` when the connections from `source` hold their most places.
+    func take(from source: HandshakeSource) throws(HandshakeRefusal) -> HandshakePlace {
+        try counts.withLock { counts throws(HandshakeRefusal) in
+            guard counts.total < limit else {
+                throw .full
+            }
+            let held = counts.bySource[source, default: 0]
+            guard held < sourceLimit else {
+                throw .sourceFull
+            }
+            counts.total += 1
+            counts.bySource[source] = held + 1
+        }
+        return HandshakePlace(source: source, in: self)
+    }
+
+    /// Frees a place that ``take(from:)`` gave.
+    ///
+    /// - Parameter source: The source that the place counts for.
+    fileprivate func free(from source: HandshakeSource) {
+        counts.withLock { counts in
+            counts.total -= 1
+            let held = counts.bySource[source, default: 1] - 1
+            counts.bySource[source] = held > 0 ? held : nil
+        }
     }
 }
 
@@ -310,6 +394,9 @@ final class HandshakeCount: Sendable {
 /// The place is taken from the moment the listener accepts the connection. It stays taken after
 /// the handshake until the owner of the connection releases it.
 final class HandshakePlace: Sendable {
+    /// The source of the connection.
+    let source: HandshakeSource
+
     /// The count that includes this place until its release.
     private let count: HandshakeCount
 
@@ -318,19 +405,22 @@ final class HandshakePlace: Sendable {
 
     /// Creates a place that the count already includes.
     ///
-    /// - Parameter count: The count that includes the place.
-    fileprivate init(in count: HandshakeCount) {
+    /// - Parameters:
+    ///   - source: The source of the connection.
+    ///   - count: The count that includes the place.
+    fileprivate init(source: HandshakeSource, in count: HandshakeCount) {
+        self.source = source
         self.count = count
     }
 
-    /// Frees the place unless an earlier call did.
+    /// Frees the place in the total count and in its source's count unless an earlier call did.
     func release() {
         let releases = isReleased.withLock { isReleased in
             defer { isReleased = true }
             return !isReleased
         }
         if releases {
-            count.free()
+            count.free(from: source)
         }
     }
 }

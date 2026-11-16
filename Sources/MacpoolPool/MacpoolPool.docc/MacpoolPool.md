@@ -115,10 +115,13 @@ limit of open files to 4096, or to the hard limit or `kern.maxfilesperproc` when
 If the process may still open fewer than 1024 files, the daemon does not listen for paired Macs.
 
 Anyone who reaches the port can start a handshake, because a client proves its key only at the
-end. At most 16 connections hold a handshake place at once, and the host closes a connection
-beyond that before its handshake begins. A connection keeps its place after the handshake until
-the daemon decides to serve it, let it pair, or close it. Connections that wait for a busy daemon
-therefore count against the limit. A handshake that does not finish within 5 seconds ends. A
+end. At most 16 connections hold a handshake place at once, and at most 4 of them come from one
+address. The host closes a connection beyond either limit before its handshake begins. It logs a
+warning about an address at the limit at most once a minute. An IPv6 address outside the /64 of
+the listener's address counts by its /64, because one party usually controls a whole /64. Inside
+that /64, each address counts alone. A connection keeps its place after the handshake until the
+daemon decides to serve it, let it pair, or close it. Connections that wait for a busy daemon
+therefore count against both limits. A handshake that does not finish within 5 seconds ends. A
 paired Mac may hold at most 4 connections. A fifth connection receives a failure reply instead of
 the greeting and closes. These limits are fixed.
 

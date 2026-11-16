@@ -372,6 +372,7 @@ struct PeerConnectionTests {
             let listener = try await PeerListener(
                 identity: host,
                 settings: PeerSettings(address: address, port: 0),
+                logger: testLogger(),
                 admits: { _ in false },
             )
             #expect(boundAddresses(port: listener.port) == [address])
@@ -388,6 +389,7 @@ struct PeerConnectionTests {
             _ = try await PeerListener(
                 identity: host,
                 settings: PeerSettings(address: "127.1", port: 0),
+                logger: testLogger(),
                 admits: { _ in false },
             )
         }
@@ -426,17 +428,21 @@ struct PeerConnectionTests {
 
     /// Closes a new connection while the most handshakes run. A handshake that fails or runs out
     /// of time frees its place.
-    @Test func limitsHandshakesThatRunAtOnce() async throws {
+    @Test(arguments: PlaceLimits.both)
+    func limitsHandshakesThatRunAtOnce(limits: PlaceLimits) async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
         let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let logs = LogRecorder()
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
+            logger: testLogger(logs),
             admits: { $0 == clientKey },
             handshakeTimeout: .seconds(3),
-            handshakeLimit: 2,
+            handshakeLimit: limits.total,
+            sourceHandshakeLimit: limits.source,
         )
         defer { listener.close() }
         let endpoint = try loopback(listener.port)
@@ -457,9 +463,10 @@ struct PeerConnectionTests {
             MessageChannel.connect(to: endpoint, using: .tcp),
             MessageChannel.connect(to: endpoint, using: .tcp),
         ]
-        await #expect(throws: PoolError.self) {
-            try await MessageChannel.connect(to: endpoint, using: parameters)
-        }
+        #expect(await refusesAtOnce(endpoint, using: parameters))
+        // Only a refusal at the source's limit names one address.
+        let warned = !logs.entries("Too many handshakes from one address").isEmpty
+        #expect(warned == (limits.source < limits.total))
         for channel in silent {
             #expect(await finishes(within: .seconds(10)) { _ = try? await channel.receive(HostGreeting.self) })
             channel.close()
@@ -522,8 +529,9 @@ struct PeerConnectionTests {
     /// handshake's place once. A successful handshake keeps its place until the owner releases it,
     /// and a second release frees nothing.
     @Test func settlesAHandshakeOnce() throws {
-        let count = HandshakeCount(limit: 1)
-        let armedFirst = try HandshakeOutcome(#require(count.take()))
+        let count = HandshakeCount(limit: 1, sourceLimit: 1)
+        let source = try HandshakeSource.ipv4(#require(IPv4Address("192.0.2.20")))
+        let armedFirst = try HandshakeOutcome(count.take(from: source))
         let timer = Task { _ = try? await Task.sleep(for: .seconds(60)) }
         armedFirst.arm(timer)
         #expect(!timer.isCancelled)
@@ -532,25 +540,150 @@ struct PeerConnectionTests {
         #expect(!armedFirst.settle())
         #expect(armedFirst.succeed() == nil)
 
-        let settledFirst = try HandshakeOutcome(#require(count.take()))
+        let settledFirst = try HandshakeOutcome(count.take(from: source))
         #expect(settledFirst.settle())
         let late = Task { _ = try? await Task.sleep(for: .seconds(60)) }
         settledFirst.arm(late)
         #expect(late.isCancelled)
 
-        let succeeded = try HandshakeOutcome(#require(count.take()))
+        let succeeded = try HandshakeOutcome(count.take(from: source))
         let place = try #require(succeeded.succeed())
         #expect(!succeeded.settle())
-        #expect(count.take() == nil)
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: source) }
         place.release()
         place.release()
-        let next = try #require(count.take())
-        #expect(count.take() == nil)
+        let next = try count.take(from: source)
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: source) }
         next.release()
     }
 
+    /// Counts an IPv4 address alone and an IPv4-mapped address as its IPv4 address. Counts an
+    /// address in the listener's /64 alone and another IPv6 address by its /64. Counts every
+    /// link-local address of an interface as one source.
+    @Test func findsHandshakeSources() throws {
+        let listener = NWEndpoint.Host("2001:db8:1:2::10")
+        let source = { (address: String) in
+            HandshakeSource(.hostPort(host: NWEndpoint.Host(address), port: 7373), listener: listener)
+        }
+        let ipv4 = try HandshakeSource.ipv4(#require(IPv4Address("192.0.2.20")))
+        #expect(source("192.0.2.20") == ipv4)
+        // Network parses the text of a mapped address as IPv4, so the test builds the IPv6 form.
+        let mapped = try #require(IPv6Address("::ffff:192.0.2.20"))
+        #expect(HandshakeSource(.hostPort(host: .ipv6(mapped), port: 7373), listener: listener) == ipv4)
+        let withInterface = try #require(IPv4Address("192.0.2.20%lo0"))
+        #expect(HandshakeSource(.hostPort(host: .ipv4(withInterface), port: 7373), listener: listener) == ipv4)
+        #expect(try source("2001:db8:1:2::20") == .ipv6(#require(IPv6Address("2001:db8:1:2::20"))))
+        #expect(try source("2001:db8:1:2::21") == .ipv6(#require(IPv6Address("2001:db8:1:2::21"))))
+        let outside = try HandshakeSource.ipv6Network(#require(IPv6Address("2001:db8:1:3::")))
+        #expect(source("2001:db8:1:3:4:5:6:7") == outside)
+        #expect(source("2001:db8:1:3::9") == outside)
+        // These addresses differ from the ones above only from the ninth byte on, so a key
+        // longer than /64 would split them.
+        #expect(source("2001:db8:1:3:ff00::1") == outside)
+        #expect(try source("2001:db8:1:2:ff00::1") == .ipv6(#require(IPv6Address("2001:db8:1:2:ff00::1"))))
+        #expect(source("fe80::1%lo0") == .linkLocal(interface: "lo0"))
+        #expect(source("fe80::2%lo0") == .linkLocal(interface: "lo0"))
+        // An IPv4 listener has no /64 of its own.
+        let fromIPv4 = HandshakeSource(.hostPort(host: "2001:db8:1:2::20", port: 1), listener: "192.0.2.10")
+        #expect(try fromIPv4 == .ipv6Network(#require(IPv6Address("2001:db8:1:2::"))))
+        #expect(HandshakeSource(.hostPort(host: .name("example.local", nil), port: 1), listener: listener) == nil)
+        #expect(HandshakeSource(.unix(path: "/tmp/peer.sock"), listener: listener) == nil)
+    }
+
+    /// Gives the daemon's listener the limits that the documentation states.
+    @Test func keepsTheDocumentedHandshakeLimits() {
+        #expect(PeerListener.handshakeLimit == 16)
+        #expect(PeerListener.sourceHandshakeLimit == 4)
+    }
+
+    /// Limits places in total and per source, with the total limit first. A refused connection
+    /// takes no place. A release frees both counts once, and a source without places has no entry.
+    @Test func countsPlacesPerSource() throws {
+        let count = HandshakeCount(limit: 3, sourceLimit: 2)
+        let first = try HandshakeSource.ipv4(#require(IPv4Address("192.0.2.20")))
+        let second = try HandshakeSource.ipv4(#require(IPv4Address("192.0.2.21")))
+        let third = try HandshakeSource.ipv4(#require(IPv4Address("192.0.2.22")))
+        let firstPlaces = try [count.take(from: first), count.take(from: first)]
+        #expect(throws: HandshakeRefusal.sourceFull) { try count.take(from: first) }
+        // The refused connection took no place, so another source gets the last one.
+        let secondPlace = try count.take(from: second)
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: first) }
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: third) }
+        #expect(count.sourceCount == 2)
+
+        firstPlaces[0].release()
+        firstPlaces[0].release()
+        let thirdPlace = try count.take(from: third)
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: first) }
+        firstPlaces[1].release()
+        #expect(count.sourceCount == 2)
+        secondPlace.release()
+        thirdPlace.release()
+        #expect(count.sourceCount == 0)
+
+        // The second release of a place freed nothing, so the counts start from zero again.
+        let again = try [count.take(from: first), count.take(from: first)]
+        #expect(throws: HandshakeRefusal.sourceFull) { try count.take(from: first) }
+        let last = try count.take(from: second)
+        #expect(throws: HandshakeRefusal.full) { try count.take(from: third) }
+        for place in again + [last] {
+            place.release()
+        }
+        #expect(count.sourceCount == 0)
+    }
+
+    /// Closes a connection beyond the most places of one source before its handshake. Warns once
+    /// a minute while the source stays at its limit, and admits the source after a place frees.
+    @Test func limitsHandshakesFromOneSource() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let logs = LogRecorder()
+        let clock = TestClock()
+        let listener = try await PeerListener(
+            identity: host,
+            settings: loopbackSettings(),
+            logger: testLogger(logs),
+            now: { clock.now },
+            admits: { $0 == clientKey },
+            // The silent connections must keep their places until the last refusal, however
+            // slowly a loaded Mac runs the test. Closing them frees the places sooner.
+            handshakeTimeout: .seconds(40),
+        )
+        defer { listener.close() }
+        let endpoint = try loopback(listener.port)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        let refused = { await refusesAtOnce(endpoint, using: parameters) }
+        let warnings = { logs.entries("Too many handshakes from one address") }
+
+        var silent: [MessageChannel] = []
+        for _ in 0 ..< 4 {
+            try await silent.append(MessageChannel.connect(to: endpoint, using: .tcp))
+        }
+        #expect(await refused())
+        #expect(await refused())
+        #expect(warnings().map(\.level) == [.warning, .debug])
+        #expect(warnings().allSatisfy { $0.metadata["address"]?.hasPrefix("127.0.0.1:") == true })
+        clock.advance(by: PeerLogRate.interval)
+        #expect(await refused())
+        #expect(warnings().map(\.level) == [.warning, .debug, .warning])
+
+        for channel in silent {
+            channel.close()
+        }
+        #expect(await eventually(within: .seconds(15)) {
+            guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
+                return false
+            }
+            channel.close()
+            return true
+        })
+    }
+
     /// Frees a connection's place when its owner releases it, while the connection stays open.
-    @Test func freesAPlaceWhenItsOwnerReleasesIt() async throws {
+    @Test(arguments: PlaceLimits.both)
+    func freesAPlaceWhenItsOwnerReleasesIt(limits: PlaceLimits) async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
@@ -558,8 +691,10 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
+            logger: testLogger(),
             admits: { $0 == clientKey },
-            handshakeLimit: 2,
+            handshakeLimit: limits.total,
+            sourceHandshakeLimit: limits.source,
         )
         defer { listener.close() }
         let endpoint = try loopback(listener.port)
@@ -579,7 +714,8 @@ struct PeerConnectionTests {
 
     /// Closes a connection whose handshake finishes after the stream of connections ended, and
     /// frees its place.
-    @Test func freesAPlaceAfterTheStreamEnded() async throws {
+    @Test(arguments: PlaceLimits.both)
+    func freesAPlaceAfterTheStreamEnded(limits: PlaceLimits) async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
@@ -587,8 +723,10 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
+            logger: testLogger(),
             admits: { $0 == clientKey },
-            handshakeLimit: 2,
+            handshakeLimit: limits.total,
+            sourceHandshakeLimit: limits.source,
         )
         defer { listener.close() }
         // Cancelling the task that reads the stream ends the stream while the listener accepts.
@@ -612,7 +750,8 @@ struct PeerConnectionTests {
 
     /// Frees the place of a connection that finished its handshake without ALPN, after the
     /// listener closed it.
-    @Test func freesAPlaceWithoutALPN() async throws {
+    @Test(arguments: PlaceLimits.both)
+    func freesAPlaceWithoutALPN(limits: PlaceLimits) async throws {
         let host = try makeIdentity()
         let client = try makeIdentity()
         let hostKey = KeyFingerprint(digest: host.keyDigest)
@@ -620,8 +759,10 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
+            logger: testLogger(),
             admits: { $0 == clientKey },
-            handshakeLimit: 2,
+            handshakeLimit: limits.total,
+            sourceHandshakeLimit: limits.source,
         )
         defer { listener.close() }
         let endpoint = try loopback(listener.port)
@@ -647,8 +788,9 @@ struct PeerConnectionTests {
         channel.close()
     }
 
-    /// Keeps the places of connections that wait while the daemon is busy, and closes the 17th
-    /// connection before its handshake. The daemon frees the places once it decides.
+    /// Keeps the places of connections that wait while the daemon is busy, and closes a fifth
+    /// connection from one address before its handshake. The daemon frees the places once it
+    /// decides.
     @Test func holdsPlacesWhileTheDaemonIsBusy() async throws {
         let fixture = try PoolFixture()
         let client = try makeIdentity()
@@ -663,12 +805,11 @@ struct PeerConnectionTests {
         defer { busy.signal() }
 
         var channels: [MessageChannel] = []
-        for _ in 0 ..< 16 {
+        for _ in 0 ..< 4 {
             try await channels.append(MessageChannel.connect(to: endpoint, using: parameters))
         }
-        await #expect(throws: PoolError.self) {
-            try await MessageChannel.connect(to: endpoint, using: parameters)
-        }
+        #expect(await refusesAtOnce(endpoint, using: parameters))
+        #expect(fixture.logs.entries("Too many handshakes from one address").map(\.level) == [.warning])
         busy.signal()
         #expect(await eventually {
             guard let channel = try? await MessageChannel.connect(to: endpoint, using: parameters) else {
@@ -812,6 +953,7 @@ struct PeerConnectionTests {
         let listener = try await PeerListener(
             identity: host,
             settings: loopbackSettings(),
+            logger: testLogger(),
             admits: { $0 == clientKey },
         )
         defer { listener.close() }
@@ -936,6 +1078,55 @@ func boundAddresses(port: UInt16) -> [String] {
 /// - Returns: The text before the first NUL.
 private func text(of buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+}
+
+/// The handshake limits of a listener in a test.
+///
+/// Every test connection comes from 127.0.0.1. A test that runs with both values of ``both``
+/// therefore checks that the total count and the source's count each get the place back.
+struct PlaceLimits: Sendable, CustomTestStringConvertible {
+    /// The most connections that hold a place.
+    let total: Int
+
+    /// The most of those connections from one source.
+    let source: Int
+
+    /// Limits where the total one binds first and limits where the source's one binds first.
+    static let both = [PlaceLimits(total: 2, source: 4), PlaceLimits(total: 16, source: 2)]
+
+    /// The limits in the test's name.
+    var testDescription: String {
+        "\(total) places, \(source) per source"
+    }
+}
+
+/// Connects and reports whether the host closed the connection before it was ready.
+///
+/// A host that closes the connection makes it fail with an error from Network. A host that
+/// leaves the connection open makes the client give up after `timeout` instead, with a reason
+/// that names the timeout. The difference shows a prompt refusal without measuring time.
+///
+/// - Parameters:
+///   - endpoint: The host's endpoint.
+///   - parameters: The client's TLS parameters.
+///   - timeout: The client's longest wait.
+/// - Returns: Whether the connection failed, and failed for a reason other than the client's
+///   timeout.
+func refusesAtOnce(
+    _ endpoint: NWEndpoint,
+    using parameters: NWParameters,
+    timeout: Duration = .seconds(5),
+) async -> Bool {
+    do throws(PoolError) {
+        let channel = try await MessageChannel.connect(to: endpoint, using: parameters, timeout: timeout)
+        channel.close()
+        return false
+    } catch {
+        guard case let .connection(_, reason) = error else {
+            return false
+        }
+        return reason != "no answer within \(timeout)"
+    }
 }
 
 /// Creates settings that listen on 127.0.0.1 and retry quickly.
