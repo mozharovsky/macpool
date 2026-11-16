@@ -110,11 +110,17 @@ The daemon loads the key when it starts listening. A key or a list that cannot b
 port that another process holds, leaves the local socket serving. The daemon logs the failure and
 tries again after ``PeerSettings/retryInterval``.
 
+Every connection holds a file descriptor. When the daemon starts, it raises the process's soft
+limit of open files to 4096, or to the hard limit or `kern.maxfilesperproc` when either is lower.
+If the process may still open fewer than 1024 files, the daemon does not listen for paired Macs.
+
 Anyone who reaches the port can start a handshake, because a client proves its key only at the
-end. At most 16 handshakes run at once, and the host closes a connection beyond that before its
-handshake begins. A handshake that does not finish within 5 seconds ends. A paired Mac may hold
-at most 4 connections. A fifth connection receives a failure reply instead of the greeting and
-closes. These limits are fixed.
+end. At most 16 connections hold a handshake place at once, and the host closes a connection
+beyond that before its handshake begins. A connection keeps its place after the handshake until
+the daemon decides to serve it, let it pair, or close it. Connections that wait for a busy daemon
+therefore count against the limit. A handshake that does not finish within 5 seconds ends. A
+paired Mac may hold at most 4 connections. A fifth connection receives a failure reply instead of
+the greeting and closes. These limits are fixed.
 
 A channel queues at most 4 MiB for a peer that does not read and closes the connection beyond
 that. After the daemon handles a request, it reads the next one only once the messages that it

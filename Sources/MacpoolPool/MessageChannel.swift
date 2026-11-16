@@ -416,12 +416,18 @@ private enum ConnectionUser {
 }
 
 /// Bytes that arrived on a connection and do not yet form a complete line.
+///
+/// A search for a line break skips the bytes that earlier searches examined. A line that arrives
+/// in many small pieces therefore costs time in proportion to its length.
 struct LineBuffer {
     /// The longest line that the buffer accepts, in bytes, without its line break.
     let maximumLength: Int
 
     /// The bytes after the last complete line.
     private var bytes = Data()
+
+    /// The number of bytes at the start of ``bytes`` that hold no line break.
+    private var searchedCount = 0
 
     /// Creates an empty buffer.
     ///
@@ -443,7 +449,9 @@ struct LineBuffer {
     /// - Throws: ``PoolError/malformedMessage(reason:)`` when more than ``maximumLength`` bytes
     ///   wait without a line break.
     mutating func takeLine() throws(PoolError) -> Data? {
-        guard let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) else {
+        let start = bytes.startIndex + searchedCount
+        guard let newline = bytes[start...].firstIndex(of: UInt8(ascii: "\n")) else {
+            searchedCount = bytes.count
             guard bytes.count <= maximumLength else {
                 throw .malformedMessage(reason: "a line exceeds \(maximumLength) bytes")
             }
@@ -451,6 +459,7 @@ struct LineBuffer {
         }
         let line = Data(bytes[bytes.startIndex ..< newline])
         bytes.removeSubrange(bytes.startIndex ... newline)
+        searchedCount = 0
         return line
     }
 
@@ -458,7 +467,10 @@ struct LineBuffer {
     ///
     /// - Returns: The bytes.
     mutating func takeAll() -> Data {
-        defer { bytes = Data() }
+        defer {
+            bytes = Data()
+            searchedCount = 0
+        }
         return Data(bytes)
     }
 }
