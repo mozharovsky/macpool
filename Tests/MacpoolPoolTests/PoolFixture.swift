@@ -2,6 +2,7 @@ import Foundation
 import Logging
 @testable import MacpoolPool
 import MacpoolVM
+import Network
 import Synchronization
 import Testing
 
@@ -30,6 +31,9 @@ final class PoolFixture {
 
     /// The messages that the daemons log.
     let logs = LogRecorder()
+
+    /// The guest addresses whose SSH server a daemon reached through `guestSSH`.
+    let guestAddresses = GuestAddresses()
 
     /// Creates the data directory's parent and the source bundle.
     ///
@@ -77,6 +81,8 @@ final class PoolFixture {
     ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
     ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
     ///   - peerSilenceLimit: How long a paired Mac's connection may go without a request.
+    ///   - guestSSH: The SSH server that stands in for every guest's, or `nil` for the guests'
+    ///     own addresses.
     /// - Returns: The daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory.
     func daemon(
@@ -87,6 +93,7 @@ final class PoolFixture {
         reconnectWindow: Duration = .seconds(1),
         releaseTimeout: Duration = .seconds(2),
         peerSilenceLimit: Duration = .seconds(60),
+        guestSSH: NWEndpoint? = nil,
     ) throws(PoolError) -> PoolDaemon {
         let clock = clock
         let logs = logs
@@ -105,6 +112,13 @@ final class PoolFixture {
             logger: testLogger(logs),
         )
         configuration.peerSilenceLimit = peerSilenceLimit
+        if let guestSSH {
+            let addresses = guestAddresses
+            configuration.guestSSHEndpoint = { address in
+                addresses.record(address)
+                return guestSSH
+            }
+        }
         return try PoolDaemon(configuration: configuration)
     }
 
@@ -118,6 +132,8 @@ final class PoolFixture {
     ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
     ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
     ///   - peerSilenceLimit: How long a paired Mac's connection may go without a request.
+    ///   - guestSSH: The SSH server that stands in for every guest's, or `nil` for the guests'
+    ///     own addresses.
     /// - Returns: The listening daemon.
     /// - Throws: ``PoolError`` when the daemon cannot take the directory or listen.
     func start(
@@ -128,6 +144,7 @@ final class PoolFixture {
         reconnectWindow: Duration = .seconds(1),
         releaseTimeout: Duration = .seconds(2),
         peerSilenceLimit: Duration = .seconds(60),
+        guestSSH: NWEndpoint? = nil,
     ) async throws(PoolError) -> PoolDaemon {
         let daemon = try daemon(
             slots: slots,
@@ -137,6 +154,7 @@ final class PoolFixture {
             reconnectWindow: reconnectWindow,
             releaseTimeout: releaseTimeout,
             peerSilenceLimit: peerSilenceLimit,
+            guestSSH: guestSSH,
         )
         try await daemon.start()
         return daemon
@@ -227,6 +245,24 @@ struct ReadyLease {
 
     /// The lease as the ready reply described it.
     let lease: LeaseSummary
+}
+
+/// The guest addresses that daemons asked for, in order.
+final class GuestAddresses: Sendable {
+    /// The addresses.
+    private let addresses = Mutex<[String]>([])
+
+    /// Every address in the order of the requests.
+    var all: [String] {
+        addresses.withLock { $0 }
+    }
+
+    /// Adds an address.
+    ///
+    /// - Parameter address: The guest's address.
+    func record(_ address: String) {
+        addresses.withLock { $0.append(address) }
+    }
 }
 
 /// A clock that moves only when a test advances it.

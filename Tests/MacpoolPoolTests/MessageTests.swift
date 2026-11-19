@@ -46,6 +46,7 @@ struct MessageTests {
             .revoke(key: "mzxw-6ytb-oi2d-k3lq", endLeases: true),
             .forget(endLeases: true),
             .heartbeat,
+            .connect(id),
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
@@ -79,6 +80,8 @@ struct MessageTests {
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: forget) == .forget())
         let heartbeat = try String(decoding: MessageCoding.encoder.encode(PoolRequest.heartbeat), as: UTF8.self)
         #expect(heartbeat == #"{"request":"heartbeat"}"#)
+        let connect = try String(decoding: MessageCoding.encoder.encode(PoolRequest.connect(id)), as: UTF8.self)
+        #expect(connect == #"{"lease":"0a1b2c3d","request":"connect"}"#)
         var hidden = lease
         hidden.source = "base"
         hidden.bundle = nil

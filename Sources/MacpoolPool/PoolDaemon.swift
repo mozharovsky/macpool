@@ -1,6 +1,7 @@
 public import Foundation
 public import Logging
 import MacpoolVM
+import Network
 import Synchronization
 
 /// The daemon that owns a host's VM slots, its lease queue, and the supervisors of leased VMs.
@@ -56,6 +57,10 @@ import Synchronization
 /// closes the connection. The leases that the connection held wait ``PoolPolicy/reattachGrace``
 /// for another connection of the Mac to attach. A local client that disconnects ends its leases
 /// at once.
+///
+/// A ``PoolRequest/connect(_:)`` request turns a connection into a stream to the SSH server of a
+/// lease's guest. The daemon keeps a list of the open streams. It resets a stream when its lease
+/// stops being ready, when the host revokes the Mac that opened it, and when the daemon stops.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -116,6 +121,14 @@ public actor PoolDaemon {
         /// The longest time that a paired Mac's connection may go without a request.
         var peerSilenceLimit = Duration.seconds(60)
 
+        /// Returns the endpoint of the SSH server of a guest with a given IP address.
+        var guestSSHEndpoint: @Sendable (String) -> NWEndpoint = { address in
+            .hostPort(host: NWEndpoint.Host(address), port: 22)
+        }
+
+        /// The longest wait for a guest's SSH server to accept a stream's connection.
+        var guestConnectTimeout = Duration.seconds(10)
+
         /// Creates a configuration.
         ///
         /// - Parameters:
@@ -174,6 +187,24 @@ public actor PoolDaemon {
         let channel: MessageChannel
         /// Who the client acts for.
         let owner: LeaseOwner
+    }
+
+    /// A stream between a client and the SSH server of a lease's guest.
+    private struct OpenStream {
+        /// The lease whose guest the stream reaches.
+        let lease: LeaseID
+        /// Who opened the stream.
+        let owner: LeaseOwner
+        /// The client's connection.
+        let client: ByteStream
+        /// The connection to the guest, once the guest accepted it.
+        var guest: ByteStream?
+
+        /// Ends both connections, so that both peers see a failure instead of a normal end.
+        func reset() {
+            client.reset()
+            guest?.reset()
+        }
     }
 
     /// The daemon's connection to one supervisor.
@@ -274,6 +305,11 @@ public actor PoolDaemon {
     /// The longest wait for the one request of a Mac that pairs.
     static let pairingTimeout = Duration.seconds(5)
 
+    /// The most streams that one paired Mac may have at once.
+    ///
+    /// Each stream holds a connection to a guest and buffers of up to 64 KiB in each direction.
+    static let streamsPerPeer = 8
+
     /// The open invitation for a client Mac to pair, if any.
     private let invitation = PairingInvitation()
 
@@ -296,6 +332,12 @@ public actor PoolDaemon {
 
     /// The number of the next client.
     private var nextClient: UInt64 = 0
+
+    /// The open streams, keyed by the number that the daemon gave each.
+    private var streams: [UInt64: OpenStream] = [:]
+
+    /// The number of the next stream.
+    private var nextStream: UInt64 = 0
 
     /// The open supervisor connections.
     private var links: [LeaseID: Link] = [:]
@@ -464,6 +506,7 @@ public actor PoolDaemon {
         for link in links.values {
             link.channel.close()
         }
+        endStreams { _ in true }
         clients = [:]
         links = [:]
         lock = nil
@@ -1134,6 +1177,10 @@ public actor PoolDaemon {
                 }
                 try forget(key, endLeases: endLeases, from: client)
                 return false
+            case let .connect(id):
+                try openStream(to: id, for: client, owner: owner)
+                // The stream owns the connection now, so serve(_:owner:on:) stops reading it.
+                return false
             case .heartbeat:
                 break
             }
@@ -1353,16 +1400,17 @@ public actor PoolDaemon {
 
     /// The connections and leases that ``cutOff(_:endLeases:reason:except:)`` ended.
     private struct CutOff {
-        /// The number of connections that the daemon closed.
+        /// The number of connections that the daemon closed, streams included.
         var connections: Int
         /// The number of leases that ended.
         var leases: Int
     }
 
-    /// Ends the leases of a paired Mac and closes its connections.
+    /// Ends the leases of a paired Mac and closes its connections and streams.
     ///
     /// The daemon ends the leases first. Their attached clients then receive the reason. Each
-    /// closed connection receives a refusal, and its waiting requests leave the queue.
+    /// closed connection receives a refusal, and its waiting requests leave the queue. Each stream
+    /// ends with a reset.
     ///
     /// - Parameters:
     ///   - key: The fingerprint of the Mac's key.
@@ -1380,6 +1428,7 @@ public actor PoolDaemon {
     ) -> CutOff {
         let owner = LeaseOwner.client(key)
         let before = ledger.liveLeases(of: owner).count
+        let streamCount = streams.values.count { $0.owner == owner }
         // A lease that needs a client may wait for its client to reattach after a daemon
         // restart or a lost connection. The Mac can no longer reattach. The lease therefore ends
         // now.
@@ -1390,7 +1439,11 @@ public actor PoolDaemon {
         for connection in connections {
             disconnect(connection, sending: .failure(Self.notAcceptedReason))
         }
-        return CutOff(connections: connections.count, leases: before - ledger.liveLeases(of: owner).count)
+        endStreams { $0.owner == owner }
+        return CutOff(
+            connections: connections.count + streamCount,
+            leases: before - ledger.liveLeases(of: owner).count,
+        )
     }
 
     /// The refusal that a paired Mac receives after the host stopped accepting it.
@@ -1732,6 +1785,143 @@ public actor PoolDaemon {
         return parent.pathComponents == images.pathComponents
     }
 
+    // MARK: Streams
+
+    /// Hands a client's connection to a new stream to the SSH server of a lease's guest.
+    ///
+    /// The channel gives up the connection before the call returns, so `serve(_:owner:on:)` reads
+    /// no line that the client sent after the request. The stream holds no lease, so its end
+    /// leaves the lease as it is. The connection to the guest and the reply follow in a task of
+    /// their own.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - client: The client that sent the request.
+    ///   - owner: Who the client acts for.
+    /// - Throws: The errors of ``LeaseLedger/streamTarget(_:for:)``,
+    ///   ``PoolError/invalidRequest(reason:)`` when the connection waits for or holds a lease or
+    ///   the Mac already has ``streamsPerPeer`` streams, or ``PoolError/connection(path:reason:)``
+    ///   when the channel began to close.
+    private func openStream(to id: LeaseID, for client: ClientID, owner: LeaseOwner) throws(PoolError) {
+        let target = try ledger.streamTarget(id, for: owner)
+        guard !ledger.isBusy(client) else {
+            throw .invalidRequest(reason: "a connection that waits for or holds a lease cannot carry a stream. Open "
+                + "another connection")
+        }
+        guard owner == .local || streams.values.count(where: { $0.owner == owner }) < Self.streamsPerPeer else {
+            throw .invalidRequest(reason: "this Mac already has \(Self.streamsPerPeer) streams to the host's guests, "
+                + "the most it may have")
+        }
+        guard let channel = clients[client]?.channel else {
+            return
+        }
+        let stream = try channel.takeStream()
+        clients[client] = nil
+        let number = nextStream
+        nextStream += 1
+        streams[number] = OpenStream(lease: id, owner: owner, client: stream)
+        configuration.logger.info("Opening a stream to a lease's guest", metadata: [
+            "lease": "\(id)",
+            "owner": "\(owner)",
+        ])
+        let ready = visible(.ready(target.lease), to: owner)
+        Task { await self.connectStream(number, to: target.address, replying: ready) }
+    }
+
+    /// Connects a stream to its guest's SSH server and relays bytes until the stream ends.
+    ///
+    /// If the guest refuses the connection, the client receives a failure and the stream closes.
+    /// A paired client's failure names no guest address.
+    ///
+    /// - Parameters:
+    ///   - number: The stream's number in the list of streams.
+    ///   - address: The guest's IP address.
+    ///   - ready: The reply that the client receives once the guest accepted the connection.
+    private func connectStream(_ number: UInt64, to address: String, replying ready: PoolReply) async {
+        let endpoint = configuration.guestSSHEndpoint(address)
+        let accepted: Result<ByteStream, PoolError>
+        do throws(PoolError) {
+            let channel = try await MessageChannel.connect(
+                to: endpoint,
+                using: .tcp,
+                timeout: configuration.guestConnectTimeout,
+            )
+            accepted = try .success(channel.takeStream())
+        } catch {
+            accepted = .failure(error)
+        }
+        guard var open = streams[number] else {
+            // The lease ended or the daemon stopped while the guest answered.
+            try? accepted.get().reset()
+            return
+        }
+        let guest: ByteStream
+        switch accepted {
+        case let .success(connection):
+            guest = connection
+        case let .failure(error):
+            streams[number] = nil
+            configuration.logger.warning("A lease's guest refused a stream", metadata: [
+                "lease": "\(open.lease)",
+                "reason": "\(error)",
+            ])
+            let reason = open.owner == .local ? error.description
+                : "the guest's SSH server did not accept the connection"
+            await Self.finish(open.client, sending: .failure(reason))
+            return
+        }
+        open.guest = guest
+        streams[number] = open
+        do throws(PoolError) {
+            try await open.client.send(Self.line(ready))
+        } catch {
+            open.reset()
+            streams[number] = nil
+            return
+        }
+        await StreamRelay.run(between: open.client, and: guest)
+        streams[number] = nil
+        configuration.logger.info("A stream ended", metadata: ["lease": "\(open.lease)"])
+    }
+
+    /// Resets the streams that a condition selects and removes them from the list.
+    ///
+    /// - Parameter condition: Selects the streams to end.
+    private func endStreams(where condition: (OpenStream) -> Bool) {
+        for (number, stream) in streams where condition(stream) {
+            stream.reset()
+            streams[number] = nil
+        }
+    }
+
+    /// Sends a last reply on a client's stream and closes the stream.
+    ///
+    /// - Parameters:
+    ///   - stream: The client's connection after the channel gave it up.
+    ///   - reply: The reply.
+    private static func finish(_ stream: ByteStream, sending reply: PoolReply) async {
+        do throws(PoolError) {
+            try await stream.send(line(reply))
+            try await stream.finishSending()
+        } catch {
+            // The client sees the reset that a failed finish leaves.
+        }
+        stream.close()
+    }
+
+    /// Encodes a reply as a line of the channel protocol.
+    ///
+    /// - Parameter reply: The reply.
+    /// - Returns: The JSON object and a line break.
+    /// - Throws: ``PoolError/malformedMessage(reason:)`` when the reply cannot be encoded.
+    private static func line(_ reply: PoolReply) throws(PoolError) -> Data {
+        do {
+            return try MessageCoding.encoder.encode(reply) + Data("\n".utf8)
+        } catch {
+            throw .malformedMessage(reason: "\(error)")
+        }
+    }
+
     // MARK: Ledger actions
 
     /// Stores the ledger and performs the actions of a change.
@@ -1750,6 +1940,8 @@ public actor PoolDaemon {
             configuration.logger.error("The pool state could not be saved", metadata: ["error": "\(error)"])
         }
         logChanges()
+        // The guest's SSH server goes away with the VM, so a stream outlives no change of phase.
+        endStreams { ledger.leases[$0.lease]?.phase != .ready }
         for action in actions {
             switch action {
             case let .notify(client, reply):

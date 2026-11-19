@@ -138,6 +138,23 @@ Network does not pass the end of one direction through TLS, so
 ends first, the stream resets the connection and the call throws. The peer then sees a failure
 instead of a normal end. ``ByteStream/receive()`` returns `nil` only after a normal end.
 
+### Streams to guests
+
+A ``PoolRequest/connect(_:)`` request turns a connection into a byte stream to port 22 of a ready
+lease's guest. ``PoolClient/openStream(to:in:timeout:)`` opens one through the daemon on this Mac,
+and ``PoolClient/openStream(to:on:directory:timeout:)`` opens one through a paired host. A stream
+holds no lease, so its end leaves the lease as it is. A connection that waits for or holds a lease
+cannot carry a stream.
+
+The daemon passes a normal end of either side on as a normal end, and a failure as a reset. A
+Unix socket carries no reset, so a local client sees the end of a broken stream as a normal end.
+An SSH client still notices the break, because its protocol frames every packet. Over TLS, the end
+of either direction closes the whole stream.
+
+The daemon resets a stream when its lease stops being ready, when the host revokes the Mac that
+opened it, and when the daemon stops. A paired Mac may hold at most 8 streams besides its 4
+connections. If the guest refuses the connection, a paired Mac's failure names no guest address.
+
 ### Pairing
 
 A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
@@ -316,6 +333,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 ### Clients
 
 - ``PoolClient``
+- ``GuestStream``
 - ``PoolRequest``
 - ``PoolReply``
 - ``LeaseTerms``

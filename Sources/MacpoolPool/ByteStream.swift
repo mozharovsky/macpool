@@ -25,6 +25,11 @@ public final class ByteStream: Sendable {
     /// owner closed the stream.
     private let state: Mutex<StreamState>
 
+    /// Whether ``close()``, ``reset()``, or a finish over TLS ended the stream on this side.
+    var isClosed: Bool {
+        state.withLock { $0.isClosed }
+    }
+
     /// Whether the connection runs TLS.
     ///
     /// Network cannot end only one direction of a TLS connection.

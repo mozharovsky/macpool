@@ -268,6 +268,15 @@ struct Orphan: Equatable {
     let reason: String
 }
 
+/// The guest of a lease that takes a stream.
+struct StreamTarget: Equatable {
+    /// The lease as the client that asked sees it.
+    let lease: LeaseSummary
+
+    /// The guest's IP address.
+    let address: String
+}
+
 /// A step that the daemon performs after the ledger changed.
 enum LedgerAction: Sendable, Equatable {
     /// Sends a reply to a client.
@@ -425,6 +434,35 @@ struct LeaseLedger {
             }
         }
         return actions + notifyPositions()
+    }
+
+    /// Reports whether a client waits for a lease or receives a lease's replies.
+    ///
+    /// - Parameter client: The client.
+    /// - Returns: Whether the queue holds a request of the client or a lease reports to it.
+    func isBusy(_ client: ClientID) -> Bool {
+        queue.contains { $0.client == client } || clients.values.contains(client)
+    }
+
+    /// Finds the guest address of a lease that takes streams.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - owner: Who asks for the stream.
+    /// - Returns: The lease as the owner sees it, and the guest's address.
+    /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
+    ///   not act on it, ``PoolError/leaseEnding(id:)`` when it is stopping, or
+    ///   ``PoolError/invalidRequest(reason:)`` when its VM is not ready.
+    func streamTarget(_ id: LeaseID, for owner: LeaseOwner) throws(PoolError) -> StreamTarget {
+        let record = try record(id, for: owner)
+        guard record.phase != .stopping else {
+            throw .leaseEnding(id: id.rawValue)
+        }
+        guard record.phase == .ready, let address = record.address else {
+            throw .invalidRequest(reason: "lease \(id) is \(record.phase.rawValue), and only a ready lease takes "
+                + "connections")
+        }
+        return StreamTarget(lease: summary(of: record, for: owner), address: address)
     }
 
     /// Attaches a client to a lease, for example after the daemon restarted.
