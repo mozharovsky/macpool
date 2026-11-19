@@ -4,17 +4,25 @@ import Testing
 
 /// Tests of how the daemon notices a paired Mac that stopped answering, and of the leases that
 /// such a Mac held.
+///
+/// The daemon measures silence with the fixture's clock and checks it at each tick, so the tests
+/// advance the clock instead of waiting.
 @Suite(.timeLimit(.minutes(1)))
 struct PeerSilenceTests {
     /// Closes the connection of a paired Mac that stopped sending requests, keeps its attached
     /// lease for the reattach grace, and then ends the lease.
     @Test func closesASilentMacAndThenEndsItsLease() async throws {
         let pool = try PoolFixture()
-        let daemon = try await pool.start(offeredSources: ["base": pool.source], peerSilenceLimit: .milliseconds(500))
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
         let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
         let lease = try await Self.readyLease(on: remote)
 
-        // The test's connection never sends a heartbeat, like a Mac that went away.
+        // The test's connection sends nothing more, like a Mac that went away.
+        pool.clock.advance(by: 59)
+        await daemon.tick()
+        #expect(pool.logs.entries("A paired Mac stopped answering").isEmpty)
+        pool.clock.advance(by: 1)
+        await daemon.tick()
         #expect(try await isClosed(remote))
         #expect(pool.logs.entries("A paired Mac stopped answering").count == 1)
         pool.clock.advance(by: 59)
@@ -31,63 +39,85 @@ struct PeerSilenceTests {
     /// Keeps the lease of a silent Mac that attaches again from a new connection within the grace.
     @Test func keepsTheLeaseOfAMacThatReattaches() async throws {
         let pool = try PoolFixture()
-        let daemon = try await pool.start(offeredSources: ["base": pool.source], peerSilenceLimit: .milliseconds(500))
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
         let alice = try LeaseLedgerTests.paired("a")
         let first = try await pool.pairedClient(of: daemon, owner: alice)
         let lease = try await Self.readyLease(on: first)
+        pool.clock.advance(by: 60)
+        await daemon.tick()
         #expect(try await isClosed(first))
 
         pool.clock.advance(by: 30)
         let second = try await pool.pairedClient(of: daemon, owner: alice)
-        let heartbeats = Self.sendHeartbeats(on: second)
-        defer { heartbeats.cancel() }
         try second.send(PoolRequest.attach(lease.id))
         #expect(try await next(second) == .ready(lease))
-        pool.clock.advance(by: 60)
+        // The grace of the first connection's lease ends here.
+        pool.clock.advance(by: 30)
         await daemon.tick()
         #expect(await daemon.summary().leases.map(\.phase) == [.ready])
-        second.close()
         await daemon.shutdown()
     }
 
-    /// Serves a Mac whose connection sends heartbeats for longer than the silence limit, and
-    /// closes a connection whose heartbeats come too rarely.
-    @Test func keepsAConnectionThatSendsHeartbeats() async throws {
+    /// Keeps the connections of a paired Mac that sends requests within the limit and of the
+    /// local user, and closes the connection of a Mac that stays silent.
+    @Test func keepsConnectionsThatSendRequests() async throws {
         let pool = try PoolFixture()
-        let client = try makeIdentity()
-        let hostKey = try listClients([KeyFingerprint(digest: client.keyDigest)], in: pool.directory)
-        let daemon = try await pool.start(peers: loopbackSettings(), peerSilenceLimit: .seconds(1))
-        let endpoint = try await loopback(listeningPort(of: daemon))
+        let daemon = try await pool.start()
+        let lively = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        let silent = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("b"))
+        let local = try await PoolClient.connect(to: pool.directory)
+        let empty = PoolReply.status(PoolSummary(slots: 2, leases: [], queue: []))
+        let localStatus = PoolReply.status(PoolSummary(
+            slots: 2,
+            leases: [],
+            queue: [],
+            images: pool.directory.images(),
+        ))
+        // The reply shows that the daemon accepted the local connection before the clock moves.
+        try local.send(PoolRequest.status)
+        #expect(try await next(local) == localStatus)
 
-        let lively = try await PoolClient.connect(
-            to: endpoint,
-            as: client,
-            hostKey: hostKey,
-            heartbeat: .milliseconds(100),
-        )
-        let rare = try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey, heartbeat: .seconds(30))
-        #expect(try await isClosed(rare))
-        try await Task.sleep(for: .seconds(1))
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        #expect(pool.logs.entries("A paired Mac stopped answering").isEmpty)
+        // The daemon answers no heartbeat, so the next reply belongs to the status request.
+        try lively.send(PoolRequest.heartbeat)
         try lively.send(PoolRequest.status)
-        guard case .status = try await next(lively) else {
-            Issue.record("the host closed a connection that sent heartbeats")
-            return
-        }
-        lively.close()
+        #expect(try await next(lively) == empty)
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        #expect(try await isClosed(silent))
+        #expect(pool.logs.entries("A paired Mac stopped answering").count == 1)
+        try lively.send(PoolRequest.status)
+        #expect(try await next(lively) == empty)
+        try local.send(PoolRequest.status)
+        #expect(try await next(local) == localStatus)
         await daemon.shutdown()
     }
 
-    /// Sends a heartbeat on a connection every 100 milliseconds until the task is cancelled.
-    ///
-    /// - Parameter client: The connection.
-    /// - Returns: The task that sends.
-    private static func sendHeartbeats(on client: MessageChannel) -> Task<Void, Never> {
-        Task {
-            while !Task.isCancelled {
-                try? client.send(PoolRequest.heartbeat)
-                try? await Task.sleep(for: .milliseconds(100))
-            }
+    /// Sends heartbeats at the given interval until the connection closes.
+    @Test func sendsHeartbeatsUntilTheConnectionCloses() async throws {
+        let directory = try ShortDirectory()
+        let socket = directory.url.appending(path: "test.sock")
+        let listener = try await SocketListener(socket: socket)
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: socket)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(10))
+            server.close()
         }
+        defer { watchdog.cancel() }
+
+        PoolClient.startHeartbeat(on: client, every: .milliseconds(20))
+        #expect(try await server.receive(PoolRequest.self) == .heartbeat)
+        #expect(try await server.receive(PoolRequest.self) == .heartbeat)
+        await client.finish()
+        while let request = try await server.receive(PoolRequest.self) {
+            #expect(request == .heartbeat)
+        }
+        server.close()
     }
 
     /// Requests a lease of the offered source on a paired Mac's connection and waits until it is

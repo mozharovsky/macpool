@@ -77,7 +77,7 @@ public enum PoolClient {
     /// - Parameters:
     ///   - channel: A connection to another Mac's daemon.
     ///   - interval: The time between heartbeats.
-    private static func startHeartbeat(on channel: MessageChannel, every interval: Duration) {
+    static func startHeartbeat(on channel: MessageChannel, every interval: Duration) {
         Task { [weak channel] in
             while true {
                 try? await Task.sleep(for: interval)

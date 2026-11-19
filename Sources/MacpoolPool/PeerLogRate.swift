@@ -13,8 +13,8 @@ enum PeerLogLine: Hashable, Sendable {
     /// A paired Mac opened a connection beyond ``PoolDaemon/connectionsPerPeer``.
     case tooManyConnections(KeyFingerprint)
 
-    /// A paired Mac sent nothing for ``PoolDaemon/Configuration/peerSilenceLimit``, and the
-    /// daemon closed its connection.
+    /// A paired Mac sent nothing for ``PoolDaemon/peerSilenceLimit``, and the daemon closed its
+    /// connection.
     case silent(KeyFingerprint)
 
     /// A Mac connected to pair while ``PoolDaemon/pairingConnectionLimit`` Macs paired.
