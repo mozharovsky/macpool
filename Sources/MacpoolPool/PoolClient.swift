@@ -284,10 +284,14 @@ public enum PoolClient {
     ///   - request: The request, which must not be a lease request.
     ///   - directory: The daemon's data directory.
     /// - Returns: The reply.
-    /// - Throws: ``PoolError/daemonRefused(message:)`` when the daemon answers with a failure,
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` for a heartbeat, which gets no reply,
+    ///   ``PoolError/daemonRefused(message:)`` when the daemon answers with a failure,
     ///   ``PoolError/connectionClosed`` when it closes the connection first, or another
     ///   ``PoolError`` when the connection fails.
     public static func send(_ request: PoolRequest, to directory: PoolDirectory) async throws(PoolError) -> PoolReply {
+        guard request != .heartbeat else {
+            throw .invalidRequest(reason: "the daemon does not reply to a heartbeat")
+        }
         let channel = try await connect(to: directory)
         defer { channel.close() }
         try channel.send(request)

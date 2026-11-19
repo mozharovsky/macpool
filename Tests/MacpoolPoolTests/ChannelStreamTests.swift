@@ -105,6 +105,25 @@ struct ChannelStreamTests {
         clientStream.close()
     }
 
+    /// Keeps an end that arrived without bytes, so later receives and a stream report a normal
+    /// end.
+    @Test func keepsAnEndWithoutBytes() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let clientStream = try client.takeStream()
+        try await clientStream.finishSending()
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        let serverStream = try server.takeStream()
+        #expect(try await serverStream.receive() == nil)
+        serverStream.close()
+        clientStream.close()
+    }
+
     /// Leaves the connection to the stream once the channel handed it over.
     @Test func keepsTheStreamWhenTheChannelCloses() async throws {
         let listener = try await LoopbackListener()

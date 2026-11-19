@@ -95,6 +95,31 @@ struct PeerSilenceTests {
         await daemon.shutdown()
     }
 
+    /// Sends no failure for a heartbeat while the list of paired Macs cannot be read.
+    @Test func answersNoHeartbeatWhileTheListIsUnreadable() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        let list = pool.directory.trustDirectory.appending(path: "clients.json")
+        let saved = try Data(contentsOf: list)
+        try Data("{".utf8).write(to: list)
+
+        try remote.send(PoolRequest.heartbeat)
+        #expect(await eventually { !pool.logs.entries("The list of paired clients cannot be read").isEmpty })
+        try saved.write(to: list)
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
+        await daemon.shutdown()
+    }
+
+    /// Refuses to send a heartbeat as a request that waits for a reply.
+    @Test func refusesToWaitForTheReplyToAHeartbeat() async throws {
+        let pool = try PoolFixture()
+        await #expect(throws: PoolError.invalidRequest(reason: "the daemon does not reply to a heartbeat")) {
+            try await PoolClient.send(.heartbeat, to: pool.directory)
+        }
+    }
+
     /// Sends heartbeats at the given interval until the connection closes.
     @Test func sendsHeartbeatsUntilTheConnectionCloses() async throws {
         let directory = try ShortDirectory()

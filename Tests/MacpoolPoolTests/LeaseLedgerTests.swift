@@ -442,6 +442,23 @@ struct LeaseLedgerTests {
         #expect(ledger.leases[kept]?.phase == .ready)
     }
 
+    /// Keeps a paired client's detached lease whose VM became ready during the reattach grace, and
+    /// ends an attached lease that became ready then.
+    @Test func detachedLeaseOutlivesTheGraceOnceReady() throws {
+        var ledger = Self.ledger()
+        let alice = try Self.paired("a")
+        let first = ledger.request(Self.terms(detached: true), from: Self.client(1), owner: alice, now: Self.start)
+        let second = ledger.request(Self.terms(), from: Self.client(1), owner: alice, now: Self.start)
+        let detached = try #require(Self.launches(first).first)
+        let attached = try #require(Self.launches(second).first)
+        _ = ledger.clientDisconnected(Self.client(1), owner: alice, now: Self.at(10))
+        let ready = SupervisorStatus(phase: .ready, address: "192.0.2.10")
+        _ = ledger.supervisorReported(detached, ready, now: Self.at(20))
+        _ = ledger.supervisorReported(attached, ready, now: Self.at(20))
+        #expect(ledger.tick(now: Self.at(70)) == [.stop(attached)])
+        #expect(ledger.leases[detached]?.phase == .ready)
+    }
+
     /// Moves a paired client's lease to another connection of the same Mac, and keeps the lease
     /// from other Macs and a local lease from a second local client.
     @Test func sameMacTakesOverItsAttachedLease() throws {

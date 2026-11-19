@@ -1065,7 +1065,11 @@ public actor PoolDaemon {
                 record = try pairedRecord(key)
             } catch {
                 // A person's mistake in the file should not end the attached leases of every Mac.
-                reply(.failure(error.description), to: client)
+                // A heartbeat gets no reply, because a client that waits for a lease would take an
+                // unasked failure as the lease's end.
+                if request != .heartbeat {
+                    reply(.failure(error.description), to: client)
+                }
                 return true
             }
             guard record != nil else {
