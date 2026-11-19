@@ -292,12 +292,16 @@ public final class MessageChannel: Sendable {
                     throw .malformedMessage(reason: "\(error)")
                 }
             case .incomplete:
-                guard case let .bytes(chunk, end) = await connection.receiveBytes() else {
-                    return nil
-                }
-                state.withLock { state in
-                    state.buffer.append(chunk)
-                    state.end = end
+                // Network reports the end once, so the channel keeps it for later receives and
+                // for takeStream().
+                switch await connection.receiveBytes() {
+                case let .bytes(chunk, end):
+                    state.withLock { state in
+                        state.buffer.append(chunk)
+                        state.end = end
+                    }
+                case let .ended(end):
+                    state.withLock { $0.end = end }
                 }
             }
         }

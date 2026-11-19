@@ -103,6 +103,9 @@ enum StandardRelay {
     /// The end of the input ends the stream's sending direction. Over TLS that closes the stream,
     /// and the call then returns without an error. The call leaves both descriptors open.
     ///
+    /// The copy reads a duplicate of `input` and closes it once the input ends or the stream
+    /// fails. A read may still wait on the duplicate after the call returns.
+    ///
     /// - Parameters:
     ///   - stream: The stream.
     ///   - input: The descriptor to read, such as standard input.
@@ -111,24 +114,35 @@ enum StandardRelay {
     ///   ``CommandError/standardIO(operation:reason:)`` when the input or the output fails. A
     ///   failed output resets the stream.
     static func run(_ stream: ByteStream, input: FileDescriptor, output: FileDescriptor) async throws(CommandError) {
+        // The caller may close input while a read still waits, and the system may give its number
+        // to a new file. The duplicate keeps the read on the original file.
+        let reading: FileDescriptor
+        do {
+            reading = try input.duplicate()
+        } catch {
+            throw .standardIO(operation: "reading standard input", reason: "\(error)")
+        }
         let inputEnd = Mutex<InputEnd?>(nil)
         let copying = Task {
-            let end = await copyInput(from: input, to: stream)
-            inputEnd.withLock { $0 = end }
+            await copyInput(from: reading, to: stream) { end in inputEnd.withLock { $0 = end } }
+            try? reading.close()
         }
-        defer { copying.cancel() }
         while true {
             let data: Data?
             do throws(PoolError) {
                 data = try await stream.receive()
             } catch {
+                if inputEnd.withLock({ $0 }) == .ending {
+                    // Over TLS the finish closes the stream before it returns, so the receive can
+                    // fail first. The finish's own time limit bounds the wait.
+                    await copying.value
+                }
                 switch inputEnd.withLock({ $0 }) {
                 case .finished?:
-                    // The finish of the input closed the TLS connection.
                     return
                 case let .failed(reason)?:
                     throw .standardIO(operation: "reading standard input", reason: reason)
-                case nil:
+                case .ending?, nil:
                     throw .pool(error)
                 }
             }
@@ -142,31 +156,41 @@ enum StandardRelay {
         }
     }
 
-    /// Copies an input to a stream until the input ends.
+    /// Copies an input to a stream until the input ends or fails, or the stream fails.
+    ///
+    /// The call records how the input ended before it ends or resets the stream. A receive that
+    /// the stream's end wakes then finds the record.
     ///
     /// - Parameters:
     ///   - input: The descriptor to read.
     ///   - stream: The stream.
-    /// - Returns: How the input ended, or `nil` when the stream failed first.
-    private static func copyInput(from input: FileDescriptor, to stream: ByteStream) async -> InputEnd? {
+    ///   - record: Receives each stage of the input's end.
+    private static func copyInput(
+        from input: FileDescriptor,
+        to stream: ByteStream,
+        record: (InputEnd) -> Void,
+    ) async {
         while true {
             switch await read(from: input) {
             case let .bytes(data):
                 do throws(PoolError) {
                     try await stream.send(data)
                 } catch {
-                    return nil
+                    return
                 }
             case .end:
+                record(.ending)
                 do throws(PoolError) {
                     try await stream.finishSending()
-                    return .finished
                 } catch {
-                    return nil
+                    return
                 }
+                record(.finished)
+                return
             case let .failure(reason):
+                record(.failed(reason))
                 stream.reset()
-                return .failed(reason)
+                return
             }
         }
     }
@@ -222,7 +246,9 @@ private enum InputChunk: Sendable {
 }
 
 /// How the copying of standard input ended.
-private enum InputEnd: Sendable {
+private enum InputEnd: Sendable, Equatable {
+    /// The input ended, and the stream's sending direction is ending after its bytes.
+    case ending
     /// The input ended, and the stream's sending direction ended after its bytes.
     case finished
     /// Reading the input failed, and the stream was reset.

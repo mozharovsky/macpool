@@ -105,7 +105,6 @@ final class PoolFixture {
     ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
     ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
     ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
-    ///   - peerSilenceLimit: How long a paired Mac's connection may go without a request.
     ///   - guestSSH: The SSH server that stands in for every guest's, or `nil` for the guests'
     ///     own addresses.
     /// - Returns: The daemon.
@@ -117,7 +116,6 @@ final class PoolFixture {
         signalGrace: Duration = .milliseconds(500),
         reconnectWindow: Duration = .seconds(1),
         releaseTimeout: Duration = .seconds(2),
-        peerSilenceLimit: Duration = .seconds(60),
         guestSSH: NWEndpoint? = nil,
     ) throws(PoolError) -> PoolDaemon {
         let clock = clock
@@ -136,7 +134,6 @@ final class PoolFixture {
             releaseTimeout: releaseTimeout,
             logger: testLogger(logs),
         )
-        configuration.peerSilenceLimit = peerSilenceLimit
         if let guestSSH {
             let addresses = guestAddresses
             configuration.guestSSHEndpoint = { address in
@@ -156,7 +153,6 @@ final class PoolFixture {
     ///   - signalGrace: How long the daemon waits for a supervisor to exit after a stop or a signal.
     ///   - reconnectWindow: How long the daemon reconnects to a running supervisor.
     ///   - releaseTimeout: How long the daemon waits for a supervisor to exit on its own.
-    ///   - peerSilenceLimit: How long a paired Mac's connection may go without a request.
     ///   - guestSSH: The SSH server that stands in for every guest's, or `nil` for the guests'
     ///     own addresses.
     /// - Returns: The listening daemon.
@@ -168,7 +164,6 @@ final class PoolFixture {
         signalGrace: Duration = .milliseconds(500),
         reconnectWindow: Duration = .seconds(1),
         releaseTimeout: Duration = .seconds(2),
-        peerSilenceLimit: Duration = .seconds(60),
         guestSSH: NWEndpoint? = nil,
     ) async throws(PoolError) -> PoolDaemon {
         let daemon = try daemon(
@@ -178,7 +173,6 @@ final class PoolFixture {
             signalGrace: signalGrace,
             reconnectWindow: reconnectWindow,
             releaseTimeout: releaseTimeout,
-            peerSilenceLimit: peerSilenceLimit,
             guestSSH: guestSSH,
         )
         try await daemon.start()
