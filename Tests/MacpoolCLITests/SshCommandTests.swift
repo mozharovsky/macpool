@@ -25,42 +25,73 @@ struct SshCommandTests {
         #expect(local.command.isEmpty)
     }
 
-    /// Quotes each word for the shell and doubles each `%`, so that `ssh` and `/bin/sh` give
+    /// Keeps the words of the `ProxyCommand` out of its line, so that `ssh` and `/bin/sh` give
     /// `macpool connect` the words unchanged.
-    @Test func quotesTheProxyCommand() async throws {
+    @Test func passesTheProxyWordsThroughTheEnvironment() async throws {
+        let directory = try ScratchDirectory()
+        let printer = directory.url.appending(path: "print words")
+        try Data("#!/bin/sh\nfor word in \"$0\" \"$@\"; do printf '%s\\n' \"$word\"; done\n".utf8).write(to: printer)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: printer.path(percentEncoded: false),
+        )
         let lease = try #require(LeaseID("0a1b2c3d"))
+        let dataDirectory = #"/Volumes/it's 100% "data"\"#
         let proxy = ProxyCommand(
-            executable: URL(filePath: "/Applications/mac pool/macpool"),
-            dataDirectory: "/Volumes/it's 100% data",
-            host: "lab's $HOME",
+            executable: printer,
+            dataDirectory: dataDirectory,
+            host: "lab's $HOME %h",
             lease: lease,
         )
-        #expect(proxy.words == [
-            "/Applications/mac pool/macpool",
-            "connect",
-            "--data-dir=/Volumes/it's 100% data",
-            "--pool=lab's $HOME",
-            "0a1b2c3d",
-        ])
-        #expect(proxy.line == #"'/Applications/mac pool/macpool' 'connect' '--data-dir=/Volumes/it'\''s 100%% data' "#
-            + #"'--pool=lab'\''s $HOME' '0a1b2c3d'"#)
+        #expect(proxy.line == #""$MACPOOL_PROXY_EXECUTABLE" connect "--data-dir=$MACPOOL_PROXY_DATA_DIR" "#
+            + #""--pool=$MACPOOL_PROXY_POOL" "$MACPOOL_PROXY_LEASE""#)
 
-        // ssh turns each %% back into %, and /bin/sh then splits the line into the words.
-        let expanded = proxy.line.replacing("%%", with: "%")
         let printed = try await Subprocess.run(
             .path("/bin/sh"),
-            arguments: ["-c", "exec printf '%s\\n' " + expanded],
+            arguments: ["-c", "exec " + proxy.line],
+            environment: .inherit.updating(proxy.environment.mapValues { Optional($0) }),
             output: .string(limit: 4096),
         )
         #expect(printed.terminationStatus == .exited(0))
-        #expect(printed.standardOutput == proxy.words.joined(separator: "\n") + "\n")
+        let words = [
+            printer.path(percentEncoded: false),
+            "connect",
+            "--data-dir=" + dataDirectory,
+            "--pool=lab's $HOME %h",
+            "0a1b2c3d",
+        ]
+        #expect(printed.standardOutput == words.joined(separator: "\n") + "\n")
+    }
+
+    /// Passes the options through the parser of `ssh`, which reads the path of the pinned keys
+    /// and the words of the `ProxyCommand` from the environment.
+    @Test func passesTheOptionsThroughSsh() async throws {
+        let lease = try #require(LeaseID("0a1b2c3d"))
+        let proxy = ProxyCommand(
+            executable: URL(filePath: "/usr/local/bin/macpool"),
+            dataDirectory: #"/Volumes/data\"#,
+            host: "lab",
+            lease: lease,
+        )
+        try await Self.withLogin(Self.access()) { login in
+            let printed = try await Subprocess.run(
+                .path("/usr/bin/ssh"),
+                arguments: Arguments(["-G"] + login.arguments(for: [], through: proxy)),
+                environment: .inherit.updating(login.environment(for: proxy)),
+                output: .string(limit: 64 * 1024),
+                error: .string(limit: 4096),
+            )
+            #expect(printed.terminationStatus == .exited(0), "\(printed.standardError)")
+            let lines = printed.standardOutput.split(separator: "\n").map(String.init)
+            #expect(lines.contains("userknownhostsfile \(login.knownHosts.path(percentEncoded: false))"))
+            #expect(lines.contains("proxycommand \(proxy.line)"))
+        }
     }
 
     /// Pins the guest's keys under the alias, refuses any other key, and keeps the password out
     /// of the arguments and the directory's regular files.
     @Test func pinsTheGuestsKeysWithoutThePassword() async throws {
         let access = try Self.access()
-        let login = try GuestLogin(access: access)
         let lease = try #require(LeaseID("0a1b2c3d"))
         let proxy = ProxyCommand(
             executable: URL(filePath: "/usr/local/bin/macpool"),
@@ -68,27 +99,30 @@ struct SshCommandTests {
             host: nil,
             lease: lease,
         )
-        let arguments = login.arguments(for: ["uname", "-a"], through: proxy)
-
-        let knownHosts = try String(contentsOf: login.knownHosts, encoding: .utf8)
-        #expect(knownHosts == access.hostKeys.map { "macpool-guest ssh-ed25519 \($0.base64)\n" }.joined())
-        #expect(arguments.contains("UserKnownHostsFile=\"\(login.knownHosts.path(percentEncoded: false))\""))
-        #expect(arguments.contains("StrictHostKeyChecking=yes"))
-        #expect(arguments.contains("HostKeyAlias=macpool-guest"))
-        #expect(arguments.contains("HostKeyAlgorithms=ssh-ed25519"))
-        #expect(arguments.contains("ProxyCommand=\(proxy.line)"))
-        #expect(Array(arguments.suffix(6)) == ["-l", "macpool", "--", "macpool-guest", "uname", "-a"])
-        #expect(!arguments.contains { $0.contains(access.password) })
-        for name in ["known_hosts", "askpass"] {
-            let text = try String(contentsOf: login.directory.appending(path: name), encoding: .utf8)
-            #expect(!text.contains(access.password))
+        let directory = try await Self.withLogin(access) { login in
+            let arguments = login.arguments(for: ["uname", "-a"], through: proxy)
+            let environment = login.environment(for: proxy)
+            let knownHosts = try String(contentsOf: login.knownHosts, encoding: .utf8)
+            #expect(knownHosts == access.hostKeys.map { "macpool-guest ssh-ed25519 \($0.base64)\n" }.joined())
+            #expect(arguments.contains("UserKnownHostsFile=${MACPOOL_KNOWN_HOSTS}"))
+            #expect(environment["MACPOOL_KNOWN_HOSTS"] == login.knownHosts.path(percentEncoded: false))
+            #expect(arguments.contains("StrictHostKeyChecking=yes"))
+            #expect(arguments.contains("HostKeyAlias=macpool-guest"))
+            #expect(arguments.contains("HostKeyAlgorithms=ssh-ed25519"))
+            #expect(arguments.contains("ProxyCommand=\(proxy.line)"))
+            #expect(Array(arguments.suffix(6)) == ["-l", "macpool", "--", "macpool-guest", "uname", "-a"])
+            #expect(!arguments.contains { $0.contains(access.password) })
+            #expect(!environment.values.contains { $0?.contains(access.password) == true })
+            for name in ["known_hosts", "askpass"] {
+                let text = try String(contentsOf: login.directory.appending(path: name), encoding: .utf8)
+                #expect(!text.contains(access.password))
+            }
+            let mode = try FileManager.default
+                .attributesOfItem(atPath: login.directory.path(percentEncoded: false))[.posixPermissions]
+            #expect(mode as? Int == 0o700)
+            return login.directory
         }
-        let mode = try FileManager.default
-            .attributesOfItem(atPath: login.directory.path(percentEncoded: false))[.posixPermissions]
-        #expect(mode as? Int == 0o700)
-
-        await login.remove()
-        #expect(!FileManager.default.fileExists(atPath: login.directory.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)))
     }
 
     /// Hands the password once to each reader of the pipe, also to a reader that waits before it
@@ -105,8 +139,8 @@ struct SshCommandTests {
         await unread.stop()
     }
 
-    /// Runs `ssh` with the askpass script and the shell that the `ProxyCommand` needs, and
-    /// returns the exit status of `ssh`.
+    /// Runs `ssh` with the askpass script and with the shell and the words that the
+    /// `ProxyCommand` needs, and returns the exit status of `ssh`.
     @Test func runsSshWithTheAskpassScript() async throws {
         let access = try Self.access()
         let output = try ScratchDirectory()
@@ -115,6 +149,8 @@ struct SshCommandTests {
         #!/bin/sh
         "$SSH_ASKPASS" "password:" > '\(output.url.path(percentEncoded: false))/password'
         printf '%s\\n' "$SHELL" > '\(output.url.path(percentEncoded: false))/shell'
+        printf '%s\\n' "$MACPOOL_PROXY_EXECUTABLE" "$MACPOOL_PROXY_POOL" "$MACPOOL_PROXY_LEASE" \\
+            > '\(output.url.path(percentEncoded: false))/proxy'
         for word in "$@"; do printf '%s\\n' "$word"; done > '\(output.url.path(percentEncoded: false))/arguments'
         exit 3
         """
@@ -123,7 +159,6 @@ struct SshCommandTests {
             [.posixPermissions: 0o700],
             ofItemAtPath: fake.path(percentEncoded: false),
         )
-        let login = try GuestLogin(access: access)
         let lease = try #require(LeaseID("0a1b2c3d"))
         let proxy = ProxyCommand(
             executable: URL(filePath: "/usr/local/bin/macpool"),
@@ -132,18 +167,42 @@ struct SshCommandTests {
             lease: lease,
         )
 
-        let status = try await login.run(
-            ["true"],
-            through: proxy,
-            executable: FilePath(fake.path(percentEncoded: false)),
-        )
-        await login.remove()
+        let (status, arguments) = try await Self.withLogin(access) { login in
+            let status = try await login.run(
+                ["true"],
+                through: proxy,
+                executable: FilePath(fake.path(percentEncoded: false)),
+            )
+            return (status, login.arguments(for: ["true"], through: proxy))
+        }
         #expect(status == 3)
         let read = { (name: String) in try String(contentsOf: output.url.appending(path: name), encoding: .utf8) }
         #expect(try read("password") == access.password + "\n")
         #expect(try read("shell") == "/bin/sh\n")
-        let expected = login.arguments(for: ["true"], through: proxy).joined(separator: "\n") + "\n"
-        #expect(try read("arguments") == expected)
+        #expect(try read("proxy") == "/usr/local/bin/macpool\nlab\n0a1b2c3d\n")
+        #expect(try read("arguments") == arguments.joined(separator: "\n") + "\n")
+    }
+
+    /// Creates a login, passes it to a body, and removes it, also when the body throws.
+    ///
+    /// - Parameters:
+    ///   - access: The access for the login.
+    ///   - body: The work with the login.
+    /// - Returns: The body's result.
+    /// - Throws: An error when the login cannot be created, or the body's error.
+    private static func withLogin<Value>(
+        _ access: GuestAccess,
+        _ body: (GuestLogin) async throws -> Value,
+    ) async throws -> Value {
+        let login = try GuestLogin(access: access)
+        do {
+            let result = try await body(login)
+            await login.remove()
+            return result
+        } catch {
+            await login.remove()
+            throw error
+        }
     }
 
     /// Returns an access with two keys whose bytes all hold one value.
@@ -164,12 +223,24 @@ struct SshCommandTests {
 
     /// Reads at most 64 bytes from a named pipe on a dispatch queue, stopping early at its end.
     ///
+    /// If no writer serves the reader within 10 seconds, the call opens the pipe for writing
+    /// itself. The reader's open then returns, and the read ends without bytes.
+    ///
     /// - Parameters:
     ///   - file: The pipe.
     ///   - delay: How long the reader holds the pipe open before it reads, in seconds.
     /// - Returns: The bytes, or `nil` when the pipe cannot be opened.
     private static func read(_ file: URL, after delay: TimeInterval = 0) async -> Data? {
-        await withCheckedContinuation { continuation in
+        let path = file.path(percentEncoded: false)
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(10))
+            let writer = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+            if writer >= 0 {
+                close(writer)
+            }
+        }
+        defer { watchdog.cancel() }
+        return await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
                 guard let descriptor = try? FileDescriptor.open(FilePath(file.path(percentEncoded: false)), .readOnly)
                 else {

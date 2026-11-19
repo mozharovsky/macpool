@@ -82,12 +82,16 @@ struct SshCommand: AsyncParsableCommand {
 
 /// The `ProxyCommand` of `ssh` that reaches a lease's guest through `macpool connect`.
 ///
-/// `ssh` expands `%` tokens in the command and runs it with the shell in `SHELL`. The line
-/// therefore doubles each `%` and quotes each word for `/bin/sh`. ``GuestLogin`` sets `SHELL` to
-/// `/bin/sh` for `ssh`.
+/// `ssh` parses quotes and backslashes in the option, expands `%` tokens in the command, and runs
+/// it with the shell in `SHELL`. The line is therefore fixed, and the shell reads each word from
+/// an environment variable that ``GuestLogin`` sets for `ssh`. ``GuestLogin`` also sets `SHELL` to
+/// `/bin/sh`.
 struct ProxyCommand: Equatable {
-    /// The program and its arguments.
-    let words: [String]
+    /// The value of the `ProxyCommand` option.
+    let line: String
+
+    /// The variables that hold the words of the command, keyed by name.
+    let environment: [Environment.Key: String]
 
     /// Creates the command for a lease.
     ///
@@ -98,22 +102,22 @@ struct ProxyCommand: Equatable {
     ///   - host: The paired host's name or short key, or `nil` for the daemon on this Mac.
     ///   - lease: The lease.
     init(executable: URL, dataDirectory: String?, host: String?, lease: LeaseID) {
-        var words = [executable.path(percentEncoded: false), "connect"]
+        var line = #""$MACPOOL_PROXY_EXECUTABLE" connect"#
+        var environment: [Environment.Key: String] = [
+            "MACPOOL_PROXY_EXECUTABLE": executable.path(percentEncoded: false),
+            "MACPOOL_PROXY_LEASE": lease.rawValue,
+        ]
         if let dataDirectory {
-            words.append("--data-dir=" + URL(filePath: dataDirectory).absoluteURL.path(percentEncoded: false))
+            line += #" "--data-dir=$MACPOOL_PROXY_DATA_DIR""#
+            environment["MACPOOL_PROXY_DATA_DIR"] = URL(filePath: dataDirectory).absoluteURL.path(percentEncoded: false)
         }
         if let host {
-            words.append("--pool=" + host)
+            line += #" "--pool=$MACPOOL_PROXY_POOL""#
+            environment["MACPOOL_PROXY_POOL"] = host
         }
-        words.append(lease.rawValue)
-        self.words = words
-    }
-
-    /// The value of the `ProxyCommand` option.
-    var line: String {
-        words.map { "'" + $0.replacing("'", with: #"'\''"#) + "'" }
-            .joined(separator: " ")
-            .replacing("%", with: "%%")
+        line += #" "$MACPOOL_PROXY_LEASE""#
+        self.line = line
+        self.environment = environment
     }
 }
 
@@ -187,8 +191,8 @@ final class GuestLogin: Sendable {
             "-o", "PubkeyAuthentication=no",
             "-o", "PreferredAuthentications=password,keyboard-interactive",
             "-o", "NumberOfPasswordPrompts=1",
-            // ssh splits this value on spaces, so the path is quoted inside it.
-            "-o", "UserKnownHostsFile=\"\(knownHosts.path(percentEncoded: false))\"",
+            // ssh parses quotes and expands % tokens in the option, but not in the variable's value.
+            "-o", "UserKnownHostsFile=${MACPOOL_KNOWN_HOSTS}",
             "-o", "GlobalKnownHostsFile=/dev/null",
             "-o", "HostKeyAlias=\(VMBundle.hostKeyAlias)",
             "-o", "HostKeyAlgorithms=\(HostKey.algorithm)",
@@ -201,6 +205,23 @@ final class GuestLogin: Sendable {
             "--",
             VMBundle.hostKeyAlias,
         ] + command
+    }
+
+    /// Returns the variables that `ssh` needs in addition to this process's environment.
+    ///
+    /// - Parameter proxy: The command that connects `ssh` to the guest.
+    /// - Returns: The askpass script, the pipe of the password, the `known_hosts` file, the shell
+    ///   for the `ProxyCommand`, and the words of the `ProxyCommand`.
+    func environment(for proxy: ProxyCommand) -> [Environment.Key: String?] {
+        var environment: [Environment.Key: String?] = [
+            "SSH_ASKPASS": askpass.path(percentEncoded: false),
+            "SSH_ASKPASS_REQUIRE": "force",
+            "MACPOOL_PASSWORD_PIPE": pipe.file.path(percentEncoded: false),
+            "MACPOOL_KNOWN_HOSTS": knownHosts.path(percentEncoded: false),
+            "SHELL": "/bin/sh",
+        ]
+        environment.merge(proxy.environment.mapValues { Optional($0) }) { $1 }
+        return environment
     }
 
     /// Runs `ssh` with this process's standard input, output, and error.
@@ -224,12 +245,7 @@ final class GuestLogin: Sendable {
         let watch = SignalWatch(signals: [SIGHUP, SIGINT, SIGTERM]) { sink.yield($0) }
         defer { watch.cancel() }
         let arguments = Arguments(arguments(for: command, through: proxy))
-        let environment = Environment.inherit.updating([
-            "SSH_ASKPASS": askpass.path(percentEncoded: false),
-            "SSH_ASKPASS_REQUIRE": "force",
-            "MACPOOL_PASSWORD_PIPE": pipe.file.path(percentEncoded: false),
-            "SHELL": "/bin/sh",
-        ])
+        let environment = Environment.inherit.updating(environment(for: proxy))
         var options = PlatformOptions()
         options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(10))]
         let running = Task { [options] in
@@ -285,10 +301,10 @@ final class GuestLogin: Sendable {
         }
         let handle = FileDescriptor(rawValue: descriptor)
         do {
-            _ = try handle.writeAll(Array(contents.utf8))
-            try handle.close()
+            // A failed close must not lead to a second close of a number that another file may
+            // already hold.
+            _ = try handle.closeAfter { try handle.writeAll(Array(contents.utf8)) }
         } catch {
-            try? handle.close()
             throw .library(.fileSystem(
                 operation: "writing a file for ssh",
                 path: file.path(percentEncoded: false),
@@ -379,8 +395,10 @@ final class PasswordPipe: Sendable {
             _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
             _ = try? writer.writeAll(line)
             // While the reader holds the old pipe open, a new open of the same pipe would return
-            // at once and write the line to that reader again.
-            let isReplaced = unlink(path) == 0 && mkfifo(path, 0o600) == 0
+            // at once and write the line to that reader again. The rename replaces the pipe in one
+            // step, so a reader never finds the name missing.
+            let next = path + ".next"
+            let isReplaced = mkfifo(next, 0o600) == 0 && rename(next, path) == 0
             try? writer.close()
             guard isReplaced else {
                 return
