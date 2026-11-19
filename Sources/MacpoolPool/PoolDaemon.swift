@@ -118,9 +118,6 @@ public actor PoolDaemon {
         /// The logger for lease events.
         public var logger: Logger
 
-        /// The longest time that a paired Mac's connection may go without a request.
-        var peerSilenceLimit = Duration.seconds(60)
-
         /// Returns the endpoint of the SSH server of a guest with a given IP address.
         var guestSSHEndpoint: @Sendable (String) -> NWEndpoint = { address in
             .hostPort(host: NWEndpoint.Host(address), port: 22)
@@ -187,6 +184,8 @@ public actor PoolDaemon {
         let channel: MessageChannel
         /// Who the client acts for.
         let owner: LeaseOwner
+        /// The time of the client's last request, or of its connection before the first request.
+        var lastRequest: Date
     }
 
     /// A stream between a client and the SSH server of a lease's guest.
@@ -295,6 +294,11 @@ public actor PoolDaemon {
     /// Each connection queues up to 4 MiB of replies. The limit bounds the memory that one Mac
     /// can hold this way.
     static let connectionsPerPeer = 4
+
+    /// The longest time that a paired Mac's connection may go without a request.
+    ///
+    /// ``tick()`` closes a connection that stays silent this long.
+    static let peerSilenceLimit = Duration.seconds(60)
 
     /// The most connections of Macs that pair at once.
     ///
@@ -513,8 +517,9 @@ public actor PoolDaemon {
         configuration.logger.info("Stopped listening. Supervisors keep running.")
     }
 
-    /// Writes the state, applies expiries, restart times, and the reattach grace, signals
-    /// supervisors that ignore a stop, and retries unfinished stops and clean-ups.
+    /// Writes the state, applies expiries, restart times, and the reattach grace, closes silent
+    /// connections of paired Macs, signals supervisors that ignore a stop, and retries unfinished
+    /// stops and clean-ups.
     public func tick() {
         guard !isShutDown else {
             return
@@ -524,6 +529,7 @@ public actor PoolDaemon {
             invitationEnded(expired)
             reply(.failure("the invitation expired"), to: expired.inviter)
         }
+        closeSilentPeers(at: now)
         perform(ledger.tick(now: now))
         let stopGrace = configuration.stopGrace / .seconds(1)
         for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
@@ -574,7 +580,7 @@ public actor PoolDaemon {
         }
         let client = ClientID(value: nextClient)
         nextClient += 1
-        clients[client] = ClientConnection(channel: channel, owner: owner)
+        clients[client] = ClientConnection(channel: channel, owner: owner, lastRequest: configuration.now())
         Task { await self.serve(client, owner: owner, on: channel) }
     }
 
@@ -1008,14 +1014,11 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     ///   - channel: The client's connection.
     private func serve(_ client: ClientID, owner: LeaseOwner, on channel: MessageChannel) async {
-        var watchdog = silenceWatchdog(on: channel, owner: owner)
-        defer { watchdog?.cancel() }
         while true {
             let request: PoolRequest?
             do {
                 request = try await channel.receive(PoolRequest.self)
-                watchdog?.cancel()
-                watchdog = silenceWatchdog(on: channel, owner: owner)
+                clients[client]?.lastRequest = configuration.now()
             } catch {
                 // The error may repeat text from the line. If a paired Mac's line held a host path,
                 // visible(_:to:) would replace the reply, and the change would confirm the path. A
@@ -1050,48 +1053,35 @@ public actor PoolDaemon {
         perform(ledger.clientDisconnected(client, owner: owner, now: configuration.now()))
     }
 
-    /// Starts a task that closes a paired Mac's connection after
-    /// ``Configuration/peerSilenceLimit`` without a request.
+    /// Stops serving the paired Macs whose connections sent no request for
+    /// ``peerSilenceLimit`` and closes those connections.
     ///
-    /// A lost Mac sends neither a request nor the end of its connection. Without the watchdog, the
-    /// connection would hold its leases until TCP keepalive gives up on the Mac.
+    /// A lost Mac sends neither a request nor the end of its connection. Without this check, the
+    /// connection would hold its leases until TCP keepalive gives up on the Mac. The leases then
+    /// wait for another connection of the Mac to attach, as after a disconnect.
     ///
-    /// - Parameters:
-    ///   - channel: The client's connection.
-    ///   - owner: Who the client acts for.
-    /// - Returns: The task, which the caller cancels once the next request arrives, or `nil` for
-    ///   the local user.
-    private func silenceWatchdog(on channel: MessageChannel, owner: LeaseOwner) -> Task<Void, Never>? {
-        guard case let .client(key) = owner else {
-            return nil
+    /// - Parameter now: The current time.
+    private func closeSilentPeers(at now: Date) {
+        let limit = Self.peerSilenceLimit / .seconds(1)
+        for (client, connection) in clients.sorted(by: { $0.key < $1.key }) {
+            guard case let .client(key) = connection.owner,
+                  now.timeIntervalSince(connection.lastRequest) >= limit else {
+                continue
+            }
+            configuration.logger.log(
+                level: peerLogLevel(of: .silent(key), full: .notice),
+                "A paired Mac stopped answering",
+                metadata: [
+                    "key": "\(key)",
+                    "address": "\(connection.channel.peer)",
+                ],
+            )
+            // The serve(_:owner:on:) loop sees the missing client and ends without a second
+            // disconnect.
+            clients[client] = nil
+            perform(ledger.clientDisconnected(client, owner: connection.owner, now: now))
+            connection.channel.close()
         }
-        let limit = configuration.peerSilenceLimit
-        return Task {
-            // A cancelled sleep returns early, and the close then does nothing.
-            try? await Task.sleep(for: limit)
-            self.closeSilent(channel, key: key)
-        }
-    }
-
-    /// Closes the connection of a paired Mac that sent no request in time.
-    ///
-    /// - Parameters:
-    ///   - channel: The Mac's connection.
-    ///   - key: The fingerprint of the Mac's key.
-    private func closeSilent(_ channel: MessageChannel, key: KeyFingerprint) {
-        // A request that arrived while the watchdog waited for the actor cancelled it.
-        guard !Task.isCancelled, !isShutDown else {
-            return
-        }
-        configuration.logger.log(
-            level: peerLogLevel(of: .silent(key), full: .notice),
-            "A paired Mac stopped answering",
-            metadata: [
-                "key": "\(key)",
-                "address": "\(channel.peer)",
-            ],
-        )
-        channel.close()
     }
 
     /// Answers one request.
@@ -1107,7 +1097,8 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     /// - Returns: Whether the connection stays open for the next request.
     private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) -> Bool {
-        // A revocation may close the connection after the line arrived.
+        // A revocation or the silence check in tick() may stop serving the client after the line
+        // arrived.
         guard clients[client] != nil else {
             return false
         }
@@ -1117,7 +1108,11 @@ public actor PoolDaemon {
                 record = try pairedRecord(key)
             } catch {
                 // A person's mistake in the file should not end the attached leases of every Mac.
-                reply(.failure(error.description), to: client)
+                // A heartbeat gets no reply, because a client that waits for a lease would take an
+                // unasked failure as the lease's end.
+                if request != .heartbeat {
+                    reply(.failure(error.description), to: client)
+                }
                 return true
             }
             guard record != nil else {
