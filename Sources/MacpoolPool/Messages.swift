@@ -546,6 +546,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// - Parameter endLeases: Whether the daemon ends the Mac's leases.
     case forget(endLeases: Bool = false)
 
+    /// Tells the daemon that a paired Mac still runs.
+    ///
+    /// The daemon sends no reply. It closes the connection of a paired Mac that sent no request
+    /// for 60 seconds. A Mac that holds a connection open therefore sends this request at least
+    /// every ``PoolClient/heartbeatInterval``.
+    case heartbeat
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -603,6 +610,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             )
         case "forget":
             self = try .forget(endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false)
+        case "heartbeat":
+            self = .heartbeat
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -648,6 +657,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case let .forget(endLeases):
             try container.encode("forget", forKey: .request)
             try container.encode(endLeases, forKey: .endLeases)
+        case .heartbeat:
+            try container.encode("heartbeat", forKey: .request)
         }
     }
 }

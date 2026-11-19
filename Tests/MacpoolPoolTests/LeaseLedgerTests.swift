@@ -165,7 +165,7 @@ struct LeaseLedgerTests {
         _ = try Self.readyLease(in: &ledger, for: Self.client(1))
         _ = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.at(1))
         _ = ledger.request(Self.terms(), from: Self.client(3), owner: .local, now: Self.at(2))
-        let actions = ledger.clientDisconnected(Self.client(2), now: Self.at(3))
+        let actions = ledger.clientDisconnected(Self.client(2), owner: .local, now: Self.at(3))
         #expect(actions == [.notify(Self.client(3), .queued(position: 1))])
         #expect(ledger.queue.map(\.client) == [Self.client(3)])
     }
@@ -230,7 +230,7 @@ struct LeaseLedgerTests {
     @Test func attachedLeaseEndsWithItsClient() throws {
         var ledger = Self.ledger()
         let id = try Self.readyLease(in: &ledger, for: Self.client(1))
-        #expect(ledger.clientDisconnected(Self.client(1), now: Self.at(1)) == [.stop(id)])
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)) == [.stop(id)])
         #expect(ledger.leases[id]?.endReason == "the client disconnected")
     }
 
@@ -238,7 +238,7 @@ struct LeaseLedgerTests {
     @Test func detachedLeaseOutlivesItsClient() throws {
         var ledger = Self.ledger()
         let id = try Self.readyLease(in: &ledger, for: Self.client(1), terms: Self.terms(detached: true))
-        #expect(ledger.clientDisconnected(Self.client(1), now: Self.at(1)).isEmpty)
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)).isEmpty)
         #expect(ledger.leases[id]?.phase == .ready)
         #expect(ledger.clients[id] == nil)
     }
@@ -248,7 +248,7 @@ struct LeaseLedgerTests {
         var ledger = Self.ledger()
         let actions = ledger.request(Self.terms(detached: true), from: Self.client(1), owner: .local, now: Self.start)
         let id = try #require(Self.launches(actions).first)
-        #expect(ledger.clientDisconnected(Self.client(1), now: Self.at(1)) == [.stop(id)])
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)) == [.stop(id)])
     }
 
     /// Restarts failed VMs with growing delays and ends the lease after the last allowed restart.
@@ -423,6 +423,48 @@ struct LeaseLedgerTests {
         }
         #expect(throws: PoolError.unknownLease(id: "00000000")) {
             try after.attach(#require(LeaseID("00000000")), client: Self.client(8), owner: .local)
+        }
+    }
+
+    /// Keeps a paired client's attached leases for the reattach grace after its connection broke,
+    /// and keeps a lease that another connection of the Mac attaches to.
+    @Test func pairedLeaseWaitsForItsMacToReattach() throws {
+        var ledger = Self.ledger()
+        let alice = try Self.paired("a")
+        let kept = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
+        let lost = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
+        #expect(ledger.clientDisconnected(Self.client(1), owner: alice, now: Self.at(10)).isEmpty)
+        #expect(ledger.clients.isEmpty)
+        _ = try ledger.attach(kept, client: Self.client(2), owner: alice)
+        #expect(ledger.tick(now: Self.at(69)).isEmpty)
+        #expect(ledger.tick(now: Self.at(70)) == [.stop(lost)])
+        #expect(ledger.leases[lost]?.endReason == "the client disconnected and did not reattach within 60 seconds")
+        #expect(ledger.leases[kept]?.phase == .ready)
+    }
+
+    /// Moves a paired client's lease to another connection of the same Mac, and keeps the lease
+    /// from other Macs and a local lease from a second local client.
+    @Test func sameMacTakesOverItsAttachedLease() throws {
+        var ledger = Self.ledger()
+        let alice = try Self.paired("a")
+        let bob = try Self.paired("b")
+        let id = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
+        let summary = try #require(ledger.leases[id].map(ledger.summary(of:)))
+        let moved = try ledger.attach(id, client: Self.client(2), owner: alice)
+        #expect(moved == [
+            .notify(Self.client(1), .failure("another connection of this Mac attached to lease \(id)")),
+            .notify(Self.client(2), .ready(summary)),
+        ])
+        #expect(ledger.clients[id] == Self.client(2))
+        #expect(throws: PoolError.unknownLease(id: id.rawValue)) {
+            try ledger.attach(id, client: Self.client(3), owner: bob)
+        }
+        #expect(throws: PoolError.leaseAttached(id: id.rawValue)) {
+            try ledger.attach(id, client: Self.client(3), owner: .local)
+        }
+        let local = try Self.readyLease(in: &ledger, for: Self.client(4))
+        #expect(throws: PoolError.leaseAttached(id: local.rawValue)) {
+            try ledger.attach(local, client: Self.client(5), owner: .local)
         }
     }
 

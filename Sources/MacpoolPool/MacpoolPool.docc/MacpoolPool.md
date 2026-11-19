@@ -128,10 +128,15 @@ the greeting and closes. These limits are fixed.
 A channel queues at most 4 MiB for a peer that does not read and closes the connection beyond
 that. After the daemon handles a request, it reads the next one only once the messages that it
 sent to the client so far left.
+
+A paired Mac's connection that sends no request for 60 seconds counts as lost, and the host
+closes it. ``PoolClient`` therefore sends a ``PoolRequest/heartbeat`` every
+``PoolClient/heartbeatInterval`` on each connection to a host.
+
 Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout
-ends first, it closes the connection anyway. The bytes that were still waiting are lost, and the
-peer still sees a normal end of the stream.
+ends first, the stream resets the connection and the call throws. The peer then sees a failure
+instead of a normal end. ``ByteStream/receive()`` returns `nil` only after a normal end.
 
 ### Pairing
 
@@ -274,6 +279,11 @@ to live after the renewal. A lease ends on release, on expiry, when its attached
 disconnects, or when its VM stops and the ``RestartPolicy`` does not boot it again. A detached
 lease outlives its client once it is ready. The daemon then stops the VM, deletes the clone, and
 grants the slot to the next request.
+
+An attached lease of a paired Mac survives the loss of its connection for
+``PoolPolicy/reattachGrace``. If no connection of that Mac attaches within that time, the lease
+ends. A new connection of the Mac may attach while the host still serves the old one, because the
+Mac may have lost the old one first. The old connection then receives a failure.
 
 A VM that stops unexpectedly boots again from the same clone when its policy allows. The waits
 between restarts double up to a limit, and ``PoolPolicy`` sets the number of restarts.

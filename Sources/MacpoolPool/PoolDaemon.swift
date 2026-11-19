@@ -51,6 +51,11 @@ import Synchronization
 /// After the daemon handles a request, it waits until the messages that it sent to the client so
 /// far left, and only then reads the next request. Lease events sent later do not extend the
 /// wait. A client that stops reading therefore stalls only its own connection.
+///
+/// A paired Mac whose connection sends no request for 60 seconds counts as lost, and the daemon
+/// closes the connection. The leases that the connection held wait ``PoolPolicy/reattachGrace``
+/// for another connection of the Mac to attach. A local client that disconnects ends its leases
+/// at once.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -107,6 +112,9 @@ public actor PoolDaemon {
 
         /// The logger for lease events.
         public var logger: Logger
+
+        /// The longest time that a paired Mac's connection may go without a request.
+        var peerSilenceLimit = Duration.seconds(60)
 
         /// Creates a configuration.
         ///
@@ -957,10 +965,14 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     ///   - channel: The client's connection.
     private func serve(_ client: ClientID, owner: LeaseOwner, on channel: MessageChannel) async {
+        var watchdog = silenceWatchdog(on: channel, owner: owner)
+        defer { watchdog?.cancel() }
         while true {
             let request: PoolRequest?
             do {
                 request = try await channel.receive(PoolRequest.self)
+                watchdog?.cancel()
+                watchdog = silenceWatchdog(on: channel, owner: owner)
             } catch {
                 // The error may repeat text from the line. If a paired Mac's line held a host path,
                 // visible(_:to:) would replace the reply, and the change would confirm the path. A
@@ -992,7 +1004,51 @@ public actor PoolDaemon {
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
-        perform(ledger.clientDisconnected(client, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: owner, now: configuration.now()))
+    }
+
+    /// Starts a task that closes a paired Mac's connection after
+    /// ``Configuration/peerSilenceLimit`` without a request.
+    ///
+    /// A lost Mac sends neither a request nor the end of its connection. Without the watchdog, the
+    /// connection would hold its leases until TCP keepalive gives up on the Mac.
+    ///
+    /// - Parameters:
+    ///   - channel: The client's connection.
+    ///   - owner: Who the client acts for.
+    /// - Returns: The task, which the caller cancels once the next request arrives, or `nil` for
+    ///   the local user.
+    private func silenceWatchdog(on channel: MessageChannel, owner: LeaseOwner) -> Task<Void, Never>? {
+        guard case let .client(key) = owner else {
+            return nil
+        }
+        let limit = configuration.peerSilenceLimit
+        return Task {
+            // A cancelled sleep returns early, and the close then does nothing.
+            try? await Task.sleep(for: limit)
+            self.closeSilent(channel, key: key)
+        }
+    }
+
+    /// Closes the connection of a paired Mac that sent no request in time.
+    ///
+    /// - Parameters:
+    ///   - channel: The Mac's connection.
+    ///   - key: The fingerprint of the Mac's key.
+    private func closeSilent(_ channel: MessageChannel, key: KeyFingerprint) {
+        // A request that arrived while the watchdog waited for the actor cancelled it.
+        guard !Task.isCancelled, !isShutDown else {
+            return
+        }
+        configuration.logger.log(
+            level: peerLogLevel(of: .silent(key), full: .notice),
+            "A paired Mac stopped answering",
+            metadata: [
+                "key": "\(key)",
+                "address": "\(channel.peer)",
+            ],
+        )
+        channel.close()
     }
 
     /// Answers one request.
@@ -1078,6 +1134,8 @@ public actor PoolDaemon {
                 }
                 try forget(key, endLeases: endLeases, from: client)
                 return false
+            case .heartbeat:
+                break
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1323,7 +1381,8 @@ public actor PoolDaemon {
         let owner = LeaseOwner.client(key)
         let before = ledger.liveLeases(of: owner).count
         // A lease that needs a client may wait for its client to reattach after a daemon
-        // restart. The Mac can no longer reattach. The lease therefore ends now.
+        // restart or a lost connection. The Mac can no longer reattach. The lease therefore ends
+        // now.
         for id in ledger.liveLeases(of: owner) where endLeases || ledger.leases[id]?.needsClient == true {
             perform((try? ledger.release(id, owner: .local, reason: reason)) ?? [])
         }
@@ -1356,9 +1415,10 @@ public actor PoolDaemon {
 
     /// Queues a last reply to a paired client and stops serving the client.
     ///
-    /// The daemon withdraws the client's waiting requests and ends its attached leases at once,
-    /// as when the client disconnects. A paired client holds no invitation, because only the local
-    /// user may invite. The caller finishes the client's connection.
+    /// The daemon withdraws the client's waiting requests, as when the client disconnects. Its
+    /// attached leases wait for another connection of the Mac to attach. A paired client holds
+    /// no invitation, because only the local user may invite. The caller finishes the client's
+    /// connection.
     ///
     /// - Parameters:
     ///   - client: The client.
@@ -1367,7 +1427,7 @@ public actor PoolDaemon {
         guard let connection = clients.removeValue(forKey: client) else {
             return
         }
-        perform(ledger.clientDisconnected(client, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: connection.owner, now: configuration.now()))
         try? connection.channel.send(visible(last, to: connection.owner))
     }
 
