@@ -71,6 +71,11 @@ name can imitate a short key.
 the `ProxyCommand` option of `ssh`. ``HostSelection`` picks the daemon on this Mac or a paired
 host, and ``StandardRelay`` copies the bytes.
 
+`macpool ssh` runs `ssh` with `macpool connect` as its ``ProxyCommand``. The daemon's reply to a
+stream carries the guest's account and pinned host keys. ``GuestLogin`` pins the keys for `ssh`,
+and its ``PasswordPipe`` hands `ssh` the password through a named pipe instead of a file or an
+argument.
+
 The daemon boots each lease through the hidden `macpool supervise` subcommand, which runs a
 ``MachineSession`` in a process of its own. `run` uses the same session for a bundle that a person
 names.
@@ -105,6 +110,7 @@ lease one that is not ready.
 - ``RenewCommand``
 - ``ListCommand``
 - ``ConnectCommand``
+- ``SshCommand``
 - ``HostCommand``
 - ``HostListCommand``
 - ``PoolCommand``
@@ -131,6 +137,9 @@ lease one that is not ready.
 - ``PoolOptions``
 - ``HostSelection``
 - ``StandardRelay``
+- ``ProxyCommand``
+- ``GuestLogin``
+- ``PasswordPipe``
 - ``LeaseOutput``
 - ``PeerText``
 - ``Executable``

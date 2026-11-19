@@ -288,11 +288,12 @@ public enum PoolClient {
     ///   - lease: The lease.
     ///   - directory: The daemon's data directory.
     ///   - timeout: The longest wait for the daemon's reply, which follows the guest's answer.
-    /// - Returns: The stream and the lease.
+    /// - Returns: The stream, the lease, and the access to the guest.
     /// - Throws: ``PoolError/daemonUnreachable(path:reason:)`` when no daemon listens,
-    ///   ``PoolError/daemonRefused(message:)`` when the lease is unknown or not ready or the guest
-    ///   refuses the connection, ``PoolError/connection(path:reason:)`` when no reply arrives in
-    ///   time, or ``PoolError/connectionClosed`` when the daemon closes the connection first.
+    ///   ``PoolError/daemonRefused(message:)`` when the lease is unknown or not ready, the daemon
+    ///   cannot read the guest's access, or the guest refuses the connection,
+    ///   ``PoolError/connection(path:reason:)`` when no reply arrives in time, or
+    ///   ``PoolError/connectionClosed`` when the daemon closes the connection first.
     public static func openStream(
         to lease: LeaseID,
         in directory: PoolDirectory,
@@ -317,7 +318,8 @@ public enum PoolClient {
     ///   - host: The host from this Mac's list of paired hosts.
     ///   - directory: This Mac's data directory, which holds its key.
     ///   - timeout: The longest wait for the handshake, the greeting, and then the host's reply.
-    /// - Returns: The stream and the lease as the host shows it to this Mac.
+    /// - Returns: The stream, the access to the guest, and the lease as the host shows it to this
+    ///   Mac.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails or the host
     ///   presents another key, ``PoolError/daemonRefused(message:)`` when the host refuses the
     ///   request, ``PoolError/connectionClosed`` when the host closes the connection first, or
@@ -353,12 +355,12 @@ public enum PoolClient {
     ///   - channel: A connection that sent no request yet.
     ///   - place: The daemon's socket or address, for error messages.
     ///   - timeout: The longest wait for the reply.
-    /// - Returns: The stream and the lease.
+    /// - Returns: The stream, the lease, and the access to the guest.
     /// - Throws: ``PoolError/daemonRefused(message:)`` when the daemon refuses the request,
     ///   ``PoolError/connection(path:reason:)`` when no reply arrives in time,
     ///   ``PoolError/connectionClosed`` when the daemon closes the connection first, or
-    ///   ``PoolError/malformedMessage(reason:)`` when the reply is of another kind or names
-    ///   another lease.
+    ///   ``PoolError/malformedMessage(reason:)`` when the reply is of another kind, names another
+    ///   lease, or carries no access to the guest.
     private static func openStream(
         to lease: LeaseID,
         on channel: MessageChannel,
@@ -386,9 +388,9 @@ public enum PoolClient {
             throw .connection(path: place, reason: "the daemon sent no reply within \(timeout)")
         }
         switch received {
-        case let .success(.ready(summary)?) where summary.id == lease:
+        case let .success(.ready(summary, guest?)?) where summary.id == lease:
             do throws(PoolError) {
-                return try GuestStream(lease: summary, stream: channel.takeStream())
+                return try GuestStream(lease: summary, guest: guest, stream: channel.takeStream())
             } catch {
                 channel.close()
                 throw error
@@ -396,6 +398,9 @@ public enum PoolClient {
         case let .success(.failure(message)?):
             channel.close()
             throw .daemonRefused(message: message)
+        case .success(.ready(_, nil)?):
+            channel.close()
+            throw .malformedMessage(reason: "the daemon's reply to a connect request carries no access to the guest")
         case .success(nil):
             channel.close()
             throw .connectionClosed
@@ -436,6 +441,9 @@ public enum PoolClient {
 public struct GuestStream: Sendable {
     /// The lease as the daemon showed it to this Mac.
     public let lease: LeaseSummary
+
+    /// The account and the pinned host keys that log in to the guest.
+    public let guest: GuestAccess
 
     /// The connection, which now carries the bytes of the guest's SSH server.
     public let stream: ByteStream

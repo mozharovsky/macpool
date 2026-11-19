@@ -8,8 +8,9 @@ import Testing
 
 /// A data directory, a source bundle, a clock, and a launcher for daemon tests.
 ///
-/// The source bundle holds only its settings, which is enough to clone it. The launcher serves
-/// supervisor sockets inside the test process, so no VM boots.
+/// The source bundle holds its settings, a guest account, and a pinned host key. That is enough to
+/// clone it and to open streams to the clones' guests. The launcher serves supervisor sockets
+/// inside the test process, so no VM boots.
 final class PoolFixture {
     /// The directory that holds the data directory and the source bundle.
     let root: ShortDirectory
@@ -50,7 +51,31 @@ final class PoolFixture {
             build: "25A1",
             hasBooted: true,
         ))
+        let access = try Self.guestAccess()
+        try GuestAccount(fullName: "macpool", username: access.username, password: access.password)
+            .write(to: bundle.guestAccountFile)
+        let knownHosts = access.hostKeys.map { $0.knownHostsLine(alias: VMBundle.hostKeyAlias) + "\n" }.joined()
+        try Data(knownHosts.utf8).write(to: bundle.knownHostsFile)
         source = bundle.root.path(percentEncoded: false)
+    }
+
+    /// Returns the account and the pinned host key of the source bundle, which every clone keeps.
+    ///
+    /// - Returns: The access that the daemon sends with each stream.
+    /// - Throws: An error when the test key is not a valid Ed25519 key blob.
+    static func guestAccess() throws -> GuestAccess {
+        try GuestAccess(username: "macpool", password: "fixture-password-7", hostKeys: [hostKey(filledWith: 7)])
+    }
+
+    /// Creates an Ed25519 host key whose 32 key bytes all hold one value.
+    ///
+    /// - Parameter byte: The value of each key byte.
+    /// - Returns: The key.
+    /// - Throws: An error when the blob is not a valid Ed25519 key blob.
+    static func hostKey(filledWith byte: UInt8) throws -> HostKey {
+        let name = Data(HostKey.algorithm.utf8)
+        let blob = Data([0, 0, 0, UInt8(name.count)]) + name + Data([0, 0, 0, 32]) + Data(repeating: byte, count: 32)
+        return try #require(HostKey(base64: blob.base64EncodedString()))
     }
 
     /// Creates a booted bundle without an image record in the data directory's `images` directory.
@@ -781,7 +806,7 @@ extension PoolReply {
     /// The lease that a starting, ready, restarting, or renewed reply describes.
     var lease: LeaseSummary? {
         switch self {
-        case let .starting(lease), let .ready(lease), let .restarting(lease, _), let .renewed(lease):
+        case let .starting(lease), let .ready(lease, _), let .restarting(lease, _), let .renewed(lease):
             lease
         case .queued, .ended, .released, .status, .failure, .invitation, .paired, .alreadyPaired, .wrongCode,
              .revoked, .forgotten:

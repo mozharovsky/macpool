@@ -1798,10 +1798,10 @@ public actor PoolDaemon {
     ///   - id: The lease.
     ///   - client: The client that sent the request.
     ///   - owner: Who the client acts for.
-    /// - Throws: The errors of ``LeaseLedger/streamTarget(_:for:)``,
-    ///   ``PoolError/invalidRequest(reason:)`` when the connection waits for or holds a lease or
-    ///   the Mac already has ``streamsPerPeer`` streams, or ``PoolError/connection(path:reason:)``
-    ///   when the channel began to close.
+    /// - Throws: The errors of ``LeaseLedger/streamTarget(_:for:)`` and of
+    ///   ``guestAccess(of:for:)``, ``PoolError/invalidRequest(reason:)`` when the connection waits
+    ///   for or holds a lease or the Mac already has ``streamsPerPeer`` streams, or
+    ///   ``PoolError/connection(path:reason:)`` when the channel began to close.
     private func openStream(to id: LeaseID, for client: ClientID, owner: LeaseOwner) throws(PoolError) {
         let target = try ledger.streamTarget(id, for: owner)
         guard !ledger.isBusy(client) else {
@@ -1812,6 +1812,7 @@ public actor PoolDaemon {
             throw .invalidRequest(reason: "this Mac already has \(Self.streamsPerPeer) streams to the host's guests, "
                 + "the most it may have")
         }
+        let access = try guestAccess(of: id, for: owner)
         guard let channel = clients[client]?.channel else {
             return
         }
@@ -1824,8 +1825,38 @@ public actor PoolDaemon {
             "lease": "\(id)",
             "owner": "\(owner)",
         ])
-        let ready = visible(.ready(target.lease), to: owner)
+        let ready = visible(.ready(target.lease, guest: access), to: owner)
         Task { await self.connectStream(number, to: target.address, replying: ready) }
+    }
+
+    /// Reads the account and the pinned host keys of a lease's guest from the lease's bundle.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - owner: Who asks for the stream.
+    /// - Returns: The access that the reply to a stream carries.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the bundle pins no host key, or when
+    ///   the account or the `known_hosts` file cannot be read. In the second case the local user
+    ///   gets ``PoolError/library(_:)`` with the path instead.
+    private func guestAccess(of id: LeaseID, for owner: LeaseOwner) throws(PoolError) -> GuestAccess {
+        let bundle = configuration.directory.bundle(for: id)
+        let account: GuestAccount
+        let keys: [HostKey]?
+        do throws(MacpoolError) {
+            account = try GuestAccount.load(from: bundle.guestAccountFile)
+            keys = try bundle.pinnedHostKeys()
+        } catch {
+            configuration.logger.warning("The access to a lease's guest cannot be read", metadata: [
+                "lease": "\(id)",
+                "reason": "\(error)",
+            ])
+            throw owner == .local ? .library(error)
+                : .invalidRequest(reason: "the host cannot read the account of the guest of lease \(id)")
+        }
+        guard let keys, !keys.isEmpty else {
+            throw .invalidRequest(reason: "lease \(id) pins no SSH host key for its guest")
+        }
+        return GuestAccess(username: account.username, password: account.password, hostKeys: keys)
     }
 
     /// Connects a stream to its guest's SSH server and relays bytes until the stream ends.
@@ -2703,7 +2734,7 @@ private extension PoolReply {
         switch self {
         case .queued, .released, .wrongCode, .forgotten:
             []
-        case let .starting(lease), let .ready(lease), let .renewed(lease):
+        case let .starting(lease), let .ready(lease, _), let .renewed(lease):
             lease.texts
         case let .restarting(lease, reason):
             lease.texts + [reason]

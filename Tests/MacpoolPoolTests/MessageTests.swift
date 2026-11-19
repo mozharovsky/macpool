@@ -1,5 +1,6 @@
 import Foundation
 @testable import MacpoolPool
+import MacpoolVM
 import Synchronization
 import Testing
 
@@ -52,10 +53,11 @@ struct MessageTests {
             let data = try MessageCoding.encoder.encode(request)
             #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: data) == request)
         }
-        let replies: [PoolReply] = [
+        let replies: [PoolReply] = try [
             .queued(position: 2),
             .starting(lease),
             .ready(lease),
+            .ready(lease, guest: PoolFixture.guestAccess()),
             .restarting(lease, reason: "boom"),
             .ended(id, reason: "the lease expired"),
             .renewed(lease),
@@ -96,6 +98,38 @@ struct MessageTests {
         for outcome in outcomes {
             let data = try MessageCoding.encoder.encode(SupervisorStatus(phase: .exited, outcome: outcome))
             #expect(try MessageCoding.decoder.decode(SupervisorStatus.self, from: data).outcome == outcome)
+        }
+    }
+
+    /// Encodes the guest's access with its password and keeps the password out of every
+    /// description of a reply that carries it.
+    @Test func hidesTheGuestsPasswordInDescriptions() throws {
+        let access = try PoolFixture.guestAccess()
+        let id = try #require(LeaseID("0a1b2c3d"))
+        let lease = LeaseSummary(id: id, source: "base", phase: .ready, restarts: 0, detached: false, priority: 0)
+        let reply = PoolReply.ready(lease, guest: access)
+        let text = try String(decoding: MessageCoding.encoder.encode(reply), as: UTF8.self)
+        let key = try #require(access.hostKeys.first)
+        #expect(text.contains(
+            #""guest":{"host_keys":["\#(key.base64)"],"password":"\#(access.password)","username":"macpool"}"#,
+        ))
+        var dumped = ""
+        dump(reply, to: &dumped)
+        for description in ["\(reply)", String(reflecting: reply), dumped] {
+            #expect(!description.contains(access.password))
+            #expect(description.contains(key.fingerprint))
+        }
+    }
+
+    /// Rejects an access without a host key or with a key that is not an Ed25519 key blob.
+    @Test func rejectsAnAccessWithoutAValidHostKey() throws {
+        let other = Data("ssh-rsa".utf8).base64EncodedString()
+        let valid = try PoolFixture.hostKey(filledWith: 1).base64
+        for keys in ["[]", #"["\#(other)"]"#, #"["\#(valid)","x"]"#] {
+            let json = #"{"username":"macpool","password":"secret","host_keys":\#(keys)}"#
+            #expect(throws: DecodingError.self) {
+                try MessageCoding.decoder.decode(GuestAccess.self, from: Data(json.utf8))
+            }
         }
     }
 

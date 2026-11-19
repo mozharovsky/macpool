@@ -157,7 +157,7 @@ ssh -o ProxyCommand="macpool connect 0a1b2c3d" -o HostKeyAlias=macpool-guest adm
 ```
 
 `ssh` never connects to the host name in the command, so any name works there. Pin the guest's
-host key under one alias, as `Scripts/ssh.sh` does.
+host key under one alias. `macpool ssh` sets up these options for you.
 
 The command exits with status 0 when the stream ends normally. If two paired hosts have the name
 that `--pool` gives, it fails and asks for the short key.
@@ -167,6 +167,25 @@ when the daemon stops. Over the local socket such an end looks normal to `connec
 exits with status 0. `ssh` still reports the cut connection. With `--pool`, the end of standard
 input ends the whole stream, because TLS can't end one direction alone. One Mac may hold 8 streams
 on a host at once.
+
+## ssh
+
+`macpool ssh LEASE` logs in to a ready lease's guest with `ssh` and opens a shell. A command after
+`--` runs in the guest instead, and `macpool ssh` exits with its status. It takes the same
+`--data-dir` and `--pool` options as `connect`.
+
+```sh
+macpool ssh --pool lab 0a1b2c3d -- sw_vers
+```
+
+The command asks the daemon for the guest's account and host key over a short stream first. It
+then runs `/usr/bin/ssh` through `macpool connect`, which opens a second stream. `ssh` accepts only
+the guest's pinned host key, logs in with the account's password, and ignores your SSH configuration
+and agent. The password reaches `ssh` through a named pipe in a private temporary directory, so it
+never appears in a file, a process argument, or the environment.
+
+`ssh` joins the words after `--` with spaces, and the guest's shell splits them again. Quote them as
+you would for `ssh`. The status is 255 when `ssh` itself fails.
 
 ## Scripts
 

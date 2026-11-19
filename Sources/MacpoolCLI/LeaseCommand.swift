@@ -158,7 +158,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 } else {
                     Report.line("starting")
                 }
-            case let .reply(.ready(lease)):
+            case let .reply(.ready(lease, _)):
                 Report.line("address=\(lease.address ?? "")")
                 Report.line("expires_at=\(lease.expiresAt.map(LeaseOutput.timestamp) ?? "")")
                 Report.line("ready")
