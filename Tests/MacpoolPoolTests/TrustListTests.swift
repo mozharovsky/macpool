@@ -50,6 +50,42 @@ struct TrustListTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: trust).sorted() == ["clients.json", "hosts.json"])
     }
 
+    /// Finds a paired host by its short key or full key before any name, and by a name that only
+    /// one host has.
+    @Test func findsAHostByKeyOrName() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let pairedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = TrustedHost(key: randomKey(), name: "lab", address: "192.0.2.10", port: 7373, pairedAt: pairedAt)
+        let second = TrustedHost(key: randomKey(), name: "lab", address: "192.0.2.11", port: 7373, pairedAt: pairedAt)
+        let desk = TrustedHost(key: randomKey(), name: "desk", address: "192.0.2.12", port: 7373, pairedAt: pairedAt)
+        // A host may choose a name that looks like another host's short key.
+        let imitation = TrustedHost(
+            key: randomKey(),
+            name: first.key.shortKey,
+            address: "192.0.2.13",
+            port: 7373,
+            pairedAt: pairedAt,
+        )
+        var hosts = TrustList<TrustedHost>()
+        for host in [first, second, desk, imitation] {
+            hosts.insert(host)
+        }
+        try hosts.save(to: directory)
+
+        #expect(try TrustedHost.named(first.key.shortKey, in: directory) == first)
+        #expect(try TrustedHost.named(second.key.rawValue, in: directory) == second)
+        #expect(try TrustedHost.named("desk", in: directory) == desk)
+        let ambiguous = "2 paired hosts have the name lab. Give the host's short key from macpool pool list"
+        #expect(throws: PoolError.invalidRequest(reason: ambiguous)) {
+            try TrustedHost.named("lab", in: directory)
+        }
+        let unknown = "no paired host has the name or key attic. macpool pool list shows the paired hosts"
+        #expect(throws: PoolError.invalidRequest(reason: unknown)) {
+            try TrustedHost.named("attic", in: directory)
+        }
+    }
+
     /// Reads a record without a priority ceiling with a ceiling of 0.
     @Test func readsRecordsWithoutACeiling() throws {
         let root = try ShortDirectory()

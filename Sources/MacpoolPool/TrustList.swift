@@ -373,4 +373,30 @@ public extension TrustedHost {
     static func paired(in directory: PoolDirectory) throws(PoolError) -> [TrustedHost] {
         try TrustList<Self>.load(from: directory).records
     }
+
+    /// Finds the one paired host that a person's text names.
+    ///
+    /// A host's short key or full fingerprint names it first. Only text that names no key
+    /// matches names, because two hosts may choose the same name.
+    ///
+    /// - Parameters:
+    ///   - text: The host's name, short key, or full fingerprint.
+    ///   - directory: The data directory.
+    /// - Returns: The host.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when no host or more than one host matches,
+    ///   or the errors of ``paired(in:)``.
+    static func named(_ text: String, in directory: PoolDirectory) throws(PoolError) -> TrustedHost {
+        let hosts = try paired(in: directory)
+        let byKey = hosts.filter { $0.key.isNamed(by: text) }
+        let matches = byKey.isEmpty ? hosts.filter { $0.name == text } : byKey
+        guard matches.count < 2 else {
+            throw .invalidRequest(reason: "\(matches.count) paired hosts have the name \(text). Give the host's "
+                + "short key from macpool pool list")
+        }
+        guard let host = matches.first else {
+            throw .invalidRequest(reason: "no paired host has the name or key \(text). macpool pool list shows "
+                + "the paired hosts")
+        }
+        return host
+    }
 }

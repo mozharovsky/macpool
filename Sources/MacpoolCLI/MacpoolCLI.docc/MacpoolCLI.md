@@ -67,6 +67,10 @@ Another Mac chose the names and addresses in these lists. ``PeerText`` escapes t
 terminal shows them. Each table prints a Mac's short key in a column before its name, because a
 name can imitate a short key.
 
+`macpool connect` relays its standard input and output to the SSH server of a lease's guest, for
+the `ProxyCommand` option of `ssh`. ``HostSelection`` picks the daemon on this Mac or a paired
+host, and ``StandardRelay`` copies the bytes.
+
 The daemon boots each lease through the hidden `macpool supervise` subcommand, which runs a
 ``MachineSession`` in a process of its own. `run` uses the same session for a bundle that a person
 names.
@@ -100,6 +104,7 @@ lease one that is not ready.
 - ``ReleaseCommand``
 - ``RenewCommand``
 - ``ListCommand``
+- ``ConnectCommand``
 - ``HostCommand``
 - ``HostListCommand``
 - ``PoolCommand``
@@ -124,6 +129,8 @@ lease one that is not ready.
 - ``LogLevel``
 - ``MachineSession``
 - ``PoolOptions``
+- ``HostSelection``
+- ``StandardRelay``
 - ``LeaseOutput``
 - ``PeerText``
 - ``Executable``

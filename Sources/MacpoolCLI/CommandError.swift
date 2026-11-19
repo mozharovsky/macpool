@@ -101,6 +101,13 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     /// - Parameter reason: The failure.
     case supervisedRunFailed(String)
 
+    /// Reading standard input or writing standard output failed.
+    ///
+    /// - Parameters:
+    ///   - operation: What the command did, such as `writing standard output`.
+    ///   - reason: The system's description of the failure.
+    case standardIO(operation: String, reason: String)
+
     /// A one-line description for the command's error output.
     var description: String {
         switch self {
@@ -136,6 +143,8 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             "lease \(id) ended: \(reason)"
         case let .supervisedRunFailed(reason):
             reason
+        case let .standardIO(operation, reason):
+            "\(operation) failed: \(reason)"
         case let .imageStep(step, reason):
             "building the image failed while \(step): \(reason)"
         case let .unfinishedImageBuild(name, building, inputs):
