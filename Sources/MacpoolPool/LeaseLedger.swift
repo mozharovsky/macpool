@@ -580,6 +580,10 @@ struct LeaseLedger {
                 record.expiresAt = now.addingTimeInterval(TimeInterval(record.terms.timeToLive))
             }
             leases[id] = record
+            if !record.needsClient {
+                // A detached lease outlives its client from now on, so the reattach grace ends.
+                orphans[id] = nil
+            }
             guard let client = clients[id] else {
                 return []
             }
