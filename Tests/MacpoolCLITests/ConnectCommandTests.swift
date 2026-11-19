@@ -70,13 +70,11 @@ struct ConnectCommandTests {
     @Test func resetsTheStreamWhenTheOutputFails() async throws {
         let pair = try await StreamPair.open()
         let input = try FileDescriptor.pipe()
-        let output = try FileDescriptor.pipe()
-        // A write to a pipe without a reader then fails with EPIPE instead of ending the process.
-        _ = fcntl(output.writeEnd.rawValue, F_SETNOSIGPIPE, 1)
-        try output.readEnd.close()
+        // A descriptor opened only for reading refuses every write, whatever else holds the file.
+        let output = try FileDescriptor.open("/dev/null", .readOnly, options: .closeOnExec)
         try await pair.peer.send(Data("banner".utf8))
         await #expect {
-            try await Self.relay(pair.client, input: input.readEnd, output: output.writeEnd)
+            try await Self.relay(pair.client, input: input.readEnd, output: output)
         } throws: { error in
             if case let .standardIO(operation, _) = error as? CommandError {
                 operation == "writing standard output"
@@ -85,7 +83,7 @@ struct ConnectCommandTests {
             }
         }
         #expect(await StreamPair.end(of: pair.peer) == .failed)
-        for descriptor in [input.readEnd, input.writeEnd, output.writeEnd] {
+        for descriptor in [input.readEnd, input.writeEnd, output] {
             try descriptor.close()
         }
     }
