@@ -90,6 +90,41 @@ struct ConnectCommandTests {
         }
     }
 
+    /// Returns without an error when the end of the input closes a TLS stream.
+    @Test func endsWithTheInputOverTLS() async throws {
+        let pair = try await StreamPair.open(tls: true)
+        let input = try FileDescriptor.pipe()
+        let output = try FileDescriptor.pipe()
+        try input.writeEnd.close()
+
+        try await Self.relay(pair.client, input: input.readEnd, output: output.writeEnd)
+        #expect(await StreamPair.end(of: pair.peer) == .finished)
+        for descriptor in [input.readEnd, output.readEnd, output.writeEnd] {
+            try descriptor.close()
+        }
+    }
+
+    /// Fails with the input's error and resets the stream when the input cannot be read.
+    @Test func failsWhenTheInputCannotBeRead() async throws {
+        let pair = try await StreamPair.open()
+        let input = try FileDescriptor.pipe()
+        let output = try FileDescriptor.pipe()
+        // The write end of a pipe refuses reads.
+        await #expect {
+            try await Self.relay(pair.client, input: input.writeEnd, output: output.writeEnd)
+        } throws: { error in
+            if case let .standardIO(operation, _) = error as? CommandError {
+                operation == "reading standard input"
+            } else {
+                false
+            }
+        }
+        #expect(await StreamPair.end(of: pair.peer) == .failed)
+        for descriptor in [input.readEnd, input.writeEnd, output.readEnd, output.writeEnd] {
+            try descriptor.close()
+        }
+    }
+
     /// Runs the relay, and resets the stream if the relay is still running after 10 seconds.
     ///
     /// - Parameters:
@@ -143,7 +178,7 @@ struct ConnectCommandTests {
     }
 }
 
-/// The two ends of a TCP connection on the loopback interface, each as a byte stream.
+/// The two ends of a TCP or TLS connection on the loopback interface, each as a byte stream.
 private struct StreamPair {
     /// How a stream ended.
     enum End: Equatable {
@@ -165,10 +200,12 @@ private struct StreamPair {
 
     /// Connects the two ends.
     ///
+    /// - Parameter tls: Whether the connection carries TLS, as a connection to a paired host does.
     /// - Returns: The connected ends.
-    /// - Throws: An error when the listener cannot start or the connection fails.
-    static func open() async throws -> StreamPair {
-        let parameters = NWParameters.tcp
+    /// - Throws: An error when the key cannot be created, the listener cannot start, or the
+    ///   connection fails.
+    static func open(tls: Bool = false) async throws -> StreamPair {
+        let (parameters, clientParameters) = try tls ? tlsParameters() : (NWParameters.tcp, NWParameters.tcp)
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         let listener = try NWListener(using: parameters)
         defer { listener.cancel() }
@@ -192,10 +229,28 @@ private struct StreamPair {
         }
         try #require(ready, "the listener did not start")
         let port = try #require(listener.port)
-        let client = try await MessageChannel.connect(to: .hostPort(host: .ipv4(.loopback), port: port), using: .tcp)
+        let client = try await MessageChannel.connect(
+            to: .hostPort(host: .ipv4(.loopback), port: port),
+            using: clientParameters,
+        )
         var connections = accepted.makeAsyncIterator()
         let peer = try #require(await connections.next())
         return try StreamPair(client: client.takeStream(), peer: peer.takeStream())
+    }
+
+    /// Creates the parameters of mutual TLS with a key that exists only in the test.
+    ///
+    /// - Returns: The parameters of the listener and of the client.
+    /// - Throws: An error when the key cannot be created.
+    private static func tlsParameters() throws -> (NWParameters, NWParameters) {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "mp-tls-" + UUID().uuidString.prefix(8).lowercased(), directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = try MacIdentity.loadOrCreate(in: PoolDirectory(root: root))
+        let server = try PeerSecurity.parameters(identity: identity, isServer: true) { _ in true }
+        let client = try PeerSecurity.parameters(identity: identity, isServer: false) { _ in true }
+        return (server, client)
     }
 
     /// Sends every byte back on ``peer`` and ends its sending direction after the client's end.
