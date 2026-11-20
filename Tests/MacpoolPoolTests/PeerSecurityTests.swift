@@ -4,8 +4,9 @@ import Testing
 
 /// Tests of the TCP settings that ``PeerSecurity`` gives both sides of a connection.
 struct PeerSecurityTests {
-    /// Probes an idle peer so that a silent one drops after about a minute. The literal values
-    /// pin that minute, so a change to the constants fails here.
+    /// Probes an idle peer so that a silent one drops after about a minute, and drops a peer that
+    /// leaves sent data unacknowledged for a minute. The literal values pin that minute, so a
+    /// change to the constants fails here.
     ///
     /// - Parameter isServer: Whether the parameters serve the host's listener or a client.
     @Test(arguments: [true, false])
@@ -16,5 +17,6 @@ struct PeerSecurityTests {
         #expect(tcp.keepaliveIdle == 30)
         #expect(tcp.keepaliveInterval == 10)
         #expect(tcp.keepaliveCount == 3)
+        #expect(tcp.connectionDropTime == 60)
     }
 }
