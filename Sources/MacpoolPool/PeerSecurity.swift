@@ -33,6 +33,9 @@ enum PeerSecurity {
     /// The number of unanswered keepalive probes after which TCP drops the connection.
     static let keepaliveCount = 3
 
+    /// The seconds that sent data may stay unacknowledged before TCP drops the connection.
+    static let connectionDropTime = 60
+
     /// Creates the parameters of a TCP connection with mutual TLS.
     ///
     /// The parameters call `admits` during every handshake. If a key leaves the host's list, that
@@ -83,6 +86,9 @@ enum PeerSecurity {
         tcp.keepaliveIdle = keepaliveIdle
         tcp.keepaliveInterval = keepaliveInterval
         tcp.keepaliveCount = keepaliveCount
+        // Keepalive probes only an idle connection. A heartbeat or a guest's output that a vanished
+        // peer never acknowledges would otherwise keep the connection until retransmission gives up.
+        tcp.connectionDropTime = connectionDropTime
         return NWParameters(tls: tls, tcp: tcp)
     }
 
