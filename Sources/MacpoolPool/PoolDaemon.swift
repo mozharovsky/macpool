@@ -51,6 +51,11 @@ import Synchronization
 /// After the daemon handles a request, it waits until the messages that it sent to the client so
 /// far left, and only then reads the next request. Lease events sent later do not extend the
 /// wait. A client that stops reading therefore stalls only its own connection.
+///
+/// A paired Mac whose connection sends no request for 60 seconds counts as lost, and the daemon
+/// closes the connection. The leases that the connection held wait ``PoolPolicy/reattachGrace``
+/// for another connection of the Mac to attach. A local client that disconnects ends its leases
+/// at once.
 public actor PoolDaemon {
     /// The daemon's settings and collaborators.
     public struct Configuration: Sendable {
@@ -79,6 +84,13 @@ public actor PoolDaemon {
 
         /// The source of the current time for expiries, restarts, and stop deadlines.
         public var now: @Sendable () -> Date
+
+        /// The source of the time on a clock that stops while this Mac sleeps and ignores changes
+        /// of the system time.
+        ///
+        /// The daemon measures the silence of paired Macs with it, so a sleep of this Mac or a new
+        /// system time closes no connection.
+        public var awakeTime: @Sendable () -> SuspendingClock.Instant
 
         /// The interval between checks of expiries and restart times, or `nil` when only explicit
         /// calls to ``PoolDaemon/tick()`` check them.
@@ -118,6 +130,7 @@ public actor PoolDaemon {
         ///     lease, keyed by the name that a client sends.
         ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
         ///   - now: The source of the current time.
+        ///   - awakeTime: The source of the time on a clock that stops while this Mac sleeps.
         ///   - tickInterval: The interval between checks of expiries and restart times, or `nil`.
         ///   - supervisorConnectTimeout: The longest wait for a new supervisor's socket.
         ///   - reconnectWindow: How long the daemon reconnects to a running supervisor before it
@@ -134,6 +147,7 @@ public actor PoolDaemon {
             offeredSources: [String: String] = [:],
             peers: PeerSettings? = nil,
             now: @escaping @Sendable () -> Date = { Date() },
+            awakeTime: @escaping @Sendable () -> SuspendingClock.Instant = { SuspendingClock().now },
             tickInterval: Duration? = .seconds(1),
             supervisorConnectTimeout: Duration = .seconds(30),
             reconnectWindow: Duration = .seconds(30),
@@ -149,6 +163,7 @@ public actor PoolDaemon {
             self.offeredSources = offeredSources
             self.peers = peers
             self.now = now
+            self.awakeTime = awakeTime
             self.tickInterval = tickInterval
             self.supervisorConnectTimeout = supervisorConnectTimeout
             self.reconnectWindow = reconnectWindow
@@ -166,6 +181,9 @@ public actor PoolDaemon {
         let channel: MessageChannel
         /// Who the client acts for.
         let owner: LeaseOwner
+        /// The awake time of the client's last request, or of its connection before the first
+        /// request.
+        var lastRequest: SuspendingClock.Instant
     }
 
     /// The daemon's connection to one supervisor.
@@ -256,6 +274,13 @@ public actor PoolDaemon {
     /// Each connection queues up to 4 MiB of replies. The limit bounds the memory that one Mac
     /// can hold this way.
     static let connectionsPerPeer = 4
+
+    /// The longest time that a paired Mac's connection may go without a request while this Mac is
+    /// awake.
+    ///
+    /// ``tick()`` closes a connection that stays silent this long on
+    /// ``Configuration/awakeTime``.
+    static let peerSilenceLimit = Duration.seconds(60)
 
     /// The most connections of Macs that pair at once.
     ///
@@ -462,8 +487,9 @@ public actor PoolDaemon {
         configuration.logger.info("Stopped listening. Supervisors keep running.")
     }
 
-    /// Writes the state, applies expiries, restart times, and the reattach grace, signals
-    /// supervisors that ignore a stop, and retries unfinished stops and clean-ups.
+    /// Writes the state, applies expiries, restart times, and the reattach grace, closes silent
+    /// connections of paired Macs, signals supervisors that ignore a stop, and retries unfinished
+    /// stops and clean-ups.
     public func tick() {
         guard !isShutDown else {
             return
@@ -473,6 +499,7 @@ public actor PoolDaemon {
             invitationEnded(expired)
             reply(.failure("the invitation expired"), to: expired.inviter)
         }
+        closeSilentPeers(at: now)
         perform(ledger.tick(now: now))
         let stopGrace = configuration.stopGrace / .seconds(1)
         for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
@@ -523,7 +550,7 @@ public actor PoolDaemon {
         }
         let client = ClientID(value: nextClient)
         nextClient += 1
-        clients[client] = ClientConnection(channel: channel, owner: owner)
+        clients[client] = ClientConnection(channel: channel, owner: owner, lastRequest: configuration.awakeTime())
         Task { await self.serve(client, owner: owner, on: channel) }
     }
 
@@ -961,6 +988,7 @@ public actor PoolDaemon {
             let request: PoolRequest?
             do {
                 request = try await channel.receive(PoolRequest.self)
+                clients[client]?.lastRequest = configuration.awakeTime()
             } catch {
                 // The error may repeat text from the line. If a paired Mac's line held a host path,
                 // visible(_:to:) would replace the reply, and the change would confirm the path. A
@@ -992,7 +1020,38 @@ public actor PoolDaemon {
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
-        perform(ledger.clientDisconnected(client, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: owner, now: configuration.now()))
+    }
+
+    /// Stops serving the paired Macs whose connections sent no request for
+    /// ``peerSilenceLimit`` and closes those connections.
+    ///
+    /// A lost Mac sends neither a request nor the end of its connection. Without this check, the
+    /// connection would hold its leases until TCP keepalive gives up on the Mac. The leases then
+    /// wait for another connection of the Mac to attach, as after a disconnect.
+    ///
+    /// - Parameter now: The current time.
+    private func closeSilentPeers(at now: Date) {
+        let awake = configuration.awakeTime()
+        for (client, connection) in clients.sorted(by: { $0.key < $1.key }) {
+            guard case let .client(key) = connection.owner,
+                  connection.lastRequest.duration(to: awake) >= Self.peerSilenceLimit else {
+                continue
+            }
+            configuration.logger.log(
+                level: peerLogLevel(of: .silent(key), full: .notice),
+                "A paired Mac stopped answering",
+                metadata: [
+                    "key": "\(key)",
+                    "address": "\(connection.channel.peer)",
+                ],
+            )
+            // The serve(_:owner:on:) loop sees the missing client and ends without a second
+            // disconnect.
+            clients[client] = nil
+            perform(ledger.clientDisconnected(client, owner: connection.owner, now: now))
+            connection.channel.close()
+        }
     }
 
     /// Answers one request.
@@ -1008,7 +1067,8 @@ public actor PoolDaemon {
     ///   - owner: Who the client acts for.
     /// - Returns: Whether the connection stays open for the next request.
     private func handle(_ request: PoolRequest, from client: ClientID, owner: LeaseOwner) -> Bool {
-        // A revocation may close the connection after the line arrived.
+        // A revocation or the silence check in tick() may stop serving the client after the line
+        // arrived.
         guard clients[client] != nil else {
             return false
         }
@@ -1018,7 +1078,11 @@ public actor PoolDaemon {
                 record = try pairedRecord(key)
             } catch {
                 // A person's mistake in the file should not end the attached leases of every Mac.
-                reply(.failure(error.description), to: client)
+                // A heartbeat gets no reply, because a client that waits for a lease would take an
+                // unasked failure as the lease's end.
+                if request != .heartbeat {
+                    reply(.failure(error.description), to: client)
+                }
                 return true
             }
             guard record != nil else {
@@ -1078,6 +1142,8 @@ public actor PoolDaemon {
                 }
                 try forget(key, endLeases: endLeases, from: client)
                 return false
+            case .heartbeat:
+                break
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1323,7 +1389,8 @@ public actor PoolDaemon {
         let owner = LeaseOwner.client(key)
         let before = ledger.liveLeases(of: owner).count
         // A lease that needs a client may wait for its client to reattach after a daemon
-        // restart. The Mac can no longer reattach. The lease therefore ends now.
+        // restart or a lost connection. The Mac can no longer reattach. The lease therefore ends
+        // now.
         for id in ledger.liveLeases(of: owner) where endLeases || ledger.leases[id]?.needsClient == true {
             perform((try? ledger.release(id, owner: .local, reason: reason)) ?? [])
         }
@@ -1356,9 +1423,10 @@ public actor PoolDaemon {
 
     /// Queues a last reply to a paired client and stops serving the client.
     ///
-    /// The daemon withdraws the client's waiting requests and ends its attached leases at once,
-    /// as when the client disconnects. A paired client holds no invitation, because only the local
-    /// user may invite. The caller finishes the client's connection.
+    /// The daemon withdraws the client's waiting requests, as when the client disconnects. Its
+    /// attached leases wait for another connection of the Mac to attach. A paired client holds
+    /// no invitation, because only the local user may invite. The caller finishes the client's
+    /// connection.
     ///
     /// - Parameters:
     ///   - client: The client.
@@ -1367,7 +1435,7 @@ public actor PoolDaemon {
         guard let connection = clients.removeValue(forKey: client) else {
             return
         }
-        perform(ledger.clientDisconnected(client, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: connection.owner, now: configuration.now()))
         try? connection.channel.send(visible(last, to: connection.owner))
     }
 

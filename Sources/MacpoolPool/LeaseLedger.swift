@@ -19,9 +19,11 @@ public struct PoolPolicy: Sendable, Equatable {
     /// The longest wait before a restart.
     public var longestRestartDelay: Duration
 
-    /// How long a lease that needs a client survives without one after the daemon starts.
+    /// How long a lease that needs a client survives without one.
     ///
-    /// A client whose connection broke because the daemon stopped reattaches within this time.
+    /// A client whose connection broke because the daemon stopped reattaches within this time. So
+    /// does a paired client whose connection broke. A lease whose local client disconnected ends
+    /// at once.
     public var reattachGrace: Duration
 
     /// Creates a policy.
@@ -31,7 +33,7 @@ public struct PoolPolicy: Sendable, Equatable {
     ///   - maximumRestarts: The number of restarts before a lease ends.
     ///   - firstRestartDelay: The wait before the first restart.
     ///   - longestRestartDelay: The longest wait before a restart.
-    ///   - reattachGrace: How long a lease waits for its client after the daemon starts.
+    ///   - reattachGrace: How long a lease waits for its client to reattach.
     public init(
         slots: Int = maximumSlots,
         maximumRestarts: Int = 3,
@@ -256,6 +258,16 @@ struct QueuedRequest: Sendable, Equatable {
     var notifiedPosition: Int?
 }
 
+/// A lease that needs a client and waits for one to attach.
+struct Orphan: Equatable {
+    /// When the lease lost its client, or when the daemon started.
+    let since: Date
+
+    /// The reason with which the lease ends unless a client attaches within
+    /// ``PoolPolicy/reattachGrace``.
+    let reason: String
+}
+
 /// A step that the daemon performs after the ledger changed.
 enum LedgerAction: Sendable, Equatable {
     /// Sends a reply to a client.
@@ -313,8 +325,8 @@ struct LeaseLedger {
     /// The client that each lease reports to.
     private(set) var clients: [LeaseID: ClientID] = [:]
 
-    /// The time since which each lease that needs a client has none after a daemon start.
-    private(set) var orphanedSince: [LeaseID: Date] = [:]
+    /// The leases that need a client and wait for one to attach.
+    private(set) var orphans: [LeaseID: Orphan] = [:]
 
     /// The arrival number of the next request.
     private var nextTicket: UInt64 = 0
@@ -384,25 +396,42 @@ struct LeaseLedger {
         leases.values.filter { $0.owner == owner && $0.phase != .stopping }.map(\.id).sorted()
     }
 
-    /// Withdraws a disconnected client's requests and ends the leases that needed it.
+    /// Withdraws a disconnected client's requests and handles the leases that needed it.
+    ///
+    /// A local client's leases end at once. A paired client's leases wait
+    /// ``PoolPolicy/reattachGrace`` for a connection of the same Mac to attach.
     ///
     /// - Parameters:
     ///   - client: The client whose connection ended.
+    ///   - owner: Who the client acted for.
     ///   - now: The current time.
     /// - Returns: The stops, discards, and position notices that follow.
-    mutating func clientDisconnected(_ client: ClientID, now _: Date) -> [LedgerAction] {
+    mutating func clientDisconnected(_ client: ClientID, owner: LeaseOwner, now: Date) -> [LedgerAction] {
         queue.removeAll { $0.client == client }
         var actions: [LedgerAction] = []
         for (id, holder) in clients.sorted(by: { $0.key < $1.key }) where holder == client {
             clients[id] = nil
-            if leases[id]?.needsClient == true {
+            guard leases[id]?.needsClient == true else {
+                continue
+            }
+            if owner == .local {
                 actions += end(id, reason: "the client disconnected")
+            } else {
+                let seconds = Int(policy.reattachGrace / .seconds(1))
+                orphans[id] = Orphan(
+                    since: now,
+                    reason: "the client disconnected and did not reattach within \(seconds) seconds",
+                )
             }
         }
         return actions + notifyPositions()
     }
 
     /// Attaches a client to a lease, for example after the daemon restarted.
+    ///
+    /// A paired client may attach to its own lease while another connection of the same Mac is
+    /// attached. The Mac may have lost that connection without the host noticing yet. The earlier
+    /// connection then receives a failure and no more replies about the lease.
     ///
     /// - Parameters:
     ///   - id: The lease.
@@ -411,23 +440,28 @@ struct LeaseLedger {
     /// - Returns: A reply that tells the client the lease's current stage.
     /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
     ///   not act on it, ``PoolError/leaseEnding(id:)`` when it is stopping, or
-    ///   ``PoolError/leaseAttached(id:)`` when another client is attached.
+    ///   ``PoolError/leaseAttached(id:)`` when another client is attached and the lease does not
+    ///   belong to the paired client that asks.
     mutating func attach(_ id: LeaseID, client: ClientID, owner: LeaseOwner) throws(PoolError) -> [LedgerAction] {
         let record = try record(id, for: owner)
         guard record.phase != .stopping else {
             throw .leaseEnding(id: id.rawValue)
         }
+        var actions: [LedgerAction] = []
         if let holder = clients[id], holder != client {
-            throw .leaseAttached(id: id.rawValue)
+            guard owner != .local, owner == record.owner else {
+                throw .leaseAttached(id: id.rawValue)
+            }
+            actions.append(.notify(holder, .failure("another connection of this Mac attached to lease \(id)")))
         }
         clients[id] = client
-        orphanedSince[id] = nil
+        orphans[id] = nil
         let summary = summary(of: record)
         switch record.phase {
         case .ready:
-            return [.notify(client, .ready(summary))]
+            return actions + [.notify(client, .ready(summary))]
         case .starting, .restarting, .stopping:
-            return [.notify(client, .starting(summary))]
+            return actions + [.notify(client, .starting(summary))]
         }
     }
 
@@ -508,6 +542,10 @@ struct LeaseLedger {
                 record.expiresAt = now.addingTimeInterval(TimeInterval(record.terms.timeToLive))
             }
             leases[id] = record
+            if !record.needsClient {
+                // A detached lease outlives its client from now on, so the reattach grace ends.
+                orphans[id] = nil
+            }
             guard let client = clients[id] else {
                 return []
             }
@@ -587,7 +625,7 @@ struct LeaseLedger {
     mutating func discarded(_ id: LeaseID, now: Date) -> [LedgerAction] {
         leases[id] = nil
         clients[id] = nil
-        orphanedSince[id] = nil
+        orphans[id] = nil
         return schedule(now: now)
     }
 
@@ -605,9 +643,8 @@ struct LeaseLedger {
                 actions += end(id, reason: "the lease expired")
                 continue
             }
-            if let orphaned = orphanedSince[id],
-               now >= orphaned.addingTimeInterval(policy.reattachGrace / .seconds(1)) {
-                actions += end(id, reason: "no client reattached after the daemon started")
+            if let orphan = orphans[id], now >= orphan.since.addingTimeInterval(policy.reattachGrace / .seconds(1)) {
+                actions += end(id, reason: orphan.reason)
                 continue
             }
             if record.phase == .restarting, let restartAt = record.restartAt, restartAt <= now {
@@ -637,7 +674,7 @@ struct LeaseLedger {
                 continue
             }
             if record.needsClient, record.phase != .stopping {
-                orphanedSince[id] = now
+                orphans[id] = Orphan(since: now, reason: "no client reattached after the daemon started")
             }
             switch record.phase {
             case .starting, .ready, .stopping:
@@ -793,7 +830,7 @@ struct LeaseLedger {
         record.address = nil
         record.restartAt = nil
         leases[id] = record
-        orphanedSince[id] = nil
+        orphans[id] = nil
         var actions: [LedgerAction] = []
         if let client = clients.removeValue(forKey: id) {
             let shown = record.owner == .local ? reason : pairedClientReason ?? reason

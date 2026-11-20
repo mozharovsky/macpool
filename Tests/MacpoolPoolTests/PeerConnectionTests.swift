@@ -967,17 +967,20 @@ struct PeerConnectionTests {
         let serverStream = try peer.channel.takeStream()
         let payload = Data((0 ..< 300_000).map { UInt8(truncatingIfNeeded: $0) })
         try await serverStream.send(payload)
-        await serverStream.finishSending()
+        try await serverStream.finishSending()
         // If the end does not arrive, the watchdog ends the read after 10 seconds.
         let start = ContinuousClock.now
         let watchdog = Task {
             try? await Task.sleep(for: .seconds(10))
             clientStream.close()
         }
-        #expect(await clientStream.read(count: payload.count + 1) == payload)
+        #expect(await clientStream.read(count: payload.count) == payload)
+        #expect(try await clientStream.receive() == nil)
         watchdog.cancel()
         #expect(ContinuousClock.now - start < .seconds(10))
-        #expect(await serverStream.receive() == nil)
+        await #expect(throws: PoolError.self) {
+            try await serverStream.receive()
+        }
         clientStream.close()
         serverStream.close()
     }
@@ -1001,7 +1004,7 @@ struct PeerConnectionTests {
         #expect(await !finishes(within: .milliseconds(500)) { await sending.value })
         var replies = Data()
         var lineBreaks = 0
-        while lineBreaks < count, let chunk = await client.receive() {
+        while lineBreaks < count, let chunk = try? await client.receive() {
             replies.append(chunk)
             lineBreaks += chunk.count { $0 == UInt8(ascii: "\n") }
         }

@@ -72,15 +72,56 @@ struct ChannelStreamTests {
 
         let payload = Data((0 ..< 300_000).map { UInt8(truncatingIfNeeded: $0) })
         try await serverStream.send(payload)
-        await serverStream.finishSending()
+        try await serverStream.finishSending()
         #expect(await clientStream.read(count: payload.count) == payload)
-        #expect(await clientStream.receive() == nil)
+        #expect(try await clientStream.receive() == nil)
 
         try await clientStream.send(Data("after".utf8))
         #expect(await serverStream.read(count: 5) == Data("after".utf8))
         clientStream.close()
-        #expect(await serverStream.receive() == nil)
+        #expect(try await serverStream.receive() == nil)
         serverStream.close()
+    }
+
+    /// Hands a stream the end that arrived with the channel's last bytes, so the stream reports a
+    /// normal end instead of a failure.
+    @Test func handsTheEndToTheStream() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let clientStream = try client.takeStream()
+        try await clientStream.send(Data("{\"request\":\"status\"}\ntail".utf8))
+        try await clientStream.finishSending()
+        // The pause lets the bytes and the end arrive before the first receive.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(try await server.receive(PoolRequest.self) == .status)
+        let serverStream = try server.takeStream()
+        #expect(await serverStream.read(count: 4) == Data("tail".utf8))
+        #expect(try await serverStream.receive() == nil)
+        serverStream.close()
+        clientStream.close()
+    }
+
+    /// Keeps an end that arrived without bytes, so later receives and a stream report a normal
+    /// end.
+    @Test func keepsAnEndWithoutBytes() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        let clientStream = try client.takeStream()
+        try await clientStream.finishSending()
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        #expect(try await server.receive(PoolRequest.self) == nil)
+        let serverStream = try server.takeStream()
+        #expect(try await serverStream.receive() == nil)
+        serverStream.close()
+        clientStream.close()
     }
 
     /// Leaves the connection to the stream once the channel handed it over.
@@ -151,7 +192,7 @@ struct ChannelStreamTests {
         client.close()
     }
 
-    /// Ends a stream's own pending receive and send when the stream closes.
+    /// Fails a stream's own pending receive and send when the stream closes.
     @Test func closeEndsPendingReceiveAndSend() async throws {
         let listener = try await LoopbackListener()
         defer { listener.close() }
@@ -160,16 +201,75 @@ struct ChannelStreamTests {
         let server = try #require(await connections.next())
 
         let stream = try server.takeStream()
-        let receiving = Task { await stream.receive() }
+        let receiving = Task { try await stream.receive() }
         // The client reads nothing, so Network stops taking bytes long before this many.
         let sending = Task { try await stream.send(Data(count: 64 << 20)) }
         try await Task.sleep(for: .milliseconds(200))
         stream.close()
-        #expect(await receiving.value == nil)
+        await #expect(throws: PoolError.self) {
+            try await receiving.value
+        }
         await #expect(throws: PoolError.self) {
             try await sending.value
         }
         client.close()
+    }
+
+    /// Ends the peer's receive with `nil` after a close and with an error after a reset.
+    @Test func tellsAResetFromAClose() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        var connections = listener.connections.makeAsyncIterator()
+        for resets in [false, true] {
+            let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+            let server = try #require(await connections.next())
+            let serverStream = try server.takeStream()
+            let clientStream = try client.takeStream()
+            try await serverStream.send(Data("last".utf8))
+            #expect(await clientStream.read(count: 4) == Data("last".utf8))
+            if resets {
+                serverStream.reset()
+                await #expect(throws: PoolError.self) {
+                    try await clientStream.receive()
+                }
+            } else {
+                serverStream.close()
+                #expect(try await clientStream.receive() == nil)
+            }
+            clientStream.close()
+        }
+    }
+
+    /// Fails and resets the connection when the bytes before the end do not leave in time, so the
+    /// peer sees a failure instead of a normal end.
+    @Test func resetsWhenTheEndCannotLeave() async throws {
+        let listener = try await LoopbackListener()
+        defer { listener.close() }
+        let client = try await MessageChannel.connect(to: listener.endpoint, using: .tcp)
+        var connections = listener.connections.makeAsyncIterator()
+        let server = try #require(await connections.next())
+
+        // The client reads nothing yet. The lines stay below the channel's 4 MiB limit but fill
+        // both sockets' buffers, so the end waits behind them.
+        let line = PoolReply.failure(String(repeating: "x", count: 60000))
+        for _ in 0 ..< 60 {
+            try server.send(line)
+        }
+        let stream = try server.takeStream()
+        await #expect {
+            try await stream.finishSending(within: .milliseconds(300))
+        } throws: { error in
+            if case let .connection(_, reason) = error as? PoolError {
+                reason.hasPrefix("the bytes did not leave within")
+            } else {
+                false
+            }
+        }
+        let clientStream = try client.takeStream()
+        await #expect(throws: PoolError.self) {
+            while try await clientStream.receive() != nil {}
+        }
+        clientStream.close()
     }
 
     /// Ends the peer's reads when a stream goes away without a close.
@@ -187,7 +287,7 @@ struct ChannelStreamTests {
             try await Task.sleep(for: .seconds(10))
             clientStream.close()
         }
-        #expect(await clientStream.receive() == nil)
+        #expect(try await clientStream.receive() == nil)
         watchdog.cancel()
         #expect(await (try? watchdog.value) == nil, "the peer saw the end only when the watchdog closed")
         clientStream.close()
@@ -203,7 +303,7 @@ struct ChannelStreamTests {
 
         let clientStream = try client.takeStream()
         try await clientStream.send(Data("{\"request\":\"status\"}\n{\"request\":\"sta".utf8))
-        await clientStream.finishSending()
+        try await clientStream.finishSending()
         #expect(try await server.receive(PoolRequest.self) == .status)
         #expect(try await server.receive(PoolRequest.self) == nil)
         clientStream.close()
@@ -231,13 +331,13 @@ struct ChannelStreamTests {
 
 /// Reads of an exact length that the tests compare.
 extension ByteStream {
-    /// Receives until a number of bytes arrived or the stream ended.
+    /// Receives until a number of bytes arrived or the stream ended or failed.
     ///
     /// - Parameter count: The number of bytes to wait for.
-    /// - Returns: The bytes, which are fewer than `count` only when the stream ended.
+    /// - Returns: The bytes, which are fewer than `count` only when the stream ended or failed.
     func read(count: Int) async -> Data {
         var data = Data()
-        while data.count < count, let chunk = await receive() {
+        while data.count < count, let chunk = try? await receive() {
             data.append(chunk)
         }
         return data

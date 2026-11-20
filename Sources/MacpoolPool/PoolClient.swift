@@ -4,6 +4,13 @@ import Synchronization
 
 /// Connections from a client to the daemon.
 public enum PoolClient {
+    /// The interval at which a connection to another Mac's daemon sends
+    /// ``PoolRequest/heartbeat``.
+    ///
+    /// A host closes a paired Mac's connection after 60 seconds without a request. Three
+    /// heartbeats fit in that time, so one lost heartbeat does not cost the connection.
+    public static let heartbeatInterval = Duration.seconds(20)
+
     /// Connects to the daemon that serves a data directory.
     ///
     /// - Parameter directory: The daemon's data directory.
@@ -27,6 +34,9 @@ public enum PoolClient {
     /// host that refuses this Mac's key lets the handshake finish on this side and then closes
     /// the connection, so only its greeting confirms that it accepted the key.
     ///
+    /// The connection sends ``PoolRequest/heartbeat`` at `heartbeat` intervals until it closes or
+    /// a ``ByteStream`` takes it.
+    ///
     /// - Parameters:
     ///   - endpoint: The host's address and port.
     ///   - identity: This Mac's key and certificate.
@@ -35,6 +45,7 @@ public enum PoolClient {
     ///   - protocols: The application protocols to offer, in order of preference.
     ///   - closedReason: The reason in the error when the host closes the connection before its
     ///     greeting.
+    ///   - heartbeat: The interval between heartbeats.
     /// - Returns: A connection that is ready for requests.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails, the host
     ///   presents another key, refuses this Mac's key or the connection, closes the connection or
@@ -47,8 +58,9 @@ public enum PoolClient {
         timeout: Duration = .seconds(10),
         protocols: [String] = [PeerSecurity.protocolName],
         closedReason: String = "the host closed the connection, so it does not accept this Mac's key",
+        heartbeat: Duration = heartbeatInterval,
     ) async throws(PoolError) -> MessageChannel {
-        try await connect(
+        let channel = try await connect(
             to: endpoint,
             as: identity,
             timeout: timeout,
@@ -56,6 +68,25 @@ public enum PoolClient {
             closedReason: closedReason,
             expected: hostKey.rawValue,
         ) { $0 == hostKey }
+        startHeartbeat(on: channel, every: heartbeat)
+        return channel
+    }
+
+    /// Sends heartbeats on a channel until the channel closes or goes away.
+    ///
+    /// - Parameters:
+    ///   - channel: A connection to another Mac's daemon.
+    ///   - interval: The time between heartbeats.
+    static func startHeartbeat(on channel: MessageChannel, every interval: Duration) {
+        Task { [weak channel] in
+            while true {
+                try? await Task.sleep(for: interval)
+                guard let channel, channel.isOpen else {
+                    return
+                }
+                try? channel.send(PoolRequest.heartbeat)
+            }
+        }
     }
 
     /// Connects to the daemon of another Mac whose key passes a check, and waits for its
@@ -253,10 +284,14 @@ public enum PoolClient {
     ///   - request: The request, which must not be a lease request.
     ///   - directory: The daemon's data directory.
     /// - Returns: The reply.
-    /// - Throws: ``PoolError/daemonRefused(message:)`` when the daemon answers with a failure,
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` for a heartbeat, which gets no reply,
+    ///   ``PoolError/daemonRefused(message:)`` when the daemon answers with a failure,
     ///   ``PoolError/connectionClosed`` when it closes the connection first, or another
     ///   ``PoolError`` when the connection fails.
     public static func send(_ request: PoolRequest, to directory: PoolDirectory) async throws(PoolError) -> PoolReply {
+        guard request != .heartbeat else {
+            throw .invalidRequest(reason: "the daemon does not reply to a heartbeat")
+        }
         let channel = try await connect(to: directory)
         defer { channel.close() }
         try channel.send(request)

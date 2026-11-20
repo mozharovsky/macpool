@@ -351,7 +351,8 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
-    /// Lets a paired client attach to and release its own lease from a new connection.
+    /// Lets a paired client attach to and release its own lease from a new connection while the
+    /// host still serves the connection that held the lease.
     @Test func pairedClientReturnsToItsLease() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start(offeredSources: ["base": pool.source])
@@ -361,23 +362,13 @@ struct PoolDaemonTests {
         _ = try await next(first)
         let lease = try #require(await next(first).lease)
         #expect(lease.phase == .ready)
-        first.close()
 
+        // The Mac may have lost the first connection without the host noticing yet.
         let second = try await pool.pairedClient(of: daemon, owner: alice)
-        // The lease stays attached to the first connection until the daemon notices its end.
-        let busy = PoolReply.failure(PoolError.leaseAttached(id: lease.id.rawValue).description)
-        var reply = busy
-        var attempts = 0
-        while reply == busy, attempts < 250 {
-            attempts += 1
-            try second.send(PoolRequest.attach(lease.id))
-            reply = try await next(second)
-            if reply == busy {
-                try await Task.sleep(for: .milliseconds(20))
-            }
-        }
-        try #require(reply != busy, "the lease stayed attached after \(attempts) attempts: \(reply)")
-        #expect(reply == .ready(lease))
+        try second.send(PoolRequest.attach(lease.id))
+        #expect(try await next(second) == .ready(lease))
+        #expect(try await next(first) == .failure("another connection of this Mac attached to lease \(lease.id)"))
+        first.close()
         try second.send(PoolRequest.release(lease.id))
         #expect(try await next(second) == .ended(lease.id, reason: "released by a client"))
         #expect(try await next(second) == .released(lease.id))

@@ -201,6 +201,14 @@ public final class MessageChannel: Sendable {
         }
     }
 
+    /// Whether the channel still sends and receives lines.
+    ///
+    /// The value turns `false` once a close or a finish began, or once a ``ByteStream`` took the
+    /// connection.
+    var isOpen: Bool {
+        state.withLock { $0.user == .channel }
+    }
+
     /// Waits until the messages sent before the call left for the peer.
     ///
     /// A message has left once Network passed it to the system's socket. For a peer that stops
@@ -269,7 +277,10 @@ public final class MessageChannel: Sendable {
                 guard state.user == .channel else {
                     return .unavailable
                 }
-                return try state.buffer.takeLine().map(LineScan.line) ?? .incomplete
+                if let line = try state.buffer.takeLine() {
+                    return .line(line)
+                }
+                return state.end == nil ? .incomplete : .unavailable
             }
             switch scan {
             case .unavailable:
@@ -281,10 +292,17 @@ public final class MessageChannel: Sendable {
                     throw .malformedMessage(reason: "\(error)")
                 }
             case .incomplete:
-                guard let chunk = await connection.receiveBytes() else {
-                    return nil
+                // Network reports the end once, so the channel keeps it for later receives and
+                // for takeStream().
+                switch await connection.receiveBytes() {
+                case let .bytes(chunk, end):
+                    state.withLock { state in
+                        state.buffer.append(chunk)
+                        state.end = end
+                    }
+                case let .ended(end):
+                    state.withLock { $0.end = end }
                 }
-                state.withLock { $0.buffer.append(chunk) }
             }
         }
     }
@@ -301,18 +319,19 @@ public final class MessageChannel: Sendable {
     ///   connection to a stream, or when ``close()`` or ``finish(within:)`` already began to end
     ///   it.
     public func takeStream() throws(PoolError) -> ByteStream {
-        let claim: Result<Data, PoolError> = state.withLock { state in
+        let claim: Result<(Data, ReceiveEnd?), PoolError> = state.withLock { state in
             switch state.user {
             case .channel:
                 state.user = .stream
-                return .success(state.buffer.takeAll())
+                return .success((state.buffer.takeAll(), state.end))
             case .finishing, .ending:
                 return .failure(.connection(path: peer, reason: "the channel is closing it"))
             case .stream:
                 return .failure(.connection(path: peer, reason: "a byte stream already owns it"))
             }
         }
-        return try ByteStream(connection: connection, peer: peer, leftover: claim.get())
+        let (leftover, end) = try claim.get()
+        return ByteStream(connection: connection, peer: peer, leftover: leftover, end: end)
     }
 
     /// Closes the connection and ends a pending receive.
@@ -358,7 +377,7 @@ public final class MessageChannel: Sendable {
         guard starts else {
             return
         }
-        await connection.sendEnd(within: timeout)
+        _ = await connection.sendEnd(within: timeout)
         state.withLock { $0.user = .ending }
         connection.cancel()
         releaseWaiters()
@@ -367,7 +386,8 @@ public final class MessageChannel: Sendable {
 
 /// What a channel finds when it looks for the next line.
 private enum LineScan {
-    /// The channel began to close the connection, or the connection went to a ``ByteStream``.
+    /// The channel began to close the connection, the connection went to a ``ByteStream``, or
+    /// the receiving direction ended.
     case unavailable
     /// No line is complete yet.
     case incomplete
@@ -379,6 +399,9 @@ private enum LineScan {
 private struct ChannelState {
     /// The bytes after the last complete line.
     var buffer = LineBuffer(maximumLength: MessageChannel.maximumLineLength)
+
+    /// How the receiving direction ended, if Network reported the end with the last bytes.
+    var end: ReceiveEnd?
 
     /// Who uses the connection, which changes only under the channel's lock.
     var user = ConnectionUser.channel
@@ -475,27 +498,59 @@ struct LineBuffer {
     }
 }
 
+/// What one receive on a connection returned.
+enum ReceivedBytes: Equatable {
+    /// Bytes from the peer.
+    ///
+    /// - Parameters:
+    ///   - data: The bytes, never empty.
+    ///   - end: How the receiving direction ended after the bytes, or `nil` while it stays open.
+    case bytes(Data, then: ReceiveEnd?)
+
+    /// The receiving direction ended without more bytes.
+    ///
+    /// - Parameter end: How it ended.
+    case ended(ReceiveEnd)
+}
+
+/// How the receiving direction of a connection ended.
+enum ReceiveEnd: Equatable {
+    /// The peer ended its sending direction.
+    case finished
+
+    /// The connection failed, the peer reset it, or it was cancelled.
+    ///
+    /// - Parameter reason: Network's description of the failure.
+    case failed(String)
+}
+
 /// The transfers that channels and byte streams share.
 extension NWConnection {
     /// Waits for the next bytes from the peer.
     ///
-    /// - Returns: Up to 64 KiB, or `nil` when the peer ended its sending direction, the
-    ///   connection failed, or it was cancelled.
-    func receiveBytes() async -> Data? {
+    /// Network reports the end once. A receive after that fails.
+    ///
+    /// - Returns: Up to 64 KiB with the end if it came with them, or the end alone.
+    func receiveBytes() async -> ReceivedBytes {
         while true {
-            let chunk: Data?? = await withCheckedContinuation { continuation in
+            let received: ReceivedBytes? = await withCheckedContinuation { continuation in
                 receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                    if let data, !data.isEmpty {
-                        continuation.resume(returning: .some(data))
-                    } else if isComplete || error != nil {
-                        continuation.resume(returning: .some(nil))
+                    let end: ReceiveEnd? = if let error {
+                        .failed("\(error)")
+                    } else if isComplete {
+                        .finished
                     } else {
-                        continuation.resume(returning: .none)
+                        nil
+                    }
+                    if let data, !data.isEmpty {
+                        continuation.resume(returning: .bytes(data, then: end))
+                    } else {
+                        continuation.resume(returning: end.map(ReceivedBytes.ended))
                     }
                 }
             }
-            if let chunk {
-                return chunk
+            if let received {
+                return received
             }
         }
     }
@@ -503,15 +558,18 @@ extension NWConnection {
     /// Delivers the queued sends and then signals the end of the sending direction.
     ///
     /// - Parameter timeout: The longest wait for the queued sends to leave.
-    func sendEnd(within timeout: Duration) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let once = ResumeOnce(continuation)
-            let completion = NWConnection.SendCompletion.contentProcessed { _ in once.resume(returning: ()) }
+    /// - Returns: Why the sends did not leave, or `nil` once they left.
+    func sendEnd(within timeout: Duration) async -> String? {
+        await withCheckedContinuation { continuation in
+            let once = ResumeOnce<String?>(continuation)
+            let completion = NWConnection.SendCompletion.contentProcessed { error in
+                once.resume(returning: error.map { "\($0)" })
+            }
             // Sends complete in order, so the final message completes after every earlier one.
             send(content: Data?.none, contentContext: .finalMessage, isComplete: true, completion: completion)
             Task {
                 try? await Task.sleep(for: timeout)
-                once.resume(returning: ())
+                once.resume(returning: "the bytes did not leave within \(timeout)")
             }
         }
     }

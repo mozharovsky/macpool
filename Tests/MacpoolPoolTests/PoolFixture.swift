@@ -95,6 +95,7 @@ final class PoolFixture {
             offeredSources: offeredSources,
             peers: peers,
             now: { clock.now },
+            awakeTime: { clock.awakeTime },
             tickInterval: nil,
             supervisorConnectTimeout: .seconds(10),
             reconnectWindow: reconnectWindow,
@@ -224,19 +225,46 @@ struct ReadyLease {
 
 /// A clock that moves only when a test advances it.
 final class TestClock: Sendable {
-    /// The current time.
-    private let current = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+    /// The readings of the system time and of the awake time.
+    private struct Reading {
+        /// The system time.
+        var now: Date
 
-    /// The current time.
-    var now: Date {
-        current.withLock { $0 }
+        /// The time this Mac stayed awake since the clock started.
+        var awake: Duration
     }
 
-    /// Moves the clock forward.
+    /// The awake time at which the clock started.
+    private let start = SuspendingClock().now
+
+    /// The current readings.
+    private let current = Mutex(Reading(now: Date(timeIntervalSince1970: 1_800_000_000), awake: .zero))
+
+    /// The current system time.
+    var now: Date {
+        current.withLock { $0.now }
+    }
+
+    /// The current time on a clock that stops while this Mac sleeps.
+    var awakeTime: SuspendingClock.Instant {
+        start.advanced(by: current.withLock { $0.awake })
+    }
+
+    /// Moves the system time and the awake time forward.
     ///
     /// - Parameter seconds: The step in seconds.
     func advance(by seconds: TimeInterval) {
-        current.withLock { $0 += seconds }
+        current.withLock {
+            $0.now += seconds
+            $0.awake += .seconds(seconds)
+        }
+    }
+
+    /// Moves only the system time, as a sleep of this Mac or a new system time does.
+    ///
+    /// - Parameter seconds: The step in seconds, negative for a system time that moves back.
+    func jump(by seconds: TimeInterval) {
+        current.withLock { $0.now += seconds }
     }
 }
 

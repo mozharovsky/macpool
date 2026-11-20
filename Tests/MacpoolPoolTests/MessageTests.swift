@@ -45,6 +45,7 @@ struct MessageTests {
             .invite(address: "127.0.0.1", priorityCeiling: 3),
             .revoke(key: "mzxw-6ytb-oi2d-k3lq", endLeases: true),
             .forget(endLeases: true),
+            .heartbeat,
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
@@ -76,6 +77,8 @@ struct MessageTests {
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: revoke) == .revoke(key: "mzxw-6ytb-oi2d-k3lq"))
         let forget = Data(#"{"request":"forget"}"#.utf8)
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: forget) == .forget())
+        let heartbeat = try String(decoding: MessageCoding.encoder.encode(PoolRequest.heartbeat), as: UTF8.self)
+        #expect(heartbeat == #"{"request":"heartbeat"}"#)
         var hidden = lease
         hidden.source = "base"
         hidden.bundle = nil
@@ -264,7 +267,7 @@ struct MessageTests {
         #expect(await finishes(within: .seconds(10)) { await server.delivered() })
         #expect(try await server.receive(PoolRequest.self) == nil)
         var received = 0
-        while let chunk = await requests.receive() {
+        while let chunk = try? await requests.receive() {
             received += chunk.count { $0 == UInt8(ascii: "\n") }
         }
         #expect(received < count)
