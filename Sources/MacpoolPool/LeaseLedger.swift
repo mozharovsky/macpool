@@ -24,6 +24,9 @@ public struct PoolPolicy: Sendable, Equatable {
     /// A client whose connection broke because the daemon stopped reattaches within this time. So
     /// does a paired client whose connection broke. A lease whose local client disconnected ends
     /// at once.
+    ///
+    /// The daemon counts only the time that this Mac stays awake, so a sleep of this Mac or a new
+    /// system time does not use up the grace.
     public var reattachGrace: Duration
 
     /// Creates a policy.
@@ -260,8 +263,9 @@ struct QueuedRequest: Sendable, Equatable {
 
 /// A lease that needs a client and waits for one to attach.
 struct Orphan: Equatable {
-    /// When the lease lost its client, or when the daemon started.
-    let since: Date
+    /// When the lease lost its client, or when the daemon started, on a clock that stops while
+    /// this Mac sleeps.
+    let since: SuspendingClock.Instant
 
     /// The reason with which the lease ends unless a client attaches within
     /// ``PoolPolicy/reattachGrace``.
@@ -413,9 +417,13 @@ struct LeaseLedger {
     /// - Parameters:
     ///   - client: The client whose connection ended.
     ///   - owner: Who the client acted for.
-    ///   - now: The current time.
+    ///   - awake: The current time on a clock that stops while this Mac sleeps.
     /// - Returns: The stops, discards, and position notices that follow.
-    mutating func clientDisconnected(_ client: ClientID, owner: LeaseOwner, now: Date) -> [LedgerAction] {
+    mutating func clientDisconnected(
+        _ client: ClientID,
+        owner: LeaseOwner,
+        awake: SuspendingClock.Instant,
+    ) -> [LedgerAction] {
         queue.removeAll { $0.client == client }
         var actions: [LedgerAction] = []
         for (id, holder) in clients.sorted(by: { $0.key < $1.key }) where holder == client {
@@ -428,7 +436,7 @@ struct LeaseLedger {
             } else {
                 let seconds = Int(policy.reattachGrace / .seconds(1))
                 orphans[id] = Orphan(
-                    since: now,
+                    since: awake,
                     reason: "the client disconnected and did not reattach within \(seconds) seconds",
                 )
             }
@@ -669,9 +677,12 @@ struct LeaseLedger {
 
     /// Applies expiries, restart times, and the reattach grace.
     ///
-    /// - Parameter now: The current time.
+    /// - Parameters:
+    ///   - now: The current system time, which expiries and restart times use.
+    ///   - awake: The current time on a clock that stops while this Mac sleeps, which the reattach
+    ///     grace uses.
     /// - Returns: The stops, discards, launches, and replies that follow.
-    mutating func tick(now: Date) -> [LedgerAction] {
+    mutating func tick(now: Date, awake: SuspendingClock.Instant) -> [LedgerAction] {
         var actions: [LedgerAction] = []
         for id in leases.keys.sorted() {
             guard var record = leases[id], record.phase != .stopping else {
@@ -681,7 +692,7 @@ struct LeaseLedger {
                 actions += end(id, reason: "the lease expired")
                 continue
             }
-            if let orphan = orphans[id], now >= orphan.since.addingTimeInterval(policy.reattachGrace / .seconds(1)) {
+            if let orphan = orphans[id], orphan.since.duration(to: awake) >= policy.reattachGrace {
                 actions += end(id, reason: orphan.reason)
                 continue
             }
@@ -703,16 +714,16 @@ struct LeaseLedger {
     /// Leases whose VM may still run reconnect to their supervisors. Leases that need a client
     /// get the reattach grace. Leases that wait to restart keep their restart time.
     ///
-    /// - Parameter now: The current time.
+    /// - Parameter awake: The current time on a clock that stops while this Mac sleeps.
     /// - Returns: The reconnects that follow.
-    mutating func recover(now: Date) -> [LedgerAction] {
+    mutating func recover(awake: SuspendingClock.Instant) -> [LedgerAction] {
         var actions: [LedgerAction] = []
         for id in leases.keys.sorted() {
             guard let record = leases[id] else {
                 continue
             }
             if record.needsClient, record.phase != .stopping {
-                orphans[id] = Orphan(since: now, reason: "no client reattached after the daemon started")
+                orphans[id] = Orphan(since: awake, reason: "no client reattached after the daemon started")
             }
             switch record.phase {
             case .starting, .ready, .stopping:
