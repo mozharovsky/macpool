@@ -154,7 +154,7 @@ An SSH client still notices the break, because its protocol frames every packet.
 of either direction closes the whole stream.
 
 The daemon resets a stream when its lease stops being ready, when the host revokes the Mac that
-opened it, and when the daemon stops. A paired Mac may hold at most 8 streams besides its 4
+opened it or no longer accepts it, and when the daemon stops. A paired Mac may hold at most 8 streams besides its 4
 connections. If the guest refuses the connection, a paired Mac's failure names no guest address.
 
 ### Pairing

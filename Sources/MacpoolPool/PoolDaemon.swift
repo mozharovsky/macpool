@@ -1101,8 +1101,8 @@ public actor PoolDaemon {
     ///
     /// Before each request of a paired client, the daemon reads the client's record again,
     /// because the list may have changed since the client connected. If the list no longer names
-    /// the client or blocks it, the daemon refuses the request and ends the connection. If the
-    /// list cannot be read, the daemon refuses only the request.
+    /// the client or blocks it, the daemon refuses the request and ends the connection and the
+    /// Mac's streams. If the list cannot be read, the daemon refuses only the request.
     ///
     /// - Parameters:
     ///   - request: The request.
@@ -1130,6 +1130,7 @@ public actor PoolDaemon {
             }
             guard record != nil else {
                 reply(.failure(Self.notAcceptedReason), to: client)
+                endStreams { $0.owner == owner }
                 return false
             }
         }
