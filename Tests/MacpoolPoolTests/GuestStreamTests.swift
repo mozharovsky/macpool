@@ -479,8 +479,8 @@ enum StreamEnd: Equatable {
 /// A stand-in for a guest's SSH server on 127.0.0.1 that sends back every byte it receives.
 ///
 /// When a client ends its sending direction, the server ends its own after the last byte. When
-/// a receive returns exactly ``quit``, the server sends it back, ends its sending direction, and
-/// waits for the client's end.
+/// the bytes that the server received so far end with ``quit``, the server sends them back, ends
+/// its sending direction, and waits for the client's end.
 final class EchoServer: Sendable {
     /// The bytes that make the server end its sending direction first.
     static let quit = Data("quit".utf8)
@@ -547,12 +547,15 @@ final class EchoServer: Sendable {
     private func echo(_ stream: ByteStream) async {
         do throws(PoolError) {
             var sends = true
+            // A stream may split quit across receives, so the check reads the latest bytes.
+            var latest = Data()
             while let data = try await stream.receive() {
                 guard sends else {
                     continue
                 }
                 try await stream.send(data)
-                if data == Self.quit {
+                latest = Data((latest + data).suffix(Self.quit.count))
+                if latest == Self.quit {
                     try await stream.finishSending()
                     sends = false
                 }

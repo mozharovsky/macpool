@@ -160,8 +160,9 @@ ssh -o ProxyCommand="macpool connect 0a1b2c3d" -o HostKeyAlias=macpool-0a1b2c3d 
 alias of its own, because every clone has its own host key. `macpool ssh` logs in with the key that
 the lease pins and needs none of these options.
 
-The command exits with status 0 when the stream ends normally. If two paired hosts have the name
-that `--pool` gives, it fails and asks for the short key.
+The command exits with status 0 when the stream ends normally. A short key in `--pool` names its
+host even when other hosts have that text as their name. If no short key matches and two paired
+hosts have the name, the command fails and asks for the short key.
 
 The daemon ends the stream when the lease stops being ready, when the host revokes this Mac or no
 longer accepts it, and when the daemon stops. Over the local socket such an end looks normal to
