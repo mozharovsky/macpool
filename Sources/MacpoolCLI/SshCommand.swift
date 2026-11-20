@@ -7,10 +7,10 @@ import System
 
 /// Logs in to a lease's guest with `ssh` through `macpool connect`.
 ///
-/// The command first opens a stream to the guest and closes it again, because the daemon's reply
-/// to a stream carries the guest's account and pinned host keys. It then runs `/usr/bin/ssh` with
-/// `macpool connect` as its `ProxyCommand`, so `ssh` reaches the guest through a stream of its
-/// own. `ssh` accepts only the pinned keys and ignores your SSH configuration and agent.
+/// The command first asks the daemon for the guest's account and pinned host keys. The daemon
+/// reads them from the lease's bundle and connects to no guest. The command then runs
+/// `/usr/bin/ssh` with `macpool connect` as its `ProxyCommand`, so `ssh` reaches the guest through
+/// a stream. `ssh` accepts only the pinned keys and ignores your SSH configuration and agent.
 ///
 /// `ssh` reads the password through an askpass script from a named pipe that this command serves.
 /// The password appears in no file, process argument, or environment variable.
@@ -44,7 +44,7 @@ struct SshCommand: AsyncParsableCommand {
     /// Runs `ssh` and exits with its status.
     ///
     /// - Throws: ``CommandError`` when the identifier is malformed, the daemon or host refuses the
-    ///   stream, or `ssh` cannot start. Throws `ExitCode` with the status of `ssh` when it is not
+    ///   access, or `ssh` cannot start. Throws `ExitCode` with the status of `ssh` when it is not
     ///   zero.
     func run() async throws {
         let status = try await perform()
@@ -57,18 +57,17 @@ struct SshCommand: AsyncParsableCommand {
     ///
     /// - Returns: The exit status of `ssh`.
     /// - Throws: ``CommandError`` when the identifier is malformed, the daemon or host refuses the
-    ///   stream, or `ssh` cannot start.
+    ///   access, or `ssh` cannot start.
     private func perform() async throws(CommandError) -> Int32 {
         let id = try LeaseID.parse(lease)
-        let probe = try await selection.openStream(to: id, in: location.directory)
-        probe.stream.close()
+        let access = try await selection.guestAccess(to: id, in: location.directory)
         let proxy = try ProxyCommand(
             executable: Executable.current(),
             dataDirectory: location.dataDirectory,
-            host: selection.host,
+            host: access.host,
             lease: id,
         )
-        let login = try GuestLogin(access: probe.guest)
+        let login = try GuestLogin(access: access.guest)
         let status: Result<Int32, CommandError>
         do throws(CommandError) {
             status = try await .success(login.run(command, through: proxy))
@@ -77,6 +76,43 @@ struct SshCommand: AsyncParsableCommand {
         }
         await login.remove()
         return try status.get()
+    }
+}
+
+/// The access to a lease's guest and the host that gave it.
+struct HostAccess {
+    /// The account and the pinned host keys that log in to the guest.
+    let guest: GuestAccess
+
+    /// The paired host's key, or `nil` for the daemon on this Mac.
+    let host: KeyFingerprint?
+}
+
+/// The request for the access to a lease's guest on the selected daemon.
+extension HostSelection {
+    /// Asks the selected daemon for the account and the pinned host keys of a lease's guest.
+    ///
+    /// - Parameters:
+    ///   - lease: The lease.
+    ///   - directory: This Mac's data directory.
+    /// - Returns: The access and the key of the paired host that gave it.
+    /// - Throws: ``CommandError/pool(_:)`` when the host is unknown, the connection fails, or the
+    ///   daemon refuses the request. A paired host's error passes through
+    ///   ``escapingPeerText(_:)``.
+    func guestAccess(to lease: LeaseID, in directory: PoolDirectory) async throws(CommandError) -> HostAccess {
+        guard let host else {
+            let guest = try await pool { () async throws(PoolError) in
+                try await PoolClient.guestAccess(to: lease, in: directory)
+            }
+            return HostAccess(guest: guest, host: nil)
+        }
+        do {
+            let paired = try TrustedHost.named(host, in: directory)
+            let guest = try await PoolClient.guestAccess(to: lease, on: paired, directory: directory)
+            return HostAccess(guest: guest, host: paired.key)
+        } catch {
+            throw .pool(Self.escapingPeerText(error))
+        }
     }
 }
 
@@ -99,9 +135,10 @@ struct ProxyCommand: Equatable {
     ///   - executable: The `macpool` executable.
     ///   - dataDirectory: The data directory as the person typed it, or `nil` for the default. A
     ///     relative path becomes absolute.
-    ///   - host: The paired host's name or short key, or `nil` for the daemon on this Mac.
+    ///   - host: The paired host's key, or `nil` for the daemon on this Mac. The full key names one
+    ///     host, so `connect` reaches the host that gave the access.
     ///   - lease: The lease.
-    init(executable: URL, dataDirectory: String?, host: String?, lease: LeaseID) {
+    init(executable: URL, dataDirectory: String?, host: KeyFingerprint?, lease: LeaseID) {
         var line = #""$MACPOOL_PROXY_EXECUTABLE" connect"#
         var environment: [Environment.Key: String] = [
             "MACPOOL_PROXY_EXECUTABLE": executable.path(percentEncoded: false),
@@ -113,7 +150,7 @@ struct ProxyCommand: Equatable {
         }
         if let host {
             line += #" "--pool=$MACPOOL_PROXY_POOL""#
-            environment["MACPOOL_PROXY_POOL"] = host
+            environment["MACPOOL_PROXY_POOL"] = host.rawValue
         }
         line += #" "$MACPOOL_PROXY_LEASE""#
         self.line = line
@@ -328,14 +365,20 @@ final class GuestLogin: Sendable {
     }
 }
 
-/// A named pipe that hands a password to each process that opens it for reading.
+/// A named pipe that hands a password to the first processes that open it for reading.
 ///
-/// A thread waits for a reader, writes the password and a line break, and closes its end, as
-/// often as readers come. Before it closes, it replaces the pipe's file with a new pipe. The
-/// reader then sees the end after one line, and the next reader opens the new pipe. The password
-/// therefore stays in this process until a reader takes it. Call ``stop()`` once, before removing
-/// the pipe's file.
+/// A thread waits for a reader, writes the password and a line break, and closes its end. Before
+/// it closes, it replaces the pipe's file with a new pipe. The reader then sees the end after one
+/// line, and the next reader opens the new pipe. After ``readerLimit`` readers, the thread removes
+/// the file instead, so a later reader finds no pipe. The password therefore stays in this process
+/// until a reader takes it. Call ``stop()`` once, before removing the pipe's file.
 final class PasswordPipe: Sendable {
+    /// The number of readers that receive the password.
+    ///
+    /// `ssh` asks once for password authentication and once for keyboard-interactive
+    /// authentication.
+    static let readerLimit = 2
+
     /// The pipe's file.
     let file: URL
 
@@ -370,14 +413,16 @@ final class PasswordPipe: Sendable {
         }.start()
     }
 
-    /// Writes a line to each reader of a pipe until a flag is set or the pipe cannot be replaced.
+    /// Writes a line to each reader of a pipe until ``readerLimit`` readers took it, a flag is set,
+    /// or the pipe cannot be replaced.
     ///
     /// - Parameters:
     ///   - line: The bytes to write.
     ///   - path: The pipe's path.
     ///   - stopping: The flag that ends the loop.
     private static func serve(_ line: [UInt8], at path: String, until stopping: StopFlag) {
-        while true {
+        var served = 0
+        while served < readerLimit {
             // The open returns once a reader opens the pipe.
             let descriptor = open(path, O_WRONLY | O_CLOEXEC)
             guard descriptor >= 0 else {
@@ -394,11 +439,19 @@ final class PasswordPipe: Sendable {
             // A reader that leaves early then fails the write instead of ending the process.
             _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
             _ = try? writer.writeAll(line)
-            // While the reader holds the old pipe open, a new open of the same pipe would return
-            // at once and write the line to that reader again. The rename replaces the pipe in one
-            // step, so a reader never finds the name missing.
-            let next = path + ".next"
-            let isReplaced = mkfifo(next, 0o600) == 0 && rename(next, path) == 0
+            served += 1
+            let isReplaced: Bool
+            if served < readerLimit {
+                // While the reader holds the old pipe open, a new open of the same pipe would
+                // return at once and write the line to that reader again. The rename replaces the
+                // pipe in one step, so a reader never finds the name missing.
+                let next = path + ".next"
+                isReplaced = mkfifo(next, 0o600) == 0 && rename(next, path) == 0
+            } else {
+                // Removing the name before the close keeps a later reader from opening this pipe.
+                _ = unlink(path)
+                isReplaced = false
+            }
             try? writer.close()
             guard isReplaced else {
                 return

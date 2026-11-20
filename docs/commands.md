@@ -179,11 +179,12 @@ may hold 8 streams on a host at once.
 macpool ssh --pool lab 0a1b2c3d -- sw_vers
 ```
 
-The command asks the daemon for the guest's account and host key over a short stream first. It
-then runs `/usr/bin/ssh` through `macpool connect`, which opens a second stream. `ssh` accepts only
-the guest's pinned host key, logs in with the account's password, and ignores your SSH configuration
-and agent. The password reaches `ssh` through a named pipe in a private temporary directory, so it
-never appears in a file, a process argument, or the environment.
+The command first asks the daemon for the guest's account and host key. The daemon reads them from
+the lease's bundle and doesn't connect to the guest. The command then runs `/usr/bin/ssh` through
+`macpool connect`. `ssh` accepts only the guest's pinned host key, logs in with the account's
+password, and ignores your SSH configuration and agent. The password reaches `ssh` through a named
+pipe in a private temporary directory, so it never appears in a file, a process argument, or the
+environment. The pipe hands out the password at most twice, once for each way `ssh` asks for it.
 
 `ssh` joins the words after `--` with spaces, and the guest's shell splits them again. Quote them as
 you would for `ssh`. The status is 255 when `ssh` itself fails.

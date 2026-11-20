@@ -158,7 +158,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 } else {
                     Report.line("starting")
                 }
-            case let .reply(.ready(lease, _)):
+            case let .reply(.ready(lease)):
                 Report.line("address=\(lease.address ?? "")")
                 Report.line("expires_at=\(lease.expiresAt.map(LeaseOutput.timestamp) ?? "")")
                 Report.line("ready")
@@ -180,7 +180,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 failure = .pool(.daemonRefused(message: message))
                 break loop
             case .reply(.released), .reply(.renewed), .reply(.status), .reply(.invitation), .reply(.paired),
-                 .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten):
+                 .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten), .reply(.access):
                 break
             case .disconnected:
                 guard let id else {

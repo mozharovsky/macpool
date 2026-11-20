@@ -1,8 +1,9 @@
 import ArgumentParser
 import Foundation
 @testable import MacpoolCLI
-import MacpoolPool
+@testable import MacpoolPool
 import MacpoolVM
+import Network
 import Subprocess
 import System
 import Testing
@@ -36,13 +37,9 @@ struct SshCommandTests {
             ofItemAtPath: printer.path(percentEncoded: false),
         )
         let lease = try #require(LeaseID("0a1b2c3d"))
+        let host = try Self.hostKey()
         let dataDirectory = #"/Volumes/it's 100% "data"\"#
-        let proxy = ProxyCommand(
-            executable: printer,
-            dataDirectory: dataDirectory,
-            host: "lab's $HOME %h",
-            lease: lease,
-        )
+        let proxy = ProxyCommand(executable: printer, dataDirectory: dataDirectory, host: host, lease: lease)
         #expect(proxy.line == #""$MACPOOL_PROXY_EXECUTABLE" connect "--data-dir=$MACPOOL_PROXY_DATA_DIR" "#
             + #""--pool=$MACPOOL_PROXY_POOL" "$MACPOOL_PROXY_LEASE""#)
 
@@ -57,7 +54,7 @@ struct SshCommandTests {
             printer.path(percentEncoded: false),
             "connect",
             "--data-dir=" + dataDirectory,
-            "--pool=lab's $HOME %h",
+            "--pool=" + host.rawValue,
             "0a1b2c3d",
         ]
         #expect(printed.standardOutput == words.joined(separator: "\n") + "\n")
@@ -67,10 +64,10 @@ struct SshCommandTests {
     /// and the words of the `ProxyCommand` from the environment.
     @Test func passesTheOptionsThroughSsh() async throws {
         let lease = try #require(LeaseID("0a1b2c3d"))
-        let proxy = ProxyCommand(
+        let proxy = try ProxyCommand(
             executable: URL(filePath: "/usr/local/bin/macpool"),
             dataDirectory: #"/Volumes/data\"#,
-            host: "lab",
+            host: Self.hostKey(),
             lease: lease,
         )
         try await Self.withLogin(Self.access()) { login in
@@ -125,14 +122,15 @@ struct SshCommandTests {
         #expect(!FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)))
     }
 
-    /// Hands the password once to each reader of the pipe, also to a reader that waits before it
-    /// reads, and stops whether or not a reader came.
-    @Test func servesThePasswordToEachReader() async throws {
+    /// Hands the password once to each of the first two readers of the pipe, also to a reader
+    /// that waits before it reads, and then removes the pipe. Stops whether or not a reader came.
+    @Test func servesThePasswordToTwoReaders() async throws {
         let directory = try ScratchDirectory()
         let pipe = try PasswordPipe(at: directory.url.appending(path: "password"), password: "s3cret")
         #expect(await Self.read(pipe.file) == Data("s3cret\n".utf8))
         #expect(await Self.read(pipe.file, after: 0.3) == Data("s3cret\n".utf8))
-        #expect(await Self.read(pipe.file) == Data("s3cret\n".utf8))
+        #expect(await Self.read(pipe.file) == nil)
+        #expect(!FileManager.default.fileExists(atPath: pipe.file.path(percentEncoded: false)))
         await pipe.stop()
 
         let unread = try PasswordPipe(at: directory.url.appending(path: "unread"), password: "s3cret")
@@ -160,10 +158,11 @@ struct SshCommandTests {
             ofItemAtPath: fake.path(percentEncoded: false),
         )
         let lease = try #require(LeaseID("0a1b2c3d"))
+        let host = try Self.hostKey()
         let proxy = ProxyCommand(
             executable: URL(filePath: "/usr/local/bin/macpool"),
             dataDirectory: nil,
-            host: "lab",
+            host: host,
             lease: lease,
         )
 
@@ -179,8 +178,50 @@ struct SshCommandTests {
         let read = { (name: String) in try String(contentsOf: output.url.appending(path: name), encoding: .utf8) }
         #expect(try read("password") == access.password + "\n")
         #expect(try read("shell") == "/bin/sh\n")
-        #expect(try read("proxy") == "/usr/local/bin/macpool\nlab\n0a1b2c3d\n")
+        #expect(try read("proxy") == "/usr/local/bin/macpool\n\(host.rawValue)\n0a1b2c3d\n")
         #expect(try read("arguments") == arguments.joined(separator: "\n") + "\n")
+    }
+
+    /// Asks a paired host that the person named by its name for the access, and returns the
+    /// host's full key for the `ProxyCommand`.
+    @Test func returnsTheKeyOfThePairedHost() async throws {
+        let directory = try ScratchDirectory()
+        let pool = PoolDirectory(root: directory.url.appending(path: "pool", directoryHint: .isDirectory))
+        let host = try await FakeHost(in: PoolDirectory(root: directory.url.appending(path: "host")))
+        defer { host.stop() }
+        _ = try MacIdentity.loadOrCreate(in: pool)
+        var list = TrustList<TrustedHost>()
+        list.insert(TrustedHost(key: host.key, name: "lab", address: "127.0.0.1", port: host.port, pairedAt: Date()))
+        try list.save(to: pool)
+        let command = try #require(try Macpool.parseAsRoot(["ssh", "--pool", "lab", "0a1b2c3d"]) as? SshCommand)
+        let lease = try #require(LeaseID("0a1b2c3d"))
+        let expected = try Self.access()
+
+        let serving = Task { try await host.answer(with: .access(expected)) }
+        let access = try await command.selection.guestAccess(to: lease, in: pool)
+        #expect(access.guest == expected)
+        #expect(access.host == host.key)
+        #expect(try await serving.value == .access(lease))
+    }
+
+    /// Escapes the text of an error on the way to a paired host, such as a list of paired hosts
+    /// that quotes a record's text.
+    @Test func escapesTheErrorsOnTheWayToAPairedHost() async throws {
+        let directory = try ScratchDirectory()
+        let pool = PoolDirectory(root: directory.url.appending(path: "pool", directoryHint: .isDirectory))
+        try TrustList<TrustedHost>().save(to: pool)
+        let list = #"{"version":1,"macs":[{"key":"\u001b[2J\u0007","name":"x","address":"192.0.2.10","port":7480,"#
+            + #""paired_at":"2027-01-15T08:00:00Z"}]}"#
+        try Data(list.utf8).write(to: TrustList<TrustedHost>.file(in: pool))
+        let command = try #require(try Macpool.parseAsRoot(["ssh", "--pool", "lab", "0a1b2c3d"]) as? SshCommand)
+        let lease = try #require(LeaseID("0a1b2c3d"))
+
+        let error = await #expect(throws: CommandError.self) {
+            try await command.selection.guestAccess(to: lease, in: pool)
+        }
+        let description = try #require(error?.description)
+        #expect(description.contains(#"\u{1B}[2J\u{7}"#))
+        #expect(!description.unicodeScalars.contains { !PairedMac.isPrintable($0) })
     }
 
     /// Creates a login, passes it to a body, and removes it, also when the body throws.
@@ -218,7 +259,15 @@ struct SshCommandTests {
             )
             return try #require(HostKey(base64: blob.base64EncodedString()))
         }
-        return GuestAccess(username: "macpool", password: "pipe-only-password", hostKeys: keys)
+        return try #require(GuestAccess(username: "macpool", password: "pipe-only-password", hostKeys: keys))
+    }
+
+    /// Returns the key of a paired host whose digits are all `a`.
+    ///
+    /// - Returns: The key.
+    /// - Throws: An error when the text is not a fingerprint.
+    private static func hostKey() throws -> KeyFingerprint {
+        try #require(KeyFingerprint(String(repeating: "a", count: 64)))
     }
 
     /// Reads at most 64 bytes from a named pipe on a dispatch queue, stopping early at its end.
@@ -258,6 +307,77 @@ struct SshCommandTests {
                 continuation.resume(returning: data)
             }
         }
+    }
+}
+
+/// A TLS listener on the loopback interface that greets like a paired host and answers one
+/// request.
+private final class FakeHost: Sendable {
+    /// The key that the listener presents.
+    let key: KeyFingerprint
+
+    /// The listener's port.
+    let port: UInt16
+
+    /// The listener.
+    private let listener: NWListener
+
+    /// The connections that the listener accepted, in order.
+    private let accepted: AsyncStream<MessageChannel>
+
+    /// Creates a key in a directory and starts the listener with it.
+    ///
+    /// - Parameter directory: The directory for the host's key.
+    /// - Throws: An error when the key cannot be created or the listener cannot start.
+    init(in directory: PoolDirectory) async throws {
+        let identity = try MacIdentity.loadOrCreate(in: directory)
+        key = KeyFingerprint(digest: identity.keyDigest)
+        let parameters = try PeerSecurity.parameters(identity: identity, isServer: true) { _ in true }
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        let listener = try NWListener(using: parameters)
+        let (accepted, continuation) = AsyncStream.makeStream(of: MessageChannel.self)
+        listener.newConnectionHandler = { connection in
+            continuation.yield(MessageChannel(connection: connection, peer: "paired Mac", start: true))
+        }
+        let ready: Bool = await withCheckedContinuation { ready in
+            let once = ResumeOnce(ready)
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    once.resume(returning: true)
+                case .failed, .waiting:
+                    once.resume(returning: false)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: DispatchQueue(label: "macpool.test.host"))
+        }
+        self.listener = listener
+        self.accepted = accepted
+        port = try #require(ready ? listener.port?.rawValue : nil, "the listener did not start")
+    }
+
+    /// Greets the next connection, reads its request, sends a reply, and waits until the client
+    /// closes the connection.
+    ///
+    /// - Parameter reply: The reply to send.
+    /// - Returns: The request that the connection sent.
+    /// - Throws: An error when no connection or no request arrives, or the reply cannot be sent.
+    func answer(with reply: PoolReply) async throws -> PoolRequest {
+        var connections = accepted.makeAsyncIterator()
+        let channel = try #require(await connections.next())
+        defer { channel.close() }
+        try channel.send(HostGreeting(version: PeerSecurity.protocolVersion, role: .host))
+        let request = try #require(await channel.receive(PoolRequest.self))
+        try channel.send(reply)
+        _ = try? await channel.receive(PoolRequest.self)
+        return request
+    }
+
+    /// Stops the listener.
+    func stop() {
+        listener.cancel()
     }
 }
 

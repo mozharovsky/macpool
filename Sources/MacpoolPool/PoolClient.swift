@@ -289,12 +289,11 @@ public enum PoolClient {
     ///   - lease: The lease.
     ///   - directory: The daemon's data directory.
     ///   - timeout: The longest wait for the daemon's reply, which follows the guest's answer.
-    /// - Returns: The stream, the lease, and the access to the guest.
+    /// - Returns: The stream and the lease.
     /// - Throws: ``PoolError/daemonUnreachable(path:reason:)`` when no daemon listens,
-    ///   ``PoolError/daemonRefused(message:)`` when the lease is unknown or not ready, the daemon
-    ///   cannot read the guest's access, or the guest refuses the connection,
-    ///   ``PoolError/connection(path:reason:)`` when no reply arrives in time, or
-    ///   ``PoolError/connectionClosed`` when the daemon closes the connection first.
+    ///   ``PoolError/daemonRefused(message:)`` when the lease is unknown or not ready or the guest
+    ///   refuses the connection, ``PoolError/connection(path:reason:)`` when no reply arrives in
+    ///   time, or ``PoolError/connectionClosed`` when the daemon closes the connection first.
     public static func openStream(
         to lease: LeaseID,
         in directory: PoolDirectory,
@@ -319,8 +318,7 @@ public enum PoolClient {
     ///   - host: The host from this Mac's list of paired hosts.
     ///   - directory: This Mac's data directory, which holds its key.
     ///   - timeout: The longest wait for the handshake, the greeting, and then the host's reply.
-    /// - Returns: The stream, the access to the guest, and the lease as the host shows it to this
-    ///   Mac.
+    /// - Returns: The stream and the lease as the host shows it to this Mac.
     /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails or the host
     ///   presents another key, ``PoolError/daemonRefused(message:)`` when the host refuses the
     ///   request, ``PoolError/connectionClosed`` when the host closes the connection first, or
@@ -331,14 +329,91 @@ public enum PoolClient {
         directory: PoolDirectory,
         timeout: Duration = .seconds(30),
     ) async throws(PoolError) -> GuestStream {
-        let place = "\(host.address):\(host.port)"
+        let channel = try await connect(to: host, directory: directory, timeout: timeout)
+        return try await openStream(to: lease, on: channel, place: place(of: host), timeout: timeout)
+    }
+
+    /// Asks the daemon on this Mac for the account and the pinned host keys of a ready lease's
+    /// guest.
+    ///
+    /// The daemon reads them from the lease's bundle and connects to no guest.
+    ///
+    /// - Parameters:
+    ///   - lease: The lease.
+    ///   - directory: The daemon's data directory.
+    ///   - timeout: The longest wait for the daemon's reply.
+    /// - Returns: The access.
+    /// - Throws: ``PoolError/daemonUnreachable(path:reason:)`` when no daemon listens,
+    ///   ``PoolError/daemonRefused(message:)`` when the lease is unknown or not ready or the daemon
+    ///   cannot read the access, ``PoolError/connection(path:reason:)`` when no reply arrives in
+    ///   time, ``PoolError/connectionClosed`` when the daemon closes the connection first, or
+    ///   ``PoolError/malformedMessage(reason:)`` when the reply is of another kind.
+    public static func guestAccess(
+        to lease: LeaseID,
+        in directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(PoolError) -> GuestAccess {
+        let channel = try await connect(to: directory)
+        defer { channel.close() }
+        let place = directory.daemonSocket.path(percentEncoded: false)
+        return try await access(in: firstReply(to: .access(lease), on: channel, place: place, timeout: timeout))
+    }
+
+    /// Asks a paired host for the account and the pinned host keys of a ready lease's guest.
+    ///
+    /// The host must present the key in `host`. It reads the access from the lease's bundle and
+    /// connects to no guest.
+    ///
+    /// - Parameters:
+    ///   - lease: The lease, which this Mac must own.
+    ///   - host: The host from this Mac's list of paired hosts.
+    ///   - directory: This Mac's data directory, which holds its key.
+    ///   - timeout: The longest wait for the handshake, the greeting, and then the host's reply.
+    /// - Returns: The access.
+    /// - Throws: ``PoolError/connection(path:reason:)`` when the connection fails, the host
+    ///   presents another key, or no reply arrives in time, ``PoolError/daemonRefused(message:)``
+    ///   when the host refuses the request, ``PoolError/connectionClosed`` when the host closes the
+    ///   connection first, ``PoolError/malformedMessage(reason:)`` when the reply is of another
+    ///   kind, or another ``PoolError`` when this Mac's key cannot be read.
+    public static func guestAccess(
+        to lease: LeaseID,
+        on host: TrustedHost,
+        directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(PoolError) -> GuestAccess {
+        let channel = try await connect(to: host, directory: directory, timeout: timeout)
+        defer { channel.close() }
+        return try await access(in: firstReply(
+            to: .access(lease),
+            on: channel,
+            place: place(of: host),
+            timeout: timeout,
+        ))
+    }
+
+    /// Connects to a paired host and waits for its greeting.
+    ///
+    /// The connection sends no heartbeats, because a heartbeat after a connect request would
+    /// reach the guest as bytes of the stream.
+    ///
+    /// - Parameters:
+    ///   - host: The host from this Mac's list of paired hosts.
+    ///   - directory: This Mac's data directory, which holds its key.
+    ///   - timeout: The longest wait for the handshake, and then for the greeting.
+    /// - Returns: A connection that is ready for one request.
+    /// - Throws: ``PoolError/connection(path:reason:)`` when the list names an invalid port, the
+    ///   connection fails, or the host presents another key, refuses this Mac's key, or greets
+    ///   badly or not in time, or another ``PoolError`` when this Mac's key cannot be read.
+    private static func connect(
+        to host: TrustedHost,
+        directory: PoolDirectory,
+        timeout: Duration,
+    ) async throws(PoolError) -> MessageChannel {
         guard let port = NWEndpoint.Port(rawValue: host.port) else {
-            throw .connection(path: place, reason: "the list of paired hosts names port \(host.port)")
+            throw .connection(path: place(of: host), reason: "the list of paired hosts names port \(host.port)")
         }
         let identity = try MacIdentity.loadOrCreate(in: directory)
-        // The stream takes the connection at once, so this connection sends no heartbeat. A
-        // heartbeat after the request would reach the guest as bytes of the stream.
-        let channel = try await connect(
+        return try await connect(
             to: .hostPort(host: NWEndpoint.Host(host.address), port: port),
             as: identity,
             timeout: timeout,
@@ -346,7 +421,14 @@ public enum PoolClient {
             closedReason: "the host closed the connection, so it does not accept this Mac's key",
             expected: host.key.rawValue,
         ) { $0 == host.key }
-        return try await openStream(to: lease, on: channel, place: place, timeout: timeout)
+    }
+
+    /// Names a paired host's address and port for error messages.
+    ///
+    /// - Parameter host: The host.
+    /// - Returns: The address and the port, such as `192.0.2.10:7480`.
+    private static func place(of host: TrustedHost) -> String {
+        "\(host.address):\(host.port)"
     }
 
     /// Asks for a stream on an open connection and hands the connection to the stream.
@@ -356,18 +438,48 @@ public enum PoolClient {
     ///   - channel: A connection that sent no request yet.
     ///   - place: The daemon's socket or address, for error messages.
     ///   - timeout: The longest wait for the reply.
-    /// - Returns: The stream, the lease, and the access to the guest.
-    /// - Throws: ``PoolError/daemonRefused(message:)`` when the daemon refuses the request,
-    ///   ``PoolError/connection(path:reason:)`` when no reply arrives in time,
-    ///   ``PoolError/connectionClosed`` when the daemon closes the connection first, or
-    ///   ``PoolError/malformedMessage(reason:)`` when the reply is of another kind, names another
-    ///   lease, or carries no access to the guest.
+    /// - Returns: The stream and the lease.
+    /// - Throws: The errors of ``firstReply(to:on:place:timeout:)``, or
+    ///   ``PoolError/malformedMessage(reason:)`` when the reply is of another kind or names
+    ///   another lease.
     private static func openStream(
         to lease: LeaseID,
         on channel: MessageChannel,
         place: String,
         timeout: Duration,
     ) async throws(PoolError) -> GuestStream {
+        do throws(PoolError) {
+            let reply = try await firstReply(to: .connect(lease), on: channel, place: place, timeout: timeout)
+            guard case let .ready(summary) = reply, summary.id == lease else {
+                throw .malformedMessage(reason: "the daemon replied to a connect request with an unexpected "
+                    + "\(reply.kind) reply")
+            }
+            return try GuestStream(lease: summary, stream: channel.takeStream())
+        } catch {
+            channel.close()
+            throw error
+        }
+    }
+
+    /// Sends one request on an open connection and waits for the daemon's first reply.
+    ///
+    /// - Parameters:
+    ///   - request: The request.
+    ///   - channel: A connection that sent no request yet.
+    ///   - place: The daemon's socket or address, for error messages.
+    ///   - timeout: The longest wait for the reply. The call closes the connection when it
+    ///     passes.
+    /// - Returns: The reply, which is never a failure.
+    /// - Throws: ``PoolError/daemonRefused(message:)`` when the daemon answers with a failure,
+    ///   ``PoolError/connection(path:reason:)`` when no reply arrives in time,
+    ///   ``PoolError/connectionClosed`` when the daemon closes the connection first, or another
+    ///   ``PoolError`` when the connection fails.
+    private static func firstReply(
+        to request: PoolRequest,
+        on channel: MessageChannel,
+        place: String,
+        timeout: Duration,
+    ) async throws(PoolError) -> PoolReply {
         let watchdog = Task {
             do {
                 try await Task.sleep(for: timeout)
@@ -379,7 +491,7 @@ public enum PoolClient {
         }
         let received: Result<PoolReply?, PoolError>
         do throws(PoolError) {
-            try channel.send(PoolRequest.connect(lease))
+            try channel.send(request)
             received = try await .success(channel.receive(PoolReply.self))
         } catch {
             received = .failure(error)
@@ -389,30 +501,28 @@ public enum PoolClient {
             throw .connection(path: place, reason: "the daemon sent no reply within \(timeout)")
         }
         switch received {
-        case let .success(.ready(summary, guest?)?) where summary.id == lease:
-            do throws(PoolError) {
-                return try GuestStream(lease: summary, guest: guest, stream: channel.takeStream())
-            } catch {
-                channel.close()
-                throw error
-            }
         case let .success(.failure(message)?):
-            channel.close()
             throw .daemonRefused(message: message)
-        case .success(.ready(_, nil)?):
-            channel.close()
-            throw .malformedMessage(reason: "the daemon's reply to a connect request carries no access to the guest")
-        case .success(nil):
-            channel.close()
-            throw .connectionClosed
         case let .success(reply?):
-            channel.close()
-            throw .malformedMessage(reason: "the daemon replied to a connect request with an unexpected \(reply.kind) "
-                + "reply")
+            return reply
+        case .success(nil):
+            throw .connectionClosed
         case let .failure(error):
-            channel.close()
             throw error
         }
+    }
+
+    /// Returns the access that a reply to an access request carries.
+    ///
+    /// - Parameter reply: The daemon's reply.
+    /// - Returns: The access.
+    /// - Throws: ``PoolError/malformedMessage(reason:)`` when the reply is of another kind.
+    private static func access(in reply: PoolReply) throws(PoolError) -> GuestAccess {
+        guard case let .access(guest) = reply else {
+            throw .malformedMessage(reason: "the daemon replied to an access request with an unexpected \(reply.kind) "
+                + "reply")
+        }
+        return guest
     }
 
     /// Sends one request and returns the daemon's first reply.
@@ -446,9 +556,6 @@ public enum PoolClient {
 public struct GuestStream: Sendable {
     /// The lease as the daemon showed it to this Mac.
     public let lease: LeaseSummary
-
-    /// The account and the pinned host keys that log in to the guest.
-    public let guest: GuestAccess
 
     /// The connection, which now carries the bytes of the guest's SSH server.
     public let stream: ByteStream

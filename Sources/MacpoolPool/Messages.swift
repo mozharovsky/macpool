@@ -548,14 +548,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
 
     /// Turns the connection into a byte stream to the SSH server of a ready lease's guest.
     ///
-    /// The daemon connects to port 22 of the guest and replies with ``PoolReply/ready(_:guest:)``.
-    /// The reply carries the guest's account and pinned host keys. After that line the connection
-    /// carries the bytes between the client and the guest's SSH server in both directions. If the
-    /// guest refuses the connection, the reply is a failure and the connection closes.
+    /// The daemon connects to port 22 of the guest and replies with ``PoolReply/ready(_:)``. After
+    /// that line the connection carries the bytes between the client and the guest's SSH server
+    /// in both directions. If the guest refuses the connection, the reply is a failure and the
+    /// connection closes.
     ///
     /// The daemon refuses the request when the lease is not ready, when the connection waits for
-    /// or holds a lease, and when a paired Mac already has 8 streams. It also refuses it when it
-    /// cannot read the guest's account or the lease pins no host key. It keeps serving the
+    /// or holds a lease, and when a paired Mac already has 8 streams. It keeps serving the
     /// connection after such a refusal. A stream ends when its lease stops being ready, when the
     /// host revokes the Mac or no longer accepts it, or when the daemon stops. Ending the stream
     /// leaves the lease as it is.
@@ -565,6 +564,16 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     ///
     /// - Parameter id: The lease's identifier.
     case connect(LeaseID)
+
+    /// Asks for the account and the pinned host keys that log in to a ready lease's guest.
+    ///
+    /// The daemon replies with ``PoolReply/access(_:)`` and connects to no guest. It refuses the
+    /// request when the lease is not ready and when the lease pins no host key. It also refuses it
+    /// when it cannot read the guest's account or the account breaks the rules of ``GuestAccess``.
+    /// Only the lease's owner receives the access, and no other reply carries the password.
+    ///
+    /// - Parameter id: The lease's identifier.
+    case access(LeaseID)
 
     /// Tells the daemon that a paired Mac still runs.
     ///
@@ -579,7 +588,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case request
         /// The terms of a lease request.
         case terms
-        /// The lease of an attach, release, renew, or connect request.
+        /// The lease of an attach, release, renew, connect, or access request.
         case lease
         /// The address of an invitation.
         case address
@@ -632,6 +641,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = try .forget(endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false)
         case "connect":
             self = try .connect(container.decode(LeaseID.self, forKey: .lease))
+        case "access":
+            self = try .access(container.decode(LeaseID.self, forKey: .lease))
         case "heartbeat":
             self = .heartbeat
         default:
@@ -681,6 +692,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(endLeases, forKey: .endLeases)
         case let .connect(id):
             try container.encode("connect", forKey: .request)
+            try container.encode(id, forKey: .lease)
+        case let .access(id):
+            try container.encode("access", forKey: .request)
             try container.encode(id, forKey: .lease)
         case .heartbeat:
             try container.encode("heartbeat", forKey: .request)
@@ -813,12 +827,15 @@ public enum PoolReply: Sendable, Equatable, Codable {
 
     /// The lease's VM is ready.
     ///
-    /// The daemon adds `guest` only to its reply to ``PoolRequest/connect(_:)``.
+    /// - Parameter lease: The lease, with the guest's address.
+    case ready(LeaseSummary)
+
+    /// The account and the pinned host keys that log in to a lease's guest.
     ///
-    /// - Parameters:
-    ///   - lease: The lease, with the guest's address.
-    ///   - guest: The account and host keys that log in to the guest, or `nil`.
-    case ready(LeaseSummary, guest: GuestAccess? = nil)
+    /// The daemon sends it only in reply to ``PoolRequest/access(_:)``.
+    ///
+    /// - Parameter guest: The access.
+    case access(GuestAccess)
 
     /// The lease's VM stopped and boots again under the restart policy.
     ///
@@ -937,10 +954,9 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case "starting":
             self = try .starting(container.decode(LeaseSummary.self, forKey: .lease))
         case "ready":
-            self = try .ready(
-                container.decode(LeaseSummary.self, forKey: .lease),
-                guest: container.decodeIfPresent(GuestAccess.self, forKey: .guest),
-            )
+            self = try .ready(container.decode(LeaseSummary.self, forKey: .lease))
+        case "access":
+            self = try .access(container.decode(GuestAccess.self, forKey: .guest))
         case "restarting":
             self = try .restarting(
                 container.decode(LeaseSummary.self, forKey: .lease),
@@ -993,6 +1009,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case .queued: "queued"
         case .starting: "starting"
         case .ready: "ready"
+        case .access: "access"
         case .restarting: "restarting"
         case .ended: "ended"
         case .renewed: "renewed"
@@ -1018,11 +1035,10 @@ public enum PoolReply: Sendable, Equatable, Codable {
         switch self {
         case let .queued(position):
             try container.encode(position, forKey: .position)
-        case let .starting(lease), let .renewed(lease):
+        case let .starting(lease), let .ready(lease), let .renewed(lease):
             try container.encode(lease, forKey: .lease)
-        case let .ready(lease, guest):
-            try container.encode(lease, forKey: .lease)
-            try container.encodeIfPresent(guest, forKey: .guest)
+        case let .access(guest):
+            try container.encode(guest, forKey: .guest)
         case let .restarting(lease, reason):
             try container.encode(lease, forKey: .lease)
             try container.encode(reason, forKey: .reason)

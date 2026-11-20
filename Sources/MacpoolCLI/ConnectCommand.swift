@@ -70,7 +70,7 @@ struct HostSelection: ParsableArguments {
     /// - Parameters:
     ///   - lease: The lease.
     ///   - directory: This Mac's data directory.
-    /// - Returns: The stream, the lease, and the access to the guest.
+    /// - Returns: The stream and the lease.
     /// - Throws: ``CommandError/pool(_:)`` when the host is unknown, the connection fails, or the
     ///   daemon refuses the stream. A paired host's error passes through
     ///   ``escapingPeerText(_:)``.

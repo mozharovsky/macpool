@@ -148,9 +148,11 @@ and ``PoolClient/openStream(to:on:directory:timeout:)`` opens one through a pair
 holds no lease, so its end leaves the lease as it is. A connection that waits for or holds a lease
 cannot carry a stream.
 
-The daemon's reply to the request carries a ``GuestAccess`` with the guest's account and the host
-keys that the lease's bundle pins. Pin these keys for the SSH client and accept no other key. No
-other reply carries the password.
+A ``PoolRequest/access(_:)`` request returns a ``GuestAccess`` with the guest's account and the
+host keys that the lease's bundle pins. ``PoolClient/guestAccess(to:in:timeout:)`` and
+``PoolClient/guestAccess(to:on:directory:timeout:)`` send it. The daemon connects to no guest for
+it. Pin these keys for the SSH client and accept no other key. No other reply carries the
+password.
 
 The daemon passes a normal end of either side on as a normal end, and a failure as a reset. A
 Unix socket carries no reset, so a local client sees the end of a broken stream as a normal end.
