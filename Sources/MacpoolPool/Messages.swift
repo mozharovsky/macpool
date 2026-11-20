@@ -546,6 +546,25 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// - Parameter endLeases: Whether the daemon ends the Mac's leases.
     case forget(endLeases: Bool = false)
 
+    /// Turns the connection into a byte stream to the SSH server of a ready lease's guest.
+    ///
+    /// The daemon connects to port 22 of the guest and replies with ``PoolReply/ready(_:)``. After
+    /// that line the connection carries the bytes between the client and the guest's SSH server
+    /// in both directions. If the guest refuses the connection, the reply is a failure and the
+    /// connection closes.
+    ///
+    /// The daemon refuses the request when the lease is not ready, when the connection waits for
+    /// or holds a lease, and when a paired Mac already has 8 streams. It keeps serving the
+    /// connection after such a refusal. A stream ends when its lease stops being ready, when the
+    /// host revokes the Mac or no longer accepts it, or when the daemon stops. Ending the stream
+    /// leaves the lease as it is.
+    ///
+    /// Send the request on a connection that sends no heartbeats, and send nothing after it until
+    /// the reply arrives. The daemon passes every byte after the request to the guest.
+    ///
+    /// - Parameter id: The lease's identifier.
+    case connect(LeaseID)
+
     /// Tells the daemon that a paired Mac still runs.
     ///
     /// The daemon sends no reply. It closes the connection of a paired Mac that sent no request
@@ -559,7 +578,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case request
         /// The terms of a lease request.
         case terms
-        /// The lease of an attach, release, or renew request.
+        /// The lease of an attach, release, renew, or connect request.
         case lease
         /// The address of an invitation.
         case address
@@ -610,6 +629,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             )
         case "forget":
             self = try .forget(endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false)
+        case "connect":
+            self = try .connect(container.decode(LeaseID.self, forKey: .lease))
         case "heartbeat":
             self = .heartbeat
         default:
@@ -657,6 +678,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case let .forget(endLeases):
             try container.encode("forget", forKey: .request)
             try container.encode(endLeases, forKey: .endLeases)
+        case let .connect(id):
+            try container.encode("connect", forKey: .request)
+            try container.encode(id, forKey: .lease)
         case .heartbeat:
             try container.encode("heartbeat", forKey: .request)
         }
