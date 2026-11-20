@@ -557,8 +557,11 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// or holds a lease, and when a paired Mac already has 8 streams. It also refuses it when it
     /// cannot read the guest's account or the lease pins no host key. It keeps serving the
     /// connection after such a refusal. A stream ends when its lease stops being ready, when the
-    /// host revokes the Mac, or when the daemon stops. Ending the stream leaves the lease as it
-    /// is.
+    /// host revokes the Mac or no longer accepts it, or when the daemon stops. Ending the stream
+    /// leaves the lease as it is.
+    ///
+    /// Send the request on a connection that sends no heartbeats, and send nothing after it until
+    /// the reply arrives. The daemon passes every byte after the request to the guest.
     ///
     /// - Parameter id: The lease's identifier.
     case connect(LeaseID)

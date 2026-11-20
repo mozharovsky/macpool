@@ -260,6 +260,29 @@ struct GuestStreamTests {
         await daemon.shutdown()
     }
 
+    /// Resets a paired Mac's streams when the list of paired clients drops the Mac and one of its
+    /// connections sends a request, even when its lease runs on.
+    @Test func endsTheStreamsOfAMacThatTheListDrops() async throws {
+        let guest = try await EchoServer()
+        defer { guest.close() }
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source], guestSSH: guest.endpoint)
+        let alice = try LeaseLedgerTests.paired("a")
+        let holder = try await pool.pairedClient(of: daemon, owner: alice)
+        let ready = try await Self.readyLease(on: holder, detached: true)
+        let stream = try await Self.openStream(to: ready, of: alice, in: pool, daemon: daemon)
+
+        try TrustList<TrustedClient>().save(to: pool.directory)
+        try holder.send(PoolRequest.status)
+        let refusal = PoolError.invalidRequest(reason: "the host no longer accepts this Mac")
+        #expect(try await next(holder) == .failure(refusal.description))
+        // A Unix socket carries no reset, so the client sees the end of the stream.
+        #expect(await Self.end(of: stream) != .timedOut)
+        #expect(await eventually { guest.ends == [.failed] })
+        #expect(await daemon.summary().leases.map(\.phase) == [.ready])
+        await daemon.shutdown()
+    }
+
     /// Resets every stream when the daemon stops, so that the guest's SSH server sees a failure.
     @Test func endsStreamsWhenTheDaemonStops() async throws {
         let guest = try await EchoServer()

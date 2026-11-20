@@ -153,20 +153,21 @@ runs on after the connection ends.
 | `--pool HOST` | the daemon on this Mac | A paired host's name or short key from `pool list`. The lease must belong to this Mac. |
 
 ```sh
-ssh -o ProxyCommand="macpool connect 0a1b2c3d" -o HostKeyAlias=macpool-guest admin@macpool-guest
+ssh -o ProxyCommand="macpool connect 0a1b2c3d" -o HostKeyAlias=macpool-0a1b2c3d admin@macpool-0a1b2c3d
 ```
 
-`ssh` never connects to the host name in the command, so any name works there. Pin the guest's
-host key under one alias. `macpool ssh` sets up these options for you.
+`ssh` never connects to the host name in the command, so any name works there. Give each lease an
+alias of its own, because every clone has its own host key. `macpool ssh` logs in with the key that
+the lease pins and needs none of these options.
 
 The command exits with status 0 when the stream ends normally. If two paired hosts have the name
 that `--pool` gives, it fails and asks for the short key.
 
-The daemon ends the stream when the lease stops being ready, when the host revokes this Mac, and
-when the daemon stops. Over the local socket such an end looks normal to `connect`, which then
-exits with status 0. `ssh` still reports the cut connection. With `--pool`, the end of standard
-input ends the whole stream, because TLS can't end one direction alone. One Mac may hold 8 streams
-on a host at once.
+The daemon ends the stream when the lease stops being ready, when the host revokes this Mac or no
+longer accepts it, and when the daemon stops. Over the local socket such an end looks normal to
+`connect`, which then exits with status 0. `ssh` still reports the cut connection. With `--pool`,
+the end of standard input ends the whole stream, because TLS can't end one direction alone. One Mac
+may hold 8 streams on a host at once.
 
 ## ssh
 
