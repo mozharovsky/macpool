@@ -97,6 +97,36 @@ struct PoolCommandTests {
         #expect(supervise.sharing.sharedDirectory == nil)
     }
 
+    /// Sends a source's name as typed to a paired host, and refuses a share of this Mac's
+    /// directory with a lease on another Mac.
+    @Test func parsesLeasesFromAPairedHost() throws {
+        let lease = try #require(
+            try Macpool.parseAsRoot(["lease", "--pool", "lab", "--from", "base", "--ttl", "600"]) as? LeaseCommand,
+        )
+        #expect(lease.selection.host == "lab")
+        #expect(lease.terms == LeaseTerms(source: "base", timeToLive: 600))
+        #expect(throws: (any Error).self) {
+            try Macpool.parseAsRoot(["lease", "--pool", "lab", "--from", "base", "--share", "/share"])
+        }
+        let release = try #require(try Macpool.parseAsRoot(["release", "--pool", "lab", "0a1b2c3d"]) as? ReleaseCommand)
+        #expect(release.selection.host == "lab")
+        let renew = try #require(try Macpool.parseAsRoot(["renew", "--pool", "lab", "0a1b2c3d"]) as? RenewCommand)
+        #expect(renew.selection.host == "lab")
+        let list = try #require(try Macpool.parseAsRoot(["list", "--pool", "lab"]) as? ListCommand)
+        #expect(list.selection.host == "lab")
+        let local = try #require(try Macpool.parseAsRoot(["list"]) as? ListCommand)
+        #expect(local.selection.host == nil)
+    }
+
+    /// Escapes the text of a paired host and leaves the text of the daemon on this Mac as it is.
+    @Test func showsTheTextOfAPairedHostEscaped() throws {
+        let text = "ended\u{1B}[2J"
+        let remote = try #require(try Macpool.parseAsRoot(["list", "--pool", "lab"]) as? ListCommand)
+        #expect(remote.selection.shown(text) == #"ended\u{1B}[2J"#)
+        let local = try #require(try Macpool.parseAsRoot(["list"]) as? ListCommand)
+        #expect(local.selection.shown(text) == text)
+    }
+
     /// Parses only lease identifiers.
     @Test func parsesLeaseIdentifiers() throws {
         #expect(try LeaseID.parse("0a1b2c3d").rawValue == "0a1b2c3d")

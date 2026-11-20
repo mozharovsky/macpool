@@ -39,7 +39,8 @@ busy, it prints `queued position=N` and waits. Once the clone is ready, it print
 | `--share-read-only` | off | Lets the guest only read the shared directory. |
 | `--boot-timeout SECONDS` | 900 | The longest wait for each boot, including SSH and the credential replacement. |
 | `--detach` | off | Exits at `ready` and leaves the lease with the daemon. |
-| `--data-dir DIR` | see above | The daemon to ask. |
+| `--data-dir DIR` | see above | The daemon to ask, and the directory with this Mac's key and paired hosts. |
+| `--pool HOST` | the daemon on this Mac | A paired host to lease from. See [Leasing from another Mac](#leasing-from-another-mac). |
 
 The daemon refuses a source that's running, has never booted, lies on another volume, or didn't
 finish replacing its credentials. It also refuses a `--share` directory that doesn't exist, that
@@ -73,6 +74,26 @@ $macpool release LEASE
 | `macpool release LEASE` | Ends the lease right away. |
 
 When a lease ends, the daemon stops the VM by force and deletes the clone.
+
+## Leasing from another Mac
+
+`lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
+daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
+command line can't pair Macs yet, so only a host that a program built on `MacpoolPool` paired works
+here.
+
+With `--pool`, `--from` names a source that the host offers, and `--share` isn't allowed. The host
+shows this Mac only its own leases and no paths on its disk. `bundle=` and `address=` stay empty,
+and so do `MACPOOL_BUNDLE` and `MACPOOL_ADDRESS`. Reach the guest with `macpool ssh --pool`.
+
+```sh
+$macpool lease --pool lab --from base --detach
+$macpool ssh --pool lab LEASE -- sw_vers
+$macpool release --pool lab LEASE
+```
+
+If the connection to the host breaks while `lease` holds a lease, `lease` connects again and
+attaches to the lease. The host keeps the lease for 60 seconds meanwhile.
 
 ## Restarts
 

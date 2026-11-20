@@ -329,7 +329,7 @@ public enum PoolClient {
         directory: PoolDirectory,
         timeout: Duration = .seconds(30),
     ) async throws(PoolError) -> GuestStream {
-        let channel = try await connect(to: host, directory: directory, timeout: timeout)
+        let channel = try await connectForOneRequest(to: host, directory: directory, timeout: timeout)
         return try await openStream(to: lease, on: channel, place: place(of: host), timeout: timeout)
     }
 
@@ -381,7 +381,7 @@ public enum PoolClient {
         directory: PoolDirectory,
         timeout: Duration = .seconds(10),
     ) async throws(PoolError) -> GuestAccess {
-        let channel = try await connect(to: host, directory: directory, timeout: timeout)
+        let channel = try await connectForOneRequest(to: host, directory: directory, timeout: timeout)
         defer { channel.close() }
         return try await access(in: firstReply(
             to: .access(lease),
@@ -389,6 +389,78 @@ public enum PoolClient {
             place: place(of: host),
             timeout: timeout,
         ))
+    }
+
+    /// Connects to a paired host for requests and waits for its greeting.
+    ///
+    /// The host must present the key in `host`. The connection sends ``PoolRequest/heartbeat``
+    /// every ``heartbeatInterval`` until it closes, so the host keeps it while a lease request
+    /// waits or a lease stays attached. Open a stream with
+    /// ``openStream(to:on:directory:timeout:)``, which uses a connection of its own.
+    ///
+    /// - Parameters:
+    ///   - host: The host from this Mac's list of paired hosts.
+    ///   - directory: This Mac's data directory, which holds its key.
+    ///   - timeout: The longest wait for the handshake, and then for the greeting.
+    /// - Returns: A connection that is ready for requests.
+    /// - Throws: ``PoolError/connection(path:reason:)`` when the list names an invalid port, the
+    ///   connection fails, or the host presents another key, refuses this Mac's key, or greets
+    ///   badly or not in time, or another ``PoolError`` when this Mac's key cannot be read.
+    public static func connect(
+        to host: TrustedHost,
+        directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(PoolError) -> MessageChannel {
+        try await connect(to: host, directory: directory, timeout: timeout, heartbeat: heartbeatInterval)
+    }
+
+    /// Connects to a paired host for requests with a given interval between heartbeats.
+    ///
+    /// - Parameters:
+    ///   - host: The host from this Mac's list of paired hosts.
+    ///   - directory: This Mac's data directory, which holds its key.
+    ///   - timeout: The longest wait for the handshake, and then for the greeting.
+    ///   - heartbeat: The interval between heartbeats.
+    /// - Returns: A connection that is ready for requests.
+    /// - Throws: The errors of ``connect(to:directory:timeout:)``.
+    static func connect(
+        to host: TrustedHost,
+        directory: PoolDirectory,
+        timeout: Duration,
+        heartbeat: Duration,
+    ) async throws(PoolError) -> MessageChannel {
+        let channel = try await connectForOneRequest(to: host, directory: directory, timeout: timeout)
+        startHeartbeat(on: channel, every: heartbeat)
+        return channel
+    }
+
+    /// Sends one request to a paired host and returns the host's first reply.
+    ///
+    /// The host must present the key in `host`.
+    ///
+    /// - Parameters:
+    ///   - request: The request, which must not be a lease request.
+    ///   - host: The host from this Mac's list of paired hosts.
+    ///   - directory: This Mac's data directory, which holds its key.
+    ///   - timeout: The longest wait for the handshake, the greeting, and then the host's reply.
+    /// - Returns: The reply.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` for a heartbeat, which gets no reply,
+    ///   ``PoolError/daemonRefused(message:)`` when the host answers with a failure,
+    ///   ``PoolError/connection(path:reason:)`` when the connection fails, the host presents
+    ///   another key, or no reply arrives in time, ``PoolError/connectionClosed`` when the host
+    ///   closes the connection first, or another ``PoolError`` when this Mac's key cannot be read.
+    public static func send(
+        _ request: PoolRequest,
+        to host: TrustedHost,
+        directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(PoolError) -> PoolReply {
+        guard request != .heartbeat else {
+            throw .invalidRequest(reason: "the daemon does not reply to a heartbeat")
+        }
+        let channel = try await connectForOneRequest(to: host, directory: directory, timeout: timeout)
+        defer { channel.close() }
+        return try await firstReply(to: request, on: channel, place: place(of: host), timeout: timeout)
     }
 
     /// Connects to a paired host and waits for its greeting.
@@ -404,7 +476,7 @@ public enum PoolClient {
     /// - Throws: ``PoolError/connection(path:reason:)`` when the list names an invalid port, the
     ///   connection fails, or the host presents another key, refuses this Mac's key, or greets
     ///   badly or not in time, or another ``PoolError`` when this Mac's key cannot be read.
-    private static func connect(
+    private static func connectForOneRequest(
         to host: TrustedHost,
         directory: PoolDirectory,
         timeout: Duration,

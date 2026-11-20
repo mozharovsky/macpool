@@ -88,6 +88,56 @@ struct HostSelection: ParsableArguments {
         }
     }
 
+    /// Connects to the selected daemon for requests.
+    ///
+    /// A connection to a paired host sends heartbeats, so the host keeps it while a request waits.
+    ///
+    /// - Parameter directory: This Mac's data directory.
+    /// - Returns: A connection that is ready for requests.
+    /// - Throws: ``CommandError/pool(_:)`` when the host is unknown or the connection fails. A
+    ///   paired host's error passes through ``escapingPeerText(_:)``.
+    func connect(in directory: PoolDirectory) async throws(CommandError) -> MessageChannel {
+        guard let host else {
+            return try await pool { () async throws(PoolError) in try await PoolClient.connect(to: directory) }
+        }
+        do {
+            let paired = try TrustedHost.named(host, in: directory)
+            return try await PoolClient.connect(to: paired, directory: directory)
+        } catch {
+            throw .pool(Self.escapingPeerText(error))
+        }
+    }
+
+    /// Sends one request to the selected daemon and returns its first reply.
+    ///
+    /// - Parameters:
+    ///   - request: The request, which must not be a lease request.
+    ///   - directory: This Mac's data directory.
+    /// - Returns: The reply.
+    /// - Throws: ``CommandError/pool(_:)`` when the host is unknown, the connection fails, or the
+    ///   daemon refuses the request. A paired host's error passes through
+    ///   ``escapingPeerText(_:)``.
+    func send(_ request: PoolRequest, in directory: PoolDirectory) async throws(CommandError) -> PoolReply {
+        guard let host else {
+            return try await pool { () async throws(PoolError) in try await PoolClient.send(request, to: directory) }
+        }
+        do {
+            let paired = try TrustedHost.named(host, in: directory)
+            return try await PoolClient.send(request, to: paired, directory: directory)
+        } catch {
+            throw .pool(Self.escapingPeerText(error))
+        }
+    }
+
+    /// Prepares text from the selected daemon for a terminal.
+    ///
+    /// - Parameter text: A reason or a name in a reply.
+    /// - Returns: The text itself for the daemon on this Mac, or the text after
+    ///   ``PeerText/escaped(_:)`` for a paired host.
+    func shown(_ text: String) -> String {
+        host == nil ? text : PeerText.escaped(text)
+    }
+
     /// Escapes the text in an error that a paired host or another Mac may have chosen.
     ///
     /// A refusal, a failed greeting, a malformed reply, and an unusable list of paired hosts can

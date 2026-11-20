@@ -21,6 +21,12 @@ import System
 /// With `--detach` the command exits once the VM is ready, and the lease lasts until
 /// `macpool release` or its expiry. Every lease expires its time to live after it was first
 /// ready, and `macpool renew` moves the expiry.
+///
+/// With `--pool` the command leases from a paired host, and `--from` names a source that the host
+/// offers. The lease then has no bundle or address on this Mac, so `MACPOOL_BUNDLE` and
+/// `MACPOOL_ADDRESS` are empty. Reach the guest with `macpool ssh --pool`. When the connection to
+/// the host breaks, the command connects again and attaches to the lease. The host keeps the lease
+/// for 60 seconds meanwhile.
 struct LeaseCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -31,11 +37,14 @@ struct LeaseCommand: AsyncParsableCommand {
     /// How long a client tries to reach a daemon that went away while it held a lease.
     static let reconnectTimeout = Duration.seconds(60)
 
-    /// The daemon's data directory.
+    /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
     @OptionGroup var location: PoolOptions
 
-    /// The stopped source bundle.
-    @Option(help: "The stopped source bundle to clone.")
+    /// The paired host to lease from, if any.
+    @OptionGroup var selection: HostSelection
+
+    /// The stopped source bundle, or the name of a source that the paired host offers.
+    @Option(help: "The stopped source bundle to clone. With --pool, the name of a source that the host offers.")
     var from: String
 
     /// The lease's time to live in seconds.
@@ -85,6 +94,9 @@ struct LeaseCommand: AsyncParsableCommand {
         guard !(detach && !command.isEmpty) else {
             throw ValidationError("--detach cannot run a command.")
         }
+        guard selection.host == nil || sharing.share == nil else {
+            throw ValidationError("--share cannot share a directory of this Mac with a lease on another Mac.")
+        }
         guard (1 ... LeaseTerms.maximumTimeToLive).contains(timeToLive) else {
             throw ValidationError("--ttl takes 1 to \(LeaseTerms.maximumTimeToLive) seconds.")
         }
@@ -95,9 +107,9 @@ struct LeaseCommand: AsyncParsableCommand {
 
     /// Requests the lease, reports its progress, and holds it.
     ///
-    /// - Throws: ``CommandError`` when no daemon answers, the daemon rejects the request, the
-    ///   lease ends early, or a signal interrupts the wait. Throws `ExitCode` with the status of a
-    ///   command that failed.
+    /// - Throws: ``CommandError`` when the paired host is unknown, no daemon answers, the daemon
+    ///   rejects the request, the lease ends early, or a signal interrupts the wait. Throws
+    ///   `ExitCode` with the status of a command that failed.
     func run() async throws {
         let status = try await perform()
         if status != 0 {
@@ -106,9 +118,12 @@ struct LeaseCommand: AsyncParsableCommand {
     }
 
     /// The lease's terms from the options.
+    ///
+    /// The source is an absolute path for the daemon on this Mac and the name as typed for a
+    /// paired host.
     var terms: LeaseTerms {
         LeaseTerms(
-            source: URL(filePath: from).absoluteURL.path(percentEncoded: false),
+            source: selection.host == nil ? URL(filePath: from).absoluteURL.path(percentEncoded: false) : from,
             timeToLive: timeToLive,
             priority: priority,
             restartPolicy: restart,
@@ -122,13 +137,17 @@ struct LeaseCommand: AsyncParsableCommand {
     /// Performs the subcommand with typed errors.
     ///
     /// - Returns: The exit status, which is the command's status when one ran.
-    /// - Throws: ``CommandError`` when no daemon answers, the daemon rejects the request, the
-    ///   lease ends early, or a signal interrupts the wait.
+    /// - Throws: ``CommandError`` when the paired host is unknown, no daemon answers, the daemon
+    ///   rejects the request, the lease ends early, or a signal interrupts the wait.
     private func perform() async throws(CommandError) -> Int32 {
         let directory = location.directory
+        let selection = selection
         let terms = terms
-        try pool { () throws(PoolError) in try terms.validate() }
-        var channel = try await pool { () async throws(PoolError) in try await PoolClient.connect(to: directory) }
+        if selection.host == nil {
+            // A paired host checks the source by name, and validate() requires a path.
+            try pool { () throws(PoolError) in try terms.validate() }
+        }
+        var channel = try await selection.connect(in: directory)
         try pool { () throws(PoolError) in try channel.send(PoolRequest.lease(terms)) }
         let (events, sink) = AsyncStream.makeStream(of: LeaseEvent.self)
         var reader = Self.read(channel, into: sink)
@@ -171,13 +190,13 @@ struct LeaseCommand: AsyncParsableCommand {
                 }
             case let .reply(.restarting(_, reason)):
                 isReady = false
-                Report.line("restarting reason=\(reason)")
+                Report.line("restarting reason=\(selection.shown(reason))")
             case let .reply(.ended(ended, reason)):
-                Report.line("ended reason=\(reason)")
-                failure = .leaseEnded(id: ended.rawValue, reason: reason)
+                Report.line("ended reason=\(selection.shown(reason))")
+                failure = .leaseEnded(id: ended.rawValue, reason: selection.shown(reason))
                 break loop
             case let .reply(.failure(message)):
-                failure = .pool(.daemonRefused(message: message))
+                failure = .pool(.daemonRefused(message: selection.shown(message)))
                 break loop
             case .reply(.released), .reply(.renewed), .reply(.status), .reply(.invitation), .reply(.paired),
                  .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten), .reply(.access):
@@ -188,13 +207,13 @@ struct LeaseCommand: AsyncParsableCommand {
                     break loop
                 }
                 channel.close()
-                reattaching = Self.reattach(id, in: directory, into: sink)
+                reattaching = Self.reattach(id, through: selection, in: directory, into: sink)
             case let .reattached(reattached):
                 reattaching = nil
                 channel = reattached
                 reader = Self.read(channel, into: sink)
             case let .reattachFailed(error):
-                failure = .pool(error)
+                failure = error
                 break loop
             case let .signal(number):
                 if let running {
@@ -207,13 +226,13 @@ struct LeaseCommand: AsyncParsableCommand {
                     // Closing the connection withdraws the queued request.
                     break loop
                 }
-                await Self.release(id, in: directory)
+                await Self.release(id, through: selection, in: directory)
                 Report.line("released \(id)")
                 // Control-C is the normal end of a held lease, so only an interrupted boot fails.
                 return isReady ? 0 : 128 + number
             case let .commandEnded(status):
                 if let id {
-                    await Self.release(id, in: directory)
+                    await Self.release(id, through: selection, in: directory)
                     Report.line("released \(id)")
                 }
                 if let interruption {
@@ -257,13 +276,15 @@ struct LeaseCommand: AsyncParsableCommand {
     ///
     /// - Parameters:
     ///   - id: The lease.
-    ///   - directory: The daemon's data directory.
+    ///   - selection: The daemon on this Mac or the paired host that holds the lease.
+    ///   - directory: This Mac's data directory.
     ///   - sink: The event stream that receives the new connection, on which the daemon reports
     ///     the lease's stage, or the last error when no daemon answers within
     ///     ``reconnectTimeout``.
     /// - Returns: The reconnecting task, which stops trying when cancelled.
     private static func reattach(
         _ id: LeaseID,
+        through selection: HostSelection,
         in directory: PoolDirectory,
         into sink: AsyncStream<LeaseEvent>.Continuation,
     ) -> Task<Void, Never> {
@@ -272,9 +293,9 @@ struct LeaseCommand: AsyncParsableCommand {
             let clock = ContinuousClock()
             let deadline = clock.now + reconnectTimeout
             while !Task.isCancelled {
-                do throws(PoolError) {
-                    let channel = try await PoolClient.connect(to: directory)
-                    try channel.send(PoolRequest.attach(id))
+                do throws(CommandError) {
+                    let channel = try await selection.connect(in: directory)
+                    try pool { () throws(PoolError) in try channel.send(PoolRequest.attach(id)) }
                     guard !Task.isCancelled else {
                         channel.close()
                         return
@@ -298,9 +319,10 @@ struct LeaseCommand: AsyncParsableCommand {
     ///
     /// - Parameters:
     ///   - id: The lease.
-    ///   - directory: The daemon's data directory.
-    private static func release(_ id: LeaseID, in directory: PoolDirectory) async {
-        _ = try? await PoolClient.send(.release(id), to: directory)
+    ///   - selection: The daemon on this Mac or the paired host that holds the lease.
+    ///   - directory: This Mac's data directory.
+    private static func release(_ id: LeaseID, through selection: HostSelection, in directory: PoolDirectory) async {
+        _ = try? await selection.send(.release(id), in: directory)
     }
 
     /// Runs the command after `--` with the lease in its environment.
@@ -365,7 +387,7 @@ private enum LeaseEvent: Sendable {
     /// The command reconnected to the daemon and asked to attach to the lease.
     case reattached(MessageChannel)
     /// No daemon answered within the reconnect timeout.
-    case reattachFailed(PoolError)
+    case reattachFailed(CommandError)
     /// A termination signal arrived.
     case signal(Int32)
     /// The command after `--` exited with a status.
