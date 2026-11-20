@@ -141,6 +141,35 @@ Each row shows when this Mac paired, the host's address and port from the pairin
 short key, and its name. The host chose its name and its address. The table escapes and isolates
 both like a client's name in `host list`.
 
+## connect
+
+`macpool connect LEASE` relays its standard input and output to the SSH server of a ready lease's
+guest. It suits the `ProxyCommand` option of `ssh`. The connection holds no lease, so the lease
+runs on after the connection ends.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of this Mac's daemon, key, and paired hosts. |
+| `--pool HOST` | the daemon on this Mac | A paired host's name or short key from `pool list`. The lease must belong to this Mac. |
+
+```sh
+ssh -o ProxyCommand="macpool connect 0a1b2c3d" -o HostKeyAlias=macpool-0a1b2c3d admin@macpool-0a1b2c3d
+```
+
+`ssh` never connects to the host name in the command, so any name works there. Give each lease an
+alias of its own, because every clone has its own host key. `macpool ssh` logs in with the key that
+the lease pins and needs none of these options.
+
+The command exits with status 0 when the stream ends normally. A short key in `--pool` names its
+host even when other hosts have that text as their name. If no short key matches and two paired
+hosts have the name, the command fails and asks for the short key.
+
+The daemon ends the stream when the lease stops being ready, when the host revokes this Mac or no
+longer accepts it, and when the daemon stops. Over the local socket such an end looks normal to
+`connect`, which then exits with status 0. `ssh` still reports the cut connection. With `--pool`,
+the end of standard input ends the whole stream, because TLS can't end one direction alone. One Mac
+may hold 8 streams on a host at once.
+
 ## Scripts
 
 `Scripts/ssh.sh BUNDLE [COMMAND]` runs a command in the guest over SSH, or opens a shell without

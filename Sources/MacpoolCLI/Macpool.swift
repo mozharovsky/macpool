@@ -22,6 +22,7 @@ struct Macpool: AsyncParsableCommand {
             ReleaseCommand.self,
             RenewCommand.self,
             ListCommand.self,
+            ConnectCommand.self,
             HostCommand.self,
             PoolCommand.self,
             ImageCommand.self,
