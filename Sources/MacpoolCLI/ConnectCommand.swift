@@ -72,8 +72,8 @@ struct HostSelection: ParsableArguments {
     ///   - directory: This Mac's data directory.
     /// - Returns: The stream and the lease.
     /// - Throws: ``CommandError/pool(_:)`` when the host is unknown, the connection fails, or the
-    ///   daemon refuses the stream. A paired host's reason passes through
-    ///   ``PeerText/escaped(_:)``.
+    ///   daemon refuses the stream. A paired host's error passes through
+    ///   ``escapingPeerText(_:)``.
     func openStream(to lease: LeaseID, in directory: PoolDirectory) async throws(CommandError) -> GuestStream {
         guard let host else {
             return try await pool { () async throws(PoolError) in
@@ -83,12 +83,31 @@ struct HostSelection: ParsableArguments {
         do {
             let paired = try TrustedHost.named(host, in: directory)
             return try await PoolClient.openStream(to: lease, on: paired, directory: directory)
-        } catch let .daemonRefused(message) {
-            throw .pool(.daemonRefused(message: PeerText.escaped(message)))
-        } catch let .unusableTrustList(path, reason) {
-            throw .pool(.unusableTrustList(path: path, reason: PeerText.escaped(reason)))
         } catch {
-            throw .pool(error)
+            throw .pool(Self.escapingPeerText(error))
+        }
+    }
+
+    /// Escapes the text in an error that a paired host or another Mac may have chosen.
+    ///
+    /// A refusal, a failed greeting, a malformed reply, and an unusable list of paired hosts can
+    /// quote such text. It passes through ``PeerText/escaped(_:)``, and other errors stay as they
+    /// are.
+    ///
+    /// - Parameter error: An error from the connection to a paired host.
+    /// - Returns: The error with that text escaped.
+    static func escapingPeerText(_ error: PoolError) -> PoolError {
+        switch error {
+        case let .daemonRefused(message):
+            .daemonRefused(message: PeerText.escaped(message))
+        case let .connection(path, reason):
+            .connection(path: PeerText.escaped(path), reason: PeerText.escaped(reason))
+        case let .malformedMessage(reason):
+            .malformedMessage(reason: PeerText.escaped(reason))
+        case let .unusableTrustList(path, reason):
+            .unusableTrustList(path: path, reason: PeerText.escaped(reason))
+        default:
+            error
         }
     }
 }

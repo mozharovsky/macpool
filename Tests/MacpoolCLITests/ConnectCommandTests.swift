@@ -123,6 +123,43 @@ struct ConnectCommandTests {
         }
     }
 
+    /// Escapes the text that a paired host chose in each error that can quote it, and keeps the
+    /// errors that quote no such text.
+    @Test func escapesTheTextOfAPairedHost() {
+        let text = "refused\u{1B}[2J\u{7}"
+        let escaped = #"refused\u{1B}[2J\u{7}"#
+        #expect(HostSelection.escapingPeerText(.daemonRefused(message: text)) == .daemonRefused(message: escaped))
+        #expect(HostSelection.escapingPeerText(.connection(path: "lab\u{202E}", reason: text))
+            == .connection(path: #"lab\u{202E}"#, reason: escaped))
+        #expect(HostSelection.escapingPeerText(.malformedMessage(reason: text)) == .malformedMessage(reason: escaped))
+        #expect(HostSelection.escapingPeerText(.unusableTrustList(path: "/pool/hosts.json", reason: text))
+            == .unusableTrustList(path: "/pool/hosts.json", reason: escaped))
+        #expect(HostSelection.escapingPeerText(.unknownLease(id: "0a1b2c3d")) == .unknownLease(id: "0a1b2c3d"))
+    }
+
+    /// Escapes the text of an error on the way to a paired host, such as a list of paired hosts
+    /// that quotes a record's text.
+    @Test func escapesTheErrorsOnTheWayToAPairedHost() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appending(path: "mp-" + UUID().uuidString.prefix(8).lowercased(), directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let directory = PoolDirectory(root: parent.appending(path: "pool", directoryHint: .isDirectory))
+        try TrustList<TrustedHost>().save(to: directory)
+        let list = #"{"version":1,"macs":[{"key":"\u001b[2J\u0007","name":"x","address":"192.0.2.10","port":7480,"#
+            + #""paired_at":"2027-01-15T08:00:00Z"}]}"#
+        try Data(list.utf8).write(to: TrustList<TrustedHost>.file(in: directory))
+        let command = try #require(try Macpool.parseAsRoot(["connect", "--pool", "lab", "0a1b2c3d"]) as? ConnectCommand)
+        let lease = try #require(LeaseID("0a1b2c3d"))
+
+        let error = await #expect(throws: CommandError.self) {
+            try await command.selection.openStream(to: lease, in: directory)
+        }
+        let description = try #require(error?.description)
+        #expect(description.contains(#"\u{1B}[2J\u{7}"#))
+        #expect(!description.unicodeScalars.contains { !PairedMac.isPrintable($0) })
+    }
+
     /// Runs the relay, and resets the stream if the relay is still running after 10 seconds.
     ///
     /// - Parameters:
@@ -203,9 +240,9 @@ private struct StreamPair {
     /// - Throws: An error when the key cannot be created, the listener cannot start, or the
     ///   connection fails.
     static func open(tls: Bool = false) async throws -> StreamPair {
-        let (parameters, clientParameters) = try tls ? tlsParameters() : (NWParameters.tcp, NWParameters.tcp)
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
-        let listener = try NWListener(using: parameters)
+        let parameters = try tls ? tlsParameters() : Parameters(listener: .tcp, client: .tcp)
+        parameters.listener.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        let listener = try NWListener(using: parameters.listener)
         defer { listener.cancel() }
         let (accepted, continuation) = AsyncStream.makeStream(of: MessageChannel.self)
         listener.newConnectionHandler = { connection in
@@ -229,18 +266,27 @@ private struct StreamPair {
         let port = try #require(listener.port)
         let client = try await MessageChannel.connect(
             to: .hostPort(host: .ipv4(.loopback), port: port),
-            using: clientParameters,
+            using: parameters.client,
         )
         var connections = accepted.makeAsyncIterator()
         let peer = try #require(await connections.next())
         return try StreamPair(client: client.takeStream(), peer: peer.takeStream())
     }
 
+    /// The parameters of the two ends of a connection.
+    private struct Parameters {
+        /// The parameters of the end that listens.
+        let listener: NWParameters
+
+        /// The parameters of the end that connects.
+        let client: NWParameters
+    }
+
     /// Creates the parameters of mutual TLS with a key that exists only in the test.
     ///
     /// - Returns: The parameters of the listener and of the client.
     /// - Throws: An error when the key cannot be created.
-    private static func tlsParameters() throws -> (NWParameters, NWParameters) {
+    private static func tlsParameters() throws -> Parameters {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "mp-tls-" + UUID().uuidString.prefix(8).lowercased(), directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -248,7 +294,7 @@ private struct StreamPair {
         let identity = try MacIdentity.loadOrCreate(in: PoolDirectory(root: root))
         let server = try PeerSecurity.parameters(identity: identity, isServer: true) { _ in true }
         let client = try PeerSecurity.parameters(identity: identity, isServer: false) { _ in true }
-        return (server, client)
+        return Parameters(listener: server, client: client)
     }
 
     /// Sends every byte back on ``peer`` and ends its sending direction after the client's end.
