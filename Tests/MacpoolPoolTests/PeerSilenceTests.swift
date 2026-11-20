@@ -5,8 +5,8 @@ import Testing
 /// Tests of how the daemon notices a paired Mac that stopped answering, and of the leases that
 /// such a Mac held.
 ///
-/// The daemon measures silence with the fixture's clock and checks it at each tick, so the tests
-/// advance the clock instead of waiting.
+/// The daemon measures silence with the fixture's awake time and checks it at each tick, so the
+/// tests advance the clock instead of waiting.
 @Suite(.timeLimit(.minutes(1)))
 struct PeerSilenceTests {
     /// Closes the connection of a paired Mac that stopped sending requests, keeps its attached
@@ -55,6 +55,34 @@ struct PeerSilenceTests {
         pool.clock.advance(by: 30)
         await daemon.tick()
         #expect(await daemon.summary().leases.map(\.phase) == [.ready])
+        await daemon.shutdown()
+    }
+
+    /// Counts only the time that this Mac stays awake toward a paired Mac's silence, so the first
+    /// tick after a long sleep or a new system time keeps the connection and its lease.
+    @Test func measuresSilenceOnlyWhileAwake() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        let lease = try await Self.readyLease(on: remote)
+
+        pool.clock.advance(by: 30)
+        await daemon.tick()
+        // A sleep of half an hour, and then a system time that moves back an hour. The lease's
+        // time to live of an hour covers both.
+        pool.clock.jump(by: 1800)
+        await daemon.tick()
+        pool.clock.jump(by: -3600)
+        await daemon.tick()
+        #expect(pool.logs.entries("A paired Mac stopped answering").isEmpty)
+        pool.clock.advance(by: 29)
+        await daemon.tick()
+        #expect(pool.logs.entries("A paired Mac stopped answering").isEmpty)
+        #expect(await daemon.summary().leases.map(\.id) == [lease.id])
+        pool.clock.advance(by: 1)
+        await daemon.tick()
+        #expect(try await isClosed(remote))
+        #expect(pool.logs.entries("A paired Mac stopped answering").count == 1)
         await daemon.shutdown()
     }
 

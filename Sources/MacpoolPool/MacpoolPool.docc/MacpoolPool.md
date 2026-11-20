@@ -131,7 +131,9 @@ sent to the client so far left.
 
 A paired Mac's connection that sends no request for 60 seconds counts as lost, and the host
 closes it. ``PoolClient`` therefore sends a ``PoolRequest/heartbeat`` every
-``PoolClient/heartbeatInterval`` on each connection to a host.
+``PoolClient/heartbeatInterval`` on each connection to a host. The host counts only the time it
+stays awake, so its own sleep or a new system time closes no connection. TCP drops a connection
+whose sent data stays unacknowledged for 60 seconds.
 
 Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout
