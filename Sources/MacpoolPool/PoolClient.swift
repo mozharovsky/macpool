@@ -35,7 +35,8 @@ public enum PoolClient {
     /// the connection, so only its greeting confirms that it accepted the key.
     ///
     /// The connection sends ``PoolRequest/heartbeat`` at `heartbeat` intervals until it closes or
-    /// a ``ByteStream`` takes it.
+    /// a ``ByteStream`` takes it. A heartbeat after ``PoolRequest/connect(_:)`` would reach the
+    /// guest, so open a stream on a connection from another call.
     ///
     /// - Parameters:
     ///   - endpoint: The host's address and port.

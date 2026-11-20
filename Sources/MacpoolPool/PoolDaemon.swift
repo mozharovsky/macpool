@@ -90,6 +90,13 @@ public actor PoolDaemon {
         /// The source of the current time for expiries, restarts, and stop deadlines.
         public var now: @Sendable () -> Date
 
+        /// The source of the time on a clock that stops while this Mac sleeps and ignores changes
+        /// of the system time.
+        ///
+        /// The daemon measures the silence of paired Macs with it, so a sleep of this Mac or a new
+        /// system time closes no connection.
+        public var awakeTime: @Sendable () -> SuspendingClock.Instant
+
         /// The interval between checks of expiries and restart times, or `nil` when only explicit
         /// calls to ``PoolDaemon/tick()`` check them.
         public var tickInterval: Duration?
@@ -136,6 +143,7 @@ public actor PoolDaemon {
         ///     lease, keyed by the name that a client sends.
         ///   - peers: How the daemon listens for paired Macs, or `nil` for the local socket only.
         ///   - now: The source of the current time.
+        ///   - awakeTime: The source of the time on a clock that stops while this Mac sleeps.
         ///   - tickInterval: The interval between checks of expiries and restart times, or `nil`.
         ///   - supervisorConnectTimeout: The longest wait for a new supervisor's socket.
         ///   - reconnectWindow: How long the daemon reconnects to a running supervisor before it
@@ -152,6 +160,7 @@ public actor PoolDaemon {
             offeredSources: [String: String] = [:],
             peers: PeerSettings? = nil,
             now: @escaping @Sendable () -> Date = { Date() },
+            awakeTime: @escaping @Sendable () -> SuspendingClock.Instant = { SuspendingClock().now },
             tickInterval: Duration? = .seconds(1),
             supervisorConnectTimeout: Duration = .seconds(30),
             reconnectWindow: Duration = .seconds(30),
@@ -167,6 +176,7 @@ public actor PoolDaemon {
             self.offeredSources = offeredSources
             self.peers = peers
             self.now = now
+            self.awakeTime = awakeTime
             self.tickInterval = tickInterval
             self.supervisorConnectTimeout = supervisorConnectTimeout
             self.reconnectWindow = reconnectWindow
@@ -184,8 +194,9 @@ public actor PoolDaemon {
         let channel: MessageChannel
         /// Who the client acts for.
         let owner: LeaseOwner
-        /// The time of the client's last request, or of its connection before the first request.
-        var lastRequest: Date
+        /// The awake time of the client's last request, or of its connection before the first
+        /// request.
+        var lastRequest: SuspendingClock.Instant
     }
 
     /// A stream between a client and the SSH server of a lease's guest.
@@ -295,9 +306,11 @@ public actor PoolDaemon {
     /// can hold this way.
     static let connectionsPerPeer = 4
 
-    /// The longest time that a paired Mac's connection may go without a request.
+    /// The longest time that a paired Mac's connection may go without a request while this Mac is
+    /// awake.
     ///
-    /// ``tick()`` closes a connection that stays silent this long.
+    /// ``tick()`` closes a connection that stays silent this long on
+    /// ``Configuration/awakeTime``.
     static let peerSilenceLimit = Duration.seconds(60)
 
     /// The most connections of Macs that pair at once.
@@ -580,7 +593,7 @@ public actor PoolDaemon {
         }
         let client = ClientID(value: nextClient)
         nextClient += 1
-        clients[client] = ClientConnection(channel: channel, owner: owner, lastRequest: configuration.now())
+        clients[client] = ClientConnection(channel: channel, owner: owner, lastRequest: configuration.awakeTime())
         Task { await self.serve(client, owner: owner, on: channel) }
     }
 
@@ -1018,7 +1031,7 @@ public actor PoolDaemon {
             let request: PoolRequest?
             do {
                 request = try await channel.receive(PoolRequest.self)
-                clients[client]?.lastRequest = configuration.now()
+                clients[client]?.lastRequest = configuration.awakeTime()
             } catch {
                 // The error may repeat text from the line. If a paired Mac's line held a host path,
                 // visible(_:to:) would replace the reply, and the change would confirm the path. A
@@ -1062,10 +1075,10 @@ public actor PoolDaemon {
     ///
     /// - Parameter now: The current time.
     private func closeSilentPeers(at now: Date) {
-        let limit = Self.peerSilenceLimit / .seconds(1)
+        let awake = configuration.awakeTime()
         for (client, connection) in clients.sorted(by: { $0.key < $1.key }) {
             guard case let .client(key) = connection.owner,
-                  now.timeIntervalSince(connection.lastRequest) >= limit else {
+                  connection.lastRequest.duration(to: awake) >= Self.peerSilenceLimit else {
                 continue
             }
             configuration.logger.log(
@@ -1088,8 +1101,8 @@ public actor PoolDaemon {
     ///
     /// Before each request of a paired client, the daemon reads the client's record again,
     /// because the list may have changed since the client connected. If the list no longer names
-    /// the client or blocks it, the daemon refuses the request and ends the connection. If the
-    /// list cannot be read, the daemon refuses only the request.
+    /// the client or blocks it, the daemon refuses the request and ends the connection and the
+    /// Mac's streams. If the list cannot be read, the daemon refuses only the request.
     ///
     /// - Parameters:
     ///   - request: The request.
@@ -1117,6 +1130,7 @@ public actor PoolDaemon {
             }
             guard record != nil else {
                 reply(.failure(Self.notAcceptedReason), to: client)
+                endStreams { $0.owner == owner }
                 return false
             }
         }
