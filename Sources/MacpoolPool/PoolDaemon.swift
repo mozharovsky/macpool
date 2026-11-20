@@ -1886,14 +1886,16 @@ public actor PoolDaemon {
         case let .success(connection):
             guest = connection
         case let .failure(error):
-            streams[number] = nil
             configuration.logger.warning("A lease's guest refused a stream", metadata: [
                 "lease": "\(open.lease)",
                 "reason": "\(error)",
             ])
             let reason = open.owner == .local ? error.description
                 : "the guest's SSH server did not accept the connection"
+            // A client that reads no replies can hold the send. Until it ends, the limit counts
+            // the stream and a reset of the lease's streams reaches it.
             await Self.finish(open.client, sending: .failure(reason))
+            streams[number] = nil
             return
         }
         open.guest = guest
