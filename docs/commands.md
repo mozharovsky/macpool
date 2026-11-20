@@ -189,6 +189,10 @@ environment. The pipe hands out the password at most twice, once for each way `s
 `ssh` joins the words after `--` with spaces, and the guest's shell splits them again. Quote them as
 you would for `ssh`. The status is 255 when `ssh` itself fails.
 
+All guests on a host share the host's NAT network. A shell in a guest, or a port that `ssh -L` or
+`ssh -D` forwards, therefore reaches the other guests on the host, the host's own services on that
+network, and the host's local network. Pair only Macs that you would let onto the host's network.
+
 ## Scripts
 
 `Scripts/ssh.sh BUNDLE [COMMAND]` runs a command in the guest over SSH, or opens a shell without
