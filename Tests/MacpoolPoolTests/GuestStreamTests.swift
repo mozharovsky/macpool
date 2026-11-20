@@ -1,5 +1,6 @@
 import Foundation
 @testable import MacpoolPool
+import MacpoolVM
 import Network
 import Synchronization
 import Testing
@@ -106,7 +107,9 @@ struct GuestStreamTests {
     }
 
     /// Refuses a stream to another Mac's lease, to a lease that is not ready, and on a connection
-    /// that holds a lease. The daemon keeps serving the connection after each refusal.
+    /// that holds a lease. The daemon keeps serving the connection after each refusal. The access
+    /// to a guest takes the same checks of the owner and the phase, but a connection that holds a
+    /// lease may ask for it.
     @Test func refusesStreamsThatCannotOpen() async throws {
         let guest = try await EchoServer()
         defer { guest.close() }
@@ -117,24 +120,31 @@ struct GuestStreamTests {
         let ready = try await Self.readyLease(on: holder)
 
         let bob = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("b"))
-        try bob.send(PoolRequest.connect(ready.id))
-        #expect(try await next(bob) == .failure(PoolError.unknownLease(id: ready.id.rawValue).description))
+        let unknown = PoolError.unknownLease(id: ready.id.rawValue)
+        for request in [PoolRequest.connect(ready.id), .access(ready.id)] {
+            try bob.send(request)
+            #expect(try await next(bob) == .failure(unknown.description))
+        }
         try holder.send(PoolRequest.connect(ready.id))
         let busy = PoolError.invalidRequest(
             reason: "a connection that waits for or holds a lease cannot carry a stream. Open another connection",
         )
         #expect(try await next(holder) == .failure(busy.description))
+        try holder.send(PoolRequest.access(ready.id))
+        #expect(try await next(holder) == .access(PoolFixture.guestAccess()))
 
         let gate = Gate()
         pool.launcher.plan(FakeBehavior(listenGate: gate))
         try holder.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 3600)))
         let starting = try #require(await next(holder).lease)
         let idle = try await pool.pairedClient(of: daemon, owner: alice)
-        try idle.send(PoolRequest.connect(starting.id))
         let notReady = PoolError.invalidRequest(
             reason: "lease \(starting.id) is starting, and only a ready lease takes connections",
         )
-        #expect(try await next(idle) == .failure(notReady.description))
+        for request in [PoolRequest.connect(starting.id), .access(starting.id)] {
+            try idle.send(request)
+            #expect(try await next(idle) == .failure(notReady.description))
+        }
         try idle.send(PoolRequest.status)
         guard case .status = try await next(idle) else {
             Issue.record("the daemon stopped serving the connection after a refusal")
@@ -142,6 +152,70 @@ struct GuestStreamTests {
         }
         #expect(pool.guestAddresses.all.isEmpty)
         gate.open()
+        await daemon.shutdown()
+    }
+
+    /// Gives the owner of a ready lease the guest's access over the local socket and over TLS,
+    /// without connecting to the guest.
+    @Test func givesTheOwnerTheGuestsAccess() async throws {
+        let guest = try await EchoServer()
+        defer { guest.close() }
+        let pool = try PoolFixture()
+        let mac = try RemoteMac(trustedBy: pool)
+        let daemon = try await pool.start(
+            offeredSources: ["base": pool.source],
+            peers: loopbackSettings(),
+            guestSSH: guest.endpoint,
+        )
+        let local = try await pool.readyLease(pool.terms())
+        let host = try await mac.host(of: daemon)
+        let granted = try await mac.readyLease(on: host)
+
+        let expected = try PoolFixture.guestAccess()
+        #expect(try await PoolClient.guestAccess(to: local.lease.id, in: pool.directory) == expected)
+        #expect(try await PoolClient.guestAccess(to: granted.lease.id, on: host, directory: mac.directory) == expected)
+        #expect(pool.guestAddresses.all.isEmpty)
+        #expect(guest.ends.isEmpty)
+        #expect(await daemon.summary().leases.map(\.phase) == [.ready, .ready])
+        granted.client.close()
+        local.client.close()
+        await daemon.shutdown()
+    }
+
+    /// Refuses the access to a guest whose account the daemon cannot read or `ssh` cannot use, or
+    /// whose lease pins no host key. A paired Mac's failure names no host path.
+    @Test func refusesAnAccessThatTheBundleCannotGive() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let local = try await pool.readyLease(pool.terms())
+        let bundle = pool.directory.bundle(for: local.lease.id)
+        try GuestAccount(fullName: "macpool", username: "-oProxyCommand=x", password: "secret")
+            .write(to: bundle.guestAccountFile)
+        let unusable = PoolError.invalidRequest(
+            reason: "the account of the guest of lease \(local.lease.id) cannot log in over SSH",
+        )
+        #expect(await Self.refusal(of: local.lease.id, in: pool) == unusable.description)
+        let unpinned = PoolError.invalidRequest(reason: "lease \(local.lease.id) pins no SSH host key for its guest")
+        try Data().write(to: bundle.knownHostsFile)
+        #expect(await Self.refusal(of: local.lease.id, in: pool) == unpinned.description)
+        try FileManager.default.removeItem(at: bundle.knownHostsFile)
+        #expect(await Self.refusal(of: local.lease.id, in: pool) == unpinned.description)
+        try FileManager.default.removeItem(at: bundle.guestAccountFile)
+        #expect(await Self.refusal(of: local.lease.id, in: pool)?.contains("guest-account.json") == true)
+
+        let alice = try LeaseLedgerTests.paired("a")
+        let holder = try await pool.pairedClient(of: daemon, owner: alice)
+        let ready = try await Self.readyLease(on: holder)
+        try FileManager.default.removeItem(at: pool.directory.bundle(for: ready.id).guestAccountFile)
+        let streamer = try await pool.pairedClient(of: daemon, owner: alice)
+        try streamer.send(PoolRequest.access(ready.id))
+        let unreadable = PoolError.invalidRequest(
+            reason: "the host cannot read the account of the guest of lease \(ready.id)",
+        )
+        #expect(try await next(streamer) == .failure(unreadable.description))
+        #expect(pool.logs.entries("The access to a lease's guest cannot be read").count == 2)
+        #expect(pool.logs.entries("A reply to a paired Mac named a host path").isEmpty)
+        #expect(pool.guestAddresses.all.isEmpty)
         await daemon.shutdown()
     }
 
@@ -331,6 +405,23 @@ struct GuestStreamTests {
         try channel.send(PoolRequest.connect(lease.id))
         #expect(try await next(channel) == .ready(lease))
         return try channel.takeStream()
+    }
+
+    /// Asks the daemon on this Mac for an access to a guest that it must refuse.
+    ///
+    /// - Parameters:
+    ///   - lease: The lease.
+    ///   - pool: The fixture.
+    /// - Returns: The daemon's reason, or `nil` when the access came or another error came.
+    private static func refusal(of lease: LeaseID, in pool: PoolFixture) async -> String? {
+        do throws(PoolError) {
+            _ = try await PoolClient.guestAccess(to: lease, in: pool.directory)
+            return nil
+        } catch let .daemonRefused(message) {
+            return message
+        } catch {
+            return nil
+        }
     }
 
     /// Sends bytes through a stream while it reads the same number of bytes back.

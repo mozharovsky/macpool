@@ -1190,6 +1190,8 @@ public actor PoolDaemon {
                 try openStream(to: id, for: client, owner: owner)
                 // The stream owns the connection now, so serve(_:owner:on:) stops reading it.
                 return false
+            case let .access(id):
+                try reply(.access(guestAccess(of: id, for: owner)), to: client)
             case .heartbeat:
                 break
             }
@@ -1835,6 +1837,43 @@ public actor PoolDaemon {
         ])
         let ready = visible(.ready(target.lease), to: owner)
         Task { await self.connectStream(number, to: target.address, replying: ready) }
+    }
+
+    /// Reads the account and the pinned host keys of a ready lease's guest from the lease's
+    /// bundle.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - owner: Who asks for the access.
+    /// - Returns: The access that the reply to ``PoolRequest/access(_:)`` carries.
+    /// - Throws: The errors of ``LeaseLedger/streamTarget(_:for:)``, or
+    ///   ``PoolError/invalidRequest(reason:)`` when the bundle pins no host key, when the account
+    ///   cannot log in over SSH, or when the account or the `known_hosts` file cannot be read. In
+    ///   the last case the local user gets ``PoolError/library(_:)`` with the path instead.
+    private func guestAccess(of id: LeaseID, for owner: LeaseOwner) throws(PoolError) -> GuestAccess {
+        // The same checks as for a stream keep another Mac's lease and its phase hidden.
+        _ = try ledger.streamTarget(id, for: owner)
+        let bundle = configuration.directory.bundle(for: id)
+        let account: GuestAccount
+        let keys: [HostKey]?
+        do throws(MacpoolError) {
+            account = try GuestAccount.load(from: bundle.guestAccountFile)
+            keys = try bundle.pinnedHostKeys()
+        } catch {
+            configuration.logger.warning("The access to a lease's guest cannot be read", metadata: [
+                "lease": "\(id)",
+                "reason": "\(error)",
+            ])
+            throw owner == .local ? .library(error)
+                : .invalidRequest(reason: "the host cannot read the account of the guest of lease \(id)")
+        }
+        guard let keys, !keys.isEmpty else {
+            throw .invalidRequest(reason: "lease \(id) pins no SSH host key for its guest")
+        }
+        guard let access = GuestAccess(username: account.username, password: account.password, hostKeys: keys) else {
+            throw .invalidRequest(reason: "the account of the guest of lease \(id) cannot log in over SSH")
+        }
+        return access
     }
 
     /// Connects a stream to its guest's SSH server and relays bytes until the stream ends.
@@ -2712,7 +2751,7 @@ private extension PoolReply {
     /// Every text in the reply.
     var texts: [String] {
         switch self {
-        case .queued, .released, .wrongCode, .forgotten:
+        case .queued, .released, .wrongCode, .forgotten, .access:
             []
         case let .starting(lease), let .ready(lease), let .renewed(lease):
             lease.texts

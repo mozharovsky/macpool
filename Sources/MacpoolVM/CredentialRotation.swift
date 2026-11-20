@@ -275,7 +275,7 @@ public enum CredentialRotation {
     /// - Parameter username: The account's short user name.
     /// - Returns: `true` when the name is non-empty and holds only ASCII letters, digits, `.`, `_`,
     ///   and `-`, and does not start with `-`.
-    static func isPlainUsername(_ username: String) -> Bool {
+    package static func isPlainUsername(_ username: String) -> Bool {
         guard let first = username.first, first != "-" else {
             return false
         }

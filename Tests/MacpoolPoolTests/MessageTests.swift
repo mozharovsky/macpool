@@ -1,5 +1,6 @@
 import Foundation
 @testable import MacpoolPool
+import MacpoolVM
 import Synchronization
 import Testing
 
@@ -47,15 +48,17 @@ struct MessageTests {
             .forget(endLeases: true),
             .heartbeat,
             .connect(id),
+            .access(id),
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
             #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: data) == request)
         }
-        let replies: [PoolReply] = [
+        let replies: [PoolReply] = try [
             .queued(position: 2),
             .starting(lease),
             .ready(lease),
+            .access(PoolFixture.guestAccess()),
             .restarting(lease, reason: "boom"),
             .ended(id, reason: "the lease expired"),
             .renewed(lease),
@@ -96,6 +99,62 @@ struct MessageTests {
         for outcome in outcomes {
             let data = try MessageCoding.encoder.encode(SupervisorStatus(phase: .exited, outcome: outcome))
             #expect(try MessageCoding.decoder.decode(SupervisorStatus.self, from: data).outcome == outcome)
+        }
+    }
+
+    /// Encodes the guest's access with its password and keeps the password out of every
+    /// description of a reply that carries it.
+    @Test func hidesTheGuestsPasswordInDescriptions() throws {
+        let access = try PoolFixture.guestAccess()
+        let reply = PoolReply.access(access)
+        let text = try String(decoding: MessageCoding.encoder.encode(reply), as: UTF8.self)
+        let key = try #require(access.hostKeys.first)
+        #expect(text.contains(
+            #""guest":{"host_keys":["\#(key.base64)"],"password":"\#(access.password)","username":"macpool"}"#,
+        ))
+        var dumped = ""
+        dump(reply, to: &dumped)
+        for description in ["\(reply)", String(reflecting: reply), dumped] {
+            #expect(!description.contains(access.password))
+            #expect(description.contains(key.fingerprint))
+        }
+    }
+
+    /// Accepts the user names and the passwords that `ssh` can use and rejects the others, both
+    /// when it creates an access and when it decodes one.
+    @Test func rejectsAnAccountThatSSHCannotUse() throws {
+        let keys = try [PoolFixture.hostKey(filledWith: 1)]
+        let accepted = [("ci.runner_2-a", "pass word \"quoted\" $HOME"), ("A", "")]
+        let rejected = [
+            ("", "secret"), ("-oProxyCommand=x", "secret"), ("a b", "secret"), ("a\nb", "secret"),
+            ("ä", "secret"), ("macpool", "line\nbreak"), ("macpool", "carriage\rreturn"),
+            ("macpool", "nul\u{0}byte"),
+        ]
+        for (username, password) in accepted {
+            let access = try #require(GuestAccess(username: username, password: password, hostKeys: keys))
+            let data = try MessageCoding.encoder.encode(access)
+            #expect(try MessageCoding.decoder.decode(GuestAccess.self, from: data) == access)
+        }
+        for (username, password) in rejected {
+            #expect(GuestAccess(username: username, password: password, hostKeys: keys) == nil)
+            let raw = RawAccess(username: username, password: password, hostKeys: keys.map(\.base64))
+            let json = try JSONEncoder().encode(raw)
+            #expect(throws: DecodingError.self) {
+                try MessageCoding.decoder.decode(GuestAccess.self, from: json)
+            }
+        }
+        #expect(GuestAccess(username: "macpool", password: "secret", hostKeys: []) == nil)
+    }
+
+    /// Rejects an access without a host key or with a key that is not an Ed25519 key blob.
+    @Test func rejectsAnAccessWithoutAValidHostKey() throws {
+        let other = Data("ssh-rsa".utf8).base64EncodedString()
+        let valid = try PoolFixture.hostKey(filledWith: 1).base64
+        for keys in ["[]", #"["\#(other)"]"#, #"["\#(valid)","x"]"#] {
+            let json = #"{"username":"macpool","password":"secret","host_keys":\#(keys)}"#
+            #expect(throws: DecodingError.self) {
+                try MessageCoding.decoder.decode(GuestAccess.self, from: Data(json.utf8))
+            }
         }
     }
 
@@ -436,6 +495,28 @@ struct MessageTests {
         early.close()
         late.close()
     }
+}
+
+/// The JSON of a ``GuestAccess`` without the checks of its initializer.
+private struct RawAccess: Encodable {
+    /// The JSON keys of ``GuestAccess``.
+    private enum CodingKeys: String, CodingKey {
+        /// The user name.
+        case username
+        /// The password.
+        case password
+        /// The base64 blobs of the host keys.
+        case hostKeys = "host_keys"
+    }
+
+    /// The user name.
+    let username: String
+
+    /// The password.
+    let password: String
+
+    /// The base64 blobs of the host keys.
+    let hostKeys: [String]
 }
 
 /// A record of stop commands that any thread can update.

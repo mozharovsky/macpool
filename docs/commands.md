@@ -170,6 +170,30 @@ longer accepts it, and when the daemon stops. Over the local socket such an end 
 the end of standard input ends the whole stream, because TLS can't end one direction alone. One Mac
 may hold 8 streams on a host at once.
 
+## ssh
+
+`macpool ssh LEASE` logs in to a ready lease's guest with `ssh` and opens a shell. A command after
+`--` runs in the guest instead, and `macpool ssh` exits with its status. It takes the same
+`--data-dir` and `--pool` options as `connect`.
+
+```sh
+macpool ssh --pool lab 0a1b2c3d -- sw_vers
+```
+
+The command first asks the daemon for the guest's account and host key. The daemon reads them from
+the lease's bundle and doesn't connect to the guest. The command then runs `/usr/bin/ssh` through
+`macpool connect`. `ssh` accepts only the guest's pinned host key, logs in with the account's
+password, and ignores your SSH configuration and agent. The password reaches `ssh` through a named
+pipe in a private temporary directory, so it never appears in a file, a process argument, or the
+environment. The pipe hands out the password at most twice, once for each way `ssh` asks for it.
+
+`ssh` joins the words after `--` with spaces, and the guest's shell splits them again. Quote them as
+you would for `ssh`. The status is 255 when `ssh` itself fails.
+
+All guests on a host share the host's NAT network. A shell in a guest, or a port that `ssh -L` or
+`ssh -D` forwards, therefore reaches the other guests on the host, the host's own services on that
+network, and the host's local network. Pair only Macs that you would let onto the host's network.
+
 ## Scripts
 
 `Scripts/ssh.sh BUNDLE [COMMAND]` runs a command in the guest over SSH, or opens a shell without
