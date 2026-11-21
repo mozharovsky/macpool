@@ -103,6 +103,10 @@ doesn't count the time it sleeps. `lease` tries until the lease expires, with pa
 seconds, so a host that sleeps doesn't end the lease. Before the first `ready`, `lease` tries for
 60 seconds.
 
+`lease` stops at once if the host presents another key or greets with another protocol version.
+It also stops if the host answers but refuses this Mac for 120 seconds, because an awake host has
+ended the lease by then.
+
 If the host doesn't confirm the release when the command after `--` ends, `lease` prints a warning
 and still exits with the command's status. At Control-C, it fails instead. The host ends the lease
 60 seconds after it notices the closed connection.

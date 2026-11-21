@@ -44,9 +44,13 @@ struct PeerConnectionTests {
         let endpoint = try await loopback(listeningPort(of: daemon))
 
         let stranger = try makeIdentity()
-        let reason = try #require(await refusal { () async throws(PoolError) in
+        let error = await #expect(throws: PoolError.self) {
             try await PoolClient.connect(to: endpoint, as: stranger, hostKey: hostKey)
-        })
+        }
+        guard case let .greetingFailed(_, reason)? = error else {
+            Issue.record("unexpected error \(String(describing: error))")
+            return
+        }
         #expect(reason.contains("does not accept this Mac's key"), "\(reason)")
         #expect(fixture.logs.entries("A paired Mac connected").isEmpty)
         await daemon.shutdown()
@@ -78,10 +82,13 @@ struct PeerConnectionTests {
         let endpoint = try await loopback(listeningPort(of: daemon))
         let pinned = try KeyFingerprint(digest: makeIdentity().keyDigest)
 
-        let reason = try #require(await refusal { () async throws(PoolError) in
+        await #expect(throws: PoolError.hostKeyMismatch(
+            path: "\(endpoint)",
+            presented: hostKey.rawValue,
+            expected: pinned.rawValue,
+        )) {
             try await PoolClient.connect(to: endpoint, as: client, hostKey: pinned)
-        })
-        #expect(reason == "the host presented the key \(hostKey) instead of \(pinned)")
+        }
         #expect(fixture.logs.entries("A paired Mac connected").isEmpty)
         await daemon.shutdown()
     }
@@ -173,11 +180,38 @@ struct PeerConnectionTests {
 
         let endpoint = try loopback(listener.port)
         let hostKey = KeyFingerprint(digest: host.keyDigest)
-        let reason = try #require(await refusal { () async throws(PoolError) in
-            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
-        })
         let impostorKey = KeyFingerprint(digest: impostor.keyDigest)
-        #expect(reason == "the host presented the key \(impostorKey) instead of \(hostKey)")
+        await #expect(throws: PoolError.hostKeyMismatch(
+            path: "\(endpoint)",
+            presented: impostorKey.rawValue,
+            expected: hostKey.rawValue,
+        )) {
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: hostKey)
+        }
+    }
+
+    /// Refuses a host that greets with another protocol version.
+    @Test func refusesAHostThatGreetsWithAnotherVersion() async throws {
+        let client = try makeIdentity()
+        let host = try makeIdentity()
+        let parameters = try PeerSecurity.parameters(identity: host, isServer: true) { _ in true }
+        var greeting = try JSONEncoder().encode(HostGreeting(version: 99, role: .host))
+        greeting.append(UInt8(ascii: "\n"))
+        let line = greeting
+        let listener = try await LoopbackListener(using: parameters) { connection in
+            connection.stateUpdateHandler = { state in
+                if case .ready = state {
+                    connection.send(content: line, completion: .idempotent)
+                }
+            }
+            connection.start(queue: DispatchQueue(label: "macpool.test.version"))
+        }
+        defer { listener.close() }
+
+        let endpoint = try loopback(listener.port)
+        await #expect(throws: PoolError.protocolMismatch(path: "\(endpoint)", version: 99, role: "host")) {
+            try await PoolClient.connect(to: endpoint, as: client, hostKey: KeyFingerprint(digest: host.keyDigest))
+        }
     }
 
     /// Reads the list of paired clients during every handshake, so a change applies to the next
@@ -1315,12 +1349,13 @@ private func accessControlList(at place: URL) throws(PoolError) -> FileExposure?
 /// Connects and returns why the connection failed.
 ///
 /// - Parameter connect: Opens the connection.
-/// - Returns: The reason of the failure, or `nil` when the connection opened.
+/// - Returns: The reason of a failed connection or greeting, the description of another error, or
+///   `nil` when the connection opened.
 func refusal(_ connect: () async throws(PoolError) -> MessageChannel) async -> String? {
     do {
         try await connect().close()
         return nil
-    } catch let .connection(_, reason) {
+    } catch let .connection(_, reason), let .greetingFailed(_, reason) {
         return reason
     } catch {
         return error.description

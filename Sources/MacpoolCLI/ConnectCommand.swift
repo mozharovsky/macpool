@@ -158,6 +158,16 @@ struct HostSelection: ParsableArguments {
             .daemonRefused(message: PeerText.escaped(message))
         case let .connection(path, reason):
             .connection(path: PeerText.escaped(path), reason: PeerText.escaped(reason))
+        case let .greetingFailed(path, reason):
+            .greetingFailed(path: PeerText.escaped(path), reason: PeerText.escaped(reason))
+        case let .hostKeyMismatch(path, presented, expected):
+            .hostKeyMismatch(
+                path: PeerText.escaped(path),
+                presented: PeerText.escaped(presented),
+                expected: PeerText.escaped(expected),
+            )
+        case let .protocolMismatch(path, version, role):
+            .protocolMismatch(path: PeerText.escaped(path), version: version, role: PeerText.escaped(role))
         case let .malformedMessage(reason):
             .malformedMessage(reason: PeerText.escaped(reason))
         case let .unusableTrustList(path, reason):

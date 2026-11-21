@@ -59,18 +59,59 @@ struct LeaseCommandTests {
         #expect(clock.attempts.allSatisfy { $0 <= expiry })
     }
 
-    /// Stops at once when another attempt cannot change the failure, such as a host that the list
-    /// of paired hosts no longer names.
-    @Test func stopsReattachingOnALastingFailure() async {
+    /// Stops at once when another attempt cannot change the failure. A host presents a new key
+    /// after `macpool host new-key`.
+    @Test(arguments: [
+        CommandError.pool(.invalidRequest(reason: "no paired host has the name or key lab")),
+        CommandError.pool(.hostKeyMismatch(path: "192.0.2.10:7480", presented: "b", expected: "a")),
+        CommandError.pool(.protocolMismatch(path: "192.0.2.10:7480", version: 2, role: "host")),
+    ])
+    func stopsReattachingOnALastingFailure(failure: CommandError) async {
         let clock = ReattachClock()
-        let unknown = CommandError.pool(.invalidRequest(reason: "no paired host has the name or key lab"))
 
-        await #expect(throws: unknown) {
+        await #expect(throws: failure) {
             try await clock.schedule(until: clock.start.addingTimeInterval(3600)).run { () throws(CommandError) in
-                throw unknown
+                throw failure
             }
         }
         #expect(clock.pauses.isEmpty)
+    }
+
+    /// Stops when an awake host refuses every attempt for 120 seconds instead of trying until the
+    /// lease expires. A host refuses this way after it revokes this Mac.
+    @Test func stopsReattachingWhenAnAwakeHostRefusesFor120Seconds() async throws {
+        let clock = ReattachClock()
+
+        await #expect(throws: CommandError.reattachRefused(
+            seconds: 120,
+            reason: ReattachClock.refusal.description,
+        )) {
+            try await clock.schedule(until: clock.start.addingTimeInterval(3600)).run { () throws(CommandError) in
+                try clock.attempt(cost: 0) { _ in ReattachClock.refusal }
+            }
+        }
+        let stopped = clock.now.timeIntervalSince(clock.start)
+        #expect(stopped >= 120)
+        #expect(stopped < 120 + ReattachSchedule.longestPause / .seconds(1))
+    }
+
+    /// Keeps trying through refusals shorter than 120 seconds. A failure that does not reach the
+    /// host, such as a sleep of the host, starts the count again.
+    @Test func keepsReattachingThroughShortRefusals() async throws {
+        let clock = ReattachClock()
+
+        let attached = try await clock.schedule(until: clock.start.addingTimeInterval(3600)).run {
+            () throws(CommandError) in
+            try clock.attempt(cost: 0) { elapsed in
+                switch elapsed {
+                case ..<100: ReattachClock.refusal
+                case ..<400: ReattachClock.failure
+                case ..<500: ReattachClock.refusal
+                default: nil
+                }
+            }
+        }
+        #expect(try #require(attached).timeIntervalSince(clock.start) >= 500)
     }
 
     /// Fails within a few seconds when a paired host does not answer a release, and says that the
@@ -121,8 +162,14 @@ private final class ReattachClock: Sendable {
         var attempts: [Date] = []
     }
 
-    /// The error of a failed attempt.
+    /// The error of an attempt that does not reach the host.
     static let failure = CommandError.pool(.connection(path: "192.0.2.10:7480", reason: "no answer within 10 seconds"))
+
+    /// The error of an attempt that an awake host refuses after the handshake.
+    static let refusal = CommandError.pool(.greetingFailed(
+        path: "192.0.2.10:7480",
+        reason: "the host closed the connection, so it does not accept this Mac's key",
+    ))
 
     /// The time at which every clock starts.
     private static let origin = Date(timeIntervalSince1970: 1_800_000_000)
@@ -171,16 +218,30 @@ private final class ReattachClock: Sendable {
     /// - Returns: The time at which the attempt succeeded.
     /// - Throws: ``failure`` when the attempt starts before `wake`.
     func attempt(failingBefore wake: Date) throws(CommandError) -> Date {
-        let started = state.withLock { state in
+        let awake = wake.timeIntervalSince(start)
+        return try attempt { $0 < awake ? Self.failure : nil }
+    }
+
+    /// Records an attempt whose outcome depends on its start.
+    ///
+    /// - Parameters:
+    ///   - cost: How far a failed attempt moves the clock, in seconds.
+    ///   - outcome: Returns the error of an attempt that starts the given number of seconds after
+    ///     ``start``, or `nil` for an attempt that succeeds.
+    /// - Returns: The time at which the attempt succeeded.
+    /// - Throws: The error that `outcome` returns.
+    func attempt(cost: TimeInterval = 10, _ outcome: (TimeInterval) -> CommandError?) throws(CommandError) -> Date {
+        let (started, failure) = state.withLock { state in
             let started = state.now
             state.attempts.append(started)
-            if started < wake {
-                state.now += 10
+            let failure = outcome(started.timeIntervalSince(Self.origin))
+            if failure != nil {
+                state.now += cost
             }
-            return started
+            return (started, failure)
         }
-        guard started >= wake else {
-            throw Self.failure
+        if let failure {
+            throw failure
         }
         return started
     }
