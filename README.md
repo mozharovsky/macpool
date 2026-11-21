@@ -139,9 +139,10 @@ replacement fails.
 
 ## Status
 
-macpool works on one Mac today. These parts don't exist yet.
+These parts don't exist yet.
 
-- One Mac can't lease a VM from another.
+- The command line can't pair two Macs. [`--pool`](docs/leases.md#leasing-from-another-mac) works
+  only with a host that a program paired through `MacpoolPool`.
 - A command reaches a guest only over SSH. macpool has no agent inside the guest.
 - Prepared VMs have no layers. Each one is a full macOS install.
 - There's no packaged release. You build macpool from source.
