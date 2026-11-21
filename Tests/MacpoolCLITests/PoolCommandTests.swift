@@ -97,16 +97,25 @@ struct PoolCommandTests {
         #expect(supervise.sharing.sharedDirectory == nil)
     }
 
-    /// Sends a source's name as typed to a paired host, and refuses a share of this Mac's
-    /// directory with a lease on another Mac.
+    /// Sends a source's name as typed to a paired host, and refuses a path as the source and a
+    /// share of this Mac's directory with a lease on another Mac.
     @Test func parsesLeasesFromAPairedHost() throws {
         let lease = try #require(
             try Macpool.parseAsRoot(["lease", "--pool", "lab", "--from", "base", "--ttl", "600"]) as? LeaseCommand,
         )
         #expect(lease.selection.host == "lab")
         #expect(lease.terms == LeaseTerms(source: "base", timeToLive: 600))
-        #expect(throws: (any Error).self) {
+        let share = #expect(throws: (any Error).self) {
             try Macpool.parseAsRoot(["lease", "--pool", "lab", "--from", "base", "--share", "/share"])
+        }
+        #expect(share.map(Macpool.message(for:))
+            == "--share cannot share a directory of this Mac with a lease on another Mac.")
+        for source in ["/vms/base", "vms/base"] {
+            let path = #expect(throws: (any Error).self) {
+                try Macpool.parseAsRoot(["lease", "--pool", "lab", "--from", source])
+            }
+            #expect(path.map(Macpool.message(for:))
+                == "With --pool, --from takes the name of a source that the host offers, not a path.")
         }
         let release = try #require(try Macpool.parseAsRoot(["release", "--pool", "lab", "0a1b2c3d"]) as? ReleaseCommand)
         #expect(release.selection.host == "lab")

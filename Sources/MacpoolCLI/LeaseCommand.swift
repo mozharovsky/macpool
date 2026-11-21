@@ -99,16 +99,23 @@ struct LeaseCommand: AsyncParsableCommand {
     )
     var command: [String] = []
 
-    /// Rejects a detached lease with a command and out-of-range durations.
+    /// Rejects contradictory options, a path as the source on a paired host, and out-of-range
+    /// durations.
     ///
-    /// - Throws: `ValidationError` when the options contradict each other or a duration is out of
-    ///   range.
+    /// A paired host knows its sources by name. The check keeps a path on this Mac from reaching
+    /// the host.
+    ///
+    /// - Throws: `ValidationError` when the options contradict each other, `--from` holds a `/`
+    ///   with `--pool`, or a duration is out of range.
     func validate() throws {
         guard !(detach && !command.isEmpty) else {
             throw ValidationError("--detach cannot run a command.")
         }
         guard selection.host == nil || sharing.share == nil else {
             throw ValidationError("--share cannot share a directory of this Mac with a lease on another Mac.")
+        }
+        guard selection.host == nil || !from.contains("/") else {
+            throw ValidationError("With --pool, --from takes the name of a source that the host offers, not a path.")
         }
         guard (1 ... LeaseTerms.maximumTimeToLive).contains(timeToLive) else {
             throw ValidationError("--ttl takes 1 to \(LeaseTerms.maximumTimeToLive) seconds.")

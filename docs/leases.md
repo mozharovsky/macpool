@@ -83,9 +83,10 @@ daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as w
 command line can't pair Macs yet, so only a host that a program built on `MacpoolPool` paired works
 here.
 
-With `--pool`, `--from` names a source that the host offers, and `--share` isn't allowed. The host
-shows this Mac only its own leases and no paths on its disk. `bundle=` and `address=` stay empty,
-and so do `MACPOOL_BUNDLE` and `MACPOOL_ADDRESS`. Reach the guest with `macpool ssh --pool`.
+With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
+`--share` isn't allowed. The host shows this Mac only its own leases and no paths on its disk.
+`bundle=` and `address=` stay empty, and so do `MACPOOL_BUNDLE` and `MACPOOL_ADDRESS`. Reach the
+guest with `macpool ssh --pool`.
 
 ```sh
 $macpool lease --pool lab --from base --detach
