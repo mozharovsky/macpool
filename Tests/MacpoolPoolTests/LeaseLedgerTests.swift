@@ -41,12 +41,23 @@ struct LeaseLedgerTests {
         LeaseTerms(source: "/vms/base", timeToLive: 600, priority: priority, restartPolicy: restart, detached: detached)
     }
 
+    /// The awake time at which every test starts.
+    static let awakeStart = SuspendingClock().now
+
     /// Returns the time a number of seconds after the start.
     ///
     /// - Parameter seconds: The offset.
     /// - Returns: The time.
     static func at(_ seconds: Int) -> Date {
         start.addingTimeInterval(TimeInterval(seconds))
+    }
+
+    /// Returns the awake time a number of seconds after the start.
+    ///
+    /// - Parameter seconds: The offset.
+    /// - Returns: The time on a clock that stops while the Mac sleeps.
+    static func awake(_ seconds: Int) -> SuspendingClock.Instant {
+        awakeStart.advanced(by: .seconds(seconds))
     }
 
     /// Returns a client numbered for a test.
@@ -165,7 +176,7 @@ struct LeaseLedgerTests {
         _ = try Self.readyLease(in: &ledger, for: Self.client(1))
         _ = ledger.request(Self.terms(), from: Self.client(2), owner: .local, now: Self.at(1))
         _ = ledger.request(Self.terms(), from: Self.client(3), owner: .local, now: Self.at(2))
-        let actions = ledger.clientDisconnected(Self.client(2), owner: .local, now: Self.at(3))
+        let actions = ledger.clientDisconnected(Self.client(2), owner: .local, awake: Self.awake(3))
         #expect(actions == [.notify(Self.client(3), .queued(position: 1))])
         #expect(ledger.queue.map(\.client) == [Self.client(3)])
     }
@@ -208,8 +219,8 @@ struct LeaseLedgerTests {
         #expect(summary.bundle == "/pool/leases/\(id)")
 
         #expect(try ledger.renew(id, owner: .local, now: Self.at(100)).expiresAt == Self.at(700))
-        #expect(ledger.tick(now: Self.at(699)).isEmpty)
-        let expired = ledger.tick(now: Self.at(700))
+        #expect(ledger.tick(now: Self.at(699), awake: Self.awake(699)).isEmpty)
+        let expired = ledger.tick(now: Self.at(700), awake: Self.awake(700))
         #expect(expired == [.notify(Self.client(1), .ended(id, reason: "the lease expired")), .stop(id)])
         #expect(throws: PoolError.leaseEnding(id: id.rawValue)) {
             try ledger.renew(id, owner: .local, now: Self.at(701))
@@ -222,7 +233,7 @@ struct LeaseLedgerTests {
         let id = try Self.readyLease(in: &ledger, for: Self.client(1))
         _ = ledger.machineExited(id, .failed("boom"), now: Self.at(590))
         #expect(ledger.leases[id]?.phase == .restarting)
-        let actions = ledger.tick(now: Self.at(600))
+        let actions = ledger.tick(now: Self.at(600), awake: Self.awake(600))
         #expect(actions == [.notify(Self.client(1), .ended(id, reason: "the lease expired")), .discard(id)])
     }
 
@@ -230,7 +241,7 @@ struct LeaseLedgerTests {
     @Test func attachedLeaseEndsWithItsClient() throws {
         var ledger = Self.ledger()
         let id = try Self.readyLease(in: &ledger, for: Self.client(1))
-        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)) == [.stop(id)])
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, awake: Self.awake(1)) == [.stop(id)])
         #expect(ledger.leases[id]?.endReason == "the client disconnected")
     }
 
@@ -238,7 +249,7 @@ struct LeaseLedgerTests {
     @Test func detachedLeaseOutlivesItsClient() throws {
         var ledger = Self.ledger()
         let id = try Self.readyLease(in: &ledger, for: Self.client(1), terms: Self.terms(detached: true))
-        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)).isEmpty)
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, awake: Self.awake(1)).isEmpty)
         #expect(ledger.leases[id]?.phase == .ready)
         #expect(ledger.clients[id] == nil)
     }
@@ -248,7 +259,7 @@ struct LeaseLedgerTests {
         var ledger = Self.ledger()
         let actions = ledger.request(Self.terms(detached: true), from: Self.client(1), owner: .local, now: Self.start)
         let id = try #require(Self.launches(actions).first)
-        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, now: Self.at(1)) == [.stop(id)])
+        #expect(ledger.clientDisconnected(Self.client(1), owner: .local, awake: Self.awake(1)) == [.stop(id)])
     }
 
     /// Restarts failed VMs with growing delays and ends the lease after the last allowed restart.
@@ -261,8 +272,8 @@ struct LeaseLedgerTests {
         let restarting = try #require(ledger.leases[id].map(ledger.summary(of:)))
         #expect(first == [.notify(Self.client(1), .restarting(restarting, reason: "boot timed out"))])
         #expect(ledger.leases[id]?.restartAt == Self.at(15))
-        #expect(ledger.tick(now: Self.at(14)).isEmpty)
-        let relaunch = ledger.tick(now: Self.at(15))
+        #expect(ledger.tick(now: Self.at(14), awake: Self.awake(14)).isEmpty)
+        let relaunch = ledger.tick(now: Self.at(15), awake: Self.awake(15))
         #expect(Self.launches(relaunch) == [id])
         #expect(ledger.leases[id]?.phase == .starting)
         _ = ledger.supervisorReported(id, SupervisorStatus(phase: .ready, address: "192.168.64.3"), now: Self.at(20))
@@ -270,7 +281,7 @@ struct LeaseLedgerTests {
 
         _ = ledger.machineExited(id, .lost, now: Self.at(30))
         #expect(ledger.leases[id]?.restartAt == Self.at(38))
-        _ = ledger.tick(now: Self.at(38))
+        _ = ledger.tick(now: Self.at(38), awake: Self.awake(38))
         let last = ledger.machineExited(id, .failed("boot timed out"), now: Self.at(40))
         #expect(last == [
             .notify(Self.client(1), .ended(id, reason: "boot timed out after 2 restarts")),
@@ -316,10 +327,10 @@ struct LeaseLedgerTests {
         #expect(ledger.summary(for: alice).queue.map(\.source) == ["base"])
         #expect(ledger.summary(for: .local).queue.map(\.source) == ["/vms/base", "/vms/base"])
 
-        _ = ledger.tick(now: Self.at(100))
+        _ = ledger.tick(now: Self.at(100), awake: Self.awake(100))
         _ = ledger.supervisorReported(id, SupervisorStatus(phase: .ready, address: "192.168.64.3"), now: Self.at(101))
         _ = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(102))
-        _ = ledger.tick(now: Self.at(200))
+        _ = ledger.tick(now: Self.at(200), awake: Self.awake(200))
         let ended = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(201))
         let reason = "\(MachineOutcome.hiddenFailure) after 2 restarts"
         #expect(ended.first == .notify(Self.client(1), .ended(id, reason: reason)))
@@ -348,7 +359,7 @@ struct LeaseLedgerTests {
         ledger.supervisorLaunched(id, processID: 4242)
         _ = ledger.machineExited(id, .lost, now: Self.at(10))
         #expect(ledger.leases[id]?.supervisorProcessID == 4242)
-        _ = ledger.tick(now: Self.at(15))
+        _ = ledger.tick(now: Self.at(15), awake: Self.awake(15))
         #expect(ledger.leases[id]?.phase == .starting)
 
         let failed = ledger.bootFailed(id, reason: "the clone failed")
@@ -400,10 +411,10 @@ struct LeaseLedgerTests {
 
         var after = LeaseLedger(policy: Self.policy, directory: before.directory, state: before.state)
         #expect(after.leases == before.leases)
-        let recovered = after.recover(now: Self.at(100))
+        let recovered = after.recover(awake: Self.awake(100))
         #expect(recovered == [attached, detached].sorted().map { LedgerAction.reconnect($0) })
-        #expect(after.tick(now: Self.at(159)).isEmpty)
-        #expect(after.tick(now: Self.at(160)) == [.stop(attached)])
+        #expect(after.tick(now: Self.at(159), awake: Self.awake(159)).isEmpty)
+        #expect(after.tick(now: Self.at(160), awake: Self.awake(160)) == [.stop(attached)])
         #expect(after.leases[attached]?.endReason == "no client reattached after the daemon started")
         #expect(after.leases[detached]?.phase == .ready)
     }
@@ -413,11 +424,11 @@ struct LeaseLedgerTests {
         var before = Self.ledger()
         let id = try Self.readyLease(in: &before, for: Self.client(1))
         var after = LeaseLedger(policy: Self.policy, directory: before.directory, state: before.state)
-        _ = after.recover(now: Self.at(100))
+        _ = after.recover(awake: Self.awake(100))
         let attached = try after.attach(id, client: Self.client(7), owner: .local)
         let summary = try #require(after.leases[id].map(after.summary(of:)))
         #expect(attached == [.notify(Self.client(7), .ready(summary))])
-        #expect(after.tick(now: Self.at(200)).isEmpty)
+        #expect(after.tick(now: Self.at(200), awake: Self.awake(200)).isEmpty)
         #expect(throws: PoolError.leaseAttached(id: id.rawValue)) {
             try after.attach(id, client: Self.client(8), owner: .local)
         }
@@ -433,13 +444,25 @@ struct LeaseLedgerTests {
         let alice = try Self.paired("a")
         let kept = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
         let lost = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
-        #expect(ledger.clientDisconnected(Self.client(1), owner: alice, now: Self.at(10)).isEmpty)
+        #expect(ledger.clientDisconnected(Self.client(1), owner: alice, awake: Self.awake(10)).isEmpty)
         #expect(ledger.clients.isEmpty)
         _ = try ledger.attach(kept, client: Self.client(2), owner: alice)
-        #expect(ledger.tick(now: Self.at(69)).isEmpty)
-        #expect(ledger.tick(now: Self.at(70)) == [.stop(lost)])
+        #expect(ledger.tick(now: Self.at(69), awake: Self.awake(69)).isEmpty)
+        #expect(ledger.tick(now: Self.at(70), awake: Self.awake(70)) == [.stop(lost)])
         #expect(ledger.leases[lost]?.endReason == "the client disconnected and did not reattach within 60 seconds")
         #expect(ledger.leases[kept]?.phase == .ready)
+    }
+
+    /// Counts only the awake time toward the reattach grace, so a sleep of five minutes right
+    /// after the disconnect leaves the lease its full grace.
+    @Test func reattachGraceSkipsTheSleepOfTheMac() throws {
+        var ledger = Self.ledger()
+        let alice = try Self.paired("a")
+        let id = try Self.readyLease(in: &ledger, for: Self.client(1), owner: alice)
+        _ = ledger.clientDisconnected(Self.client(1), owner: alice, awake: Self.awake(10))
+        #expect(ledger.tick(now: Self.at(310), awake: Self.awake(10)).isEmpty)
+        #expect(ledger.tick(now: Self.at(369), awake: Self.awake(69)).isEmpty)
+        #expect(ledger.tick(now: Self.at(370), awake: Self.awake(70)) == [.stop(id)])
     }
 
     /// Keeps a paired client's detached lease whose VM became ready during the reattach grace, and
@@ -451,11 +474,11 @@ struct LeaseLedgerTests {
         let second = ledger.request(Self.terms(), from: Self.client(1), owner: alice, now: Self.start)
         let detached = try #require(Self.launches(first).first)
         let attached = try #require(Self.launches(second).first)
-        _ = ledger.clientDisconnected(Self.client(1), owner: alice, now: Self.at(10))
+        _ = ledger.clientDisconnected(Self.client(1), owner: alice, awake: Self.awake(10))
         let ready = SupervisorStatus(phase: .ready, address: "192.0.2.10")
         _ = ledger.supervisorReported(detached, ready, now: Self.at(20))
         _ = ledger.supervisorReported(attached, ready, now: Self.at(20))
-        #expect(ledger.tick(now: Self.at(70)) == [.stop(attached)])
+        #expect(ledger.tick(now: Self.at(70), awake: Self.awake(70)) == [.stop(attached)])
         #expect(ledger.leases[detached]?.phase == .ready)
     }
 
@@ -527,7 +550,7 @@ struct LeaseLedgerTests {
         let id = try Self.readyLease(in: &before, for: Self.client(1), terms: Self.terms(detached: true))
         _ = before.machineExited(id, .failed("boom"), now: Self.at(10))
         var after = LeaseLedger(policy: Self.policy, directory: before.directory, state: before.state)
-        #expect(after.recover(now: Self.at(12)).isEmpty)
-        #expect(Self.launches(after.tick(now: Self.at(15))) == [id])
+        #expect(after.recover(awake: Self.awake(12)).isEmpty)
+        #expect(Self.launches(after.tick(now: Self.at(15), awake: Self.awake(15))) == [id])
     }
 }
