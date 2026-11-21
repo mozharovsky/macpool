@@ -86,6 +86,35 @@ struct PeerSilenceTests {
         await daemon.shutdown()
     }
 
+    /// Keeps the lease of a silent Mac through a sleep of this Mac that starts during the reattach
+    /// grace, and ends it once the grace has passed in awake time.
+    @Test func keepsTheReattachGraceThroughASleep() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source])
+        let remote = try await pool.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        let lease = try await Self.readyLease(on: remote)
+        pool.clock.advance(by: 60)
+        await daemon.tick()
+        #expect(try await isClosed(remote))
+
+        pool.clock.advance(by: 10)
+        await daemon.tick()
+        // A sleep of half an hour. The lease's time to live of an hour covers it.
+        pool.clock.jump(by: 1800)
+        await daemon.tick()
+        pool.clock.advance(by: 49)
+        await daemon.tick()
+        #expect(pool.logs.entries("A lease ended").isEmpty)
+        #expect(await daemon.summary().leases.map(\.phase) == [.ready])
+        #expect(await daemon.summary().leases.map(\.id) == [lease.id])
+        pool.clock.advance(by: 1)
+        await daemon.tick()
+        #expect(await eventually { await daemon.summary().leases.isEmpty })
+        let ended = pool.logs.entries("A lease ended").map { $0.metadata["reason"] }
+        #expect(ended == ["the client disconnected and did not reattach within 60 seconds"])
+        await daemon.shutdown()
+    }
+
     /// Keeps the connections of a paired Mac that sends requests within the limit and of the
     /// local user, and closes the connection of a Mac that stays silent.
     @Test func keepsConnectionsThatSendRequests() async throws {

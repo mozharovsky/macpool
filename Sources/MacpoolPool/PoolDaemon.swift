@@ -93,8 +93,8 @@ public actor PoolDaemon {
         /// The source of the time on a clock that stops while this Mac sleeps and ignores changes
         /// of the system time.
         ///
-        /// The daemon measures the silence of paired Macs with it, so a sleep of this Mac or a new
-        /// system time closes no connection.
+        /// The daemon measures the silence of paired Macs and the reattach grace with it, so a sleep
+        /// of this Mac or a new system time closes no connection and ends no lease early.
         public var awakeTime: @Sendable () -> SuspendingClock.Instant
 
         /// The interval between checks of expiries and restart times, or `nil` when only explicit
@@ -460,7 +460,7 @@ public actor PoolDaemon {
         self.openFileLimit = openFileLimit
         removeOrphans()
         pruneLogs()
-        perform(ledger.recover(now: configuration.now()))
+        perform(ledger.recover(awake: configuration.awakeTime()))
         let listener = try await SocketListener(socket: configuration.directory.daemonSocket)
         self.listener = listener
         configuration.logger.info("Listening", metadata: [
@@ -542,8 +542,9 @@ public actor PoolDaemon {
             invitationEnded(expired)
             reply(.failure("the invitation expired"), to: expired.inviter)
         }
-        closeSilentPeers(at: now)
-        perform(ledger.tick(now: now))
+        let awake = configuration.awakeTime()
+        closeSilentPeers(at: awake)
+        perform(ledger.tick(now: now, awake: awake))
         let stopGrace = configuration.stopGrace / .seconds(1)
         for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
             let idle = links[id] == nil && !connecting.contains(id)
@@ -1063,7 +1064,7 @@ public actor PoolDaemon {
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
-        perform(ledger.clientDisconnected(client, owner: owner, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: owner, awake: configuration.awakeTime()))
     }
 
     /// Stops serving the paired Macs whose connections sent no request for
@@ -1073,9 +1074,8 @@ public actor PoolDaemon {
     /// connection would hold its leases until TCP keepalive gives up on the Mac. The leases then
     /// wait for another connection of the Mac to attach, as after a disconnect.
     ///
-    /// - Parameter now: The current time.
-    private func closeSilentPeers(at now: Date) {
-        let awake = configuration.awakeTime()
+    /// - Parameter awake: The current time on ``Configuration/awakeTime``.
+    private func closeSilentPeers(at awake: SuspendingClock.Instant) {
         for (client, connection) in clients.sorted(by: { $0.key < $1.key }) {
             guard case let .client(key) = connection.owner,
                   connection.lastRequest.duration(to: awake) >= Self.peerSilenceLimit else {
@@ -1092,7 +1092,7 @@ public actor PoolDaemon {
             // The serve(_:owner:on:) loop sees the missing client and ends without a second
             // disconnect.
             clients[client] = nil
-            perform(ledger.clientDisconnected(client, owner: connection.owner, now: now))
+            perform(ledger.clientDisconnected(client, owner: connection.owner, awake: awake))
             connection.channel.close()
         }
     }
@@ -1491,7 +1491,7 @@ public actor PoolDaemon {
         guard let connection = clients.removeValue(forKey: client) else {
             return
         }
-        perform(ledger.clientDisconnected(client, owner: connection.owner, now: configuration.now()))
+        perform(ledger.clientDisconnected(client, owner: connection.owner, awake: configuration.awakeTime()))
         try? connection.channel.send(visible(last, to: connection.owner))
     }
 
