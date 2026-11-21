@@ -177,7 +177,7 @@ struct PairingTests {
         channel.close()
 
         let other = try host.clientDirectory()
-        await #expect(throws: PoolError.connection(
+        await #expect(throws: PoolError.greetingFailed(
             path: "127.0.0.1:\(host.port)",
             reason: "the host closed the connection, so the code was used, expired, or replaced",
         )) {
@@ -785,9 +785,10 @@ struct PairingTests {
             secret: invitation.code.secret,
         )
         let client = try host.clientDirectory()
-        await #expect(throws: PoolError.connection(
+        await #expect(throws: PoolError.hostKeyMismatch(
             path: "127.0.0.1:\(host.port)",
-            reason: "the host presented the key \(host.key) instead of a key that matches the code",
+            presented: host.key.rawValue,
+            expected: "a key that matches the code",
         )) {
             try await PoolClient.pair(using: forged, name: "runner", directory: client)
         }

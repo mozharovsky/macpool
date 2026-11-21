@@ -55,6 +55,15 @@ enum Report {
         }
     }
 
+    /// Prints a warning on standard error.
+    ///
+    /// A warning reports a failure that does not change the command's exit status.
+    ///
+    /// - Parameter text: The warning without a line break.
+    static func warning(_ text: String) {
+        try? FileHandle.standardError.write(contentsOf: Data("Warning: \(text)\n".utf8))
+    }
+
     /// Formats a duration in seconds with a fixed number of decimals.
     ///
     /// - Parameters:

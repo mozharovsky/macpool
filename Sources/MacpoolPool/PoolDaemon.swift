@@ -311,7 +311,7 @@ public actor PoolDaemon {
     ///
     /// ``tick()`` closes a connection that stays silent this long on
     /// ``Configuration/awakeTime``.
-    static let peerSilenceLimit = Duration.seconds(60)
+    public static let peerSilenceLimit = Duration.seconds(60)
 
     /// The most connections of Macs that pair at once.
     ///
