@@ -853,6 +853,9 @@ public enum PoolReply: Sendable, Equatable, Codable {
 
     /// The lease's expiry moved.
     ///
+    /// The daemon sends this reply to the client that renewed the lease. It also sends it to the
+    /// client attached to the lease if that is another client.
+    ///
     /// - Parameter lease: The lease with its new expiry.
     case renewed(LeaseSummary)
 

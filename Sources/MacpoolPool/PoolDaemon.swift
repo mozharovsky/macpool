@@ -1155,9 +1155,7 @@ public actor PoolDaemon {
                 try perform(ledger.release(id, owner: owner, reason: "released by a client"))
                 reply(.released(id), to: client)
             case let .renew(id):
-                let summary = try ledger.renew(id, owner: owner, now: configuration.now())
-                perform([])
-                reply(.renewed(summary), to: client)
+                try perform(ledger.renew(id, client: client, owner: owner, now: configuration.now()))
             case .status:
                 var summary = ledger.summary(for: owner)
                 // A paired Mac gets no paths on this Mac's disk.

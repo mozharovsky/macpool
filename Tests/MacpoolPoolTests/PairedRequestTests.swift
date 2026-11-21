@@ -6,7 +6,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct PairedRequestTests {
     /// Leases an offered source on a connection for requests, and lists, renews, and releases the
-    /// lease with one request each.
+    /// lease with one request each. The connection that holds the lease receives the renewal.
     @Test func leasesListsRenewsAndReleasesOverTLS() async throws {
         let pool = try PoolFixture()
         let mac = try PairedMacFixture(trustedBy: pool)
@@ -26,6 +26,7 @@ struct PairedRequestTests {
         pool.clock.advance(by: 100)
         let renewed = try await PoolClient.send(.renew(lease.id), to: host, directory: mac.directory)
         #expect(renewed.lease?.expiresAt == pool.clock.now.addingTimeInterval(600))
+        #expect(try await next(channel) == renewed)
         let released = try await PoolClient.send(.release(lease.id), to: host, directory: mac.directory)
         #expect(released == .released(lease.id))
         #expect(try await next(channel) == .ended(lease.id, reason: "released by a client"))

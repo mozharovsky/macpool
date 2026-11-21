@@ -523,23 +523,37 @@ struct LeaseLedger {
     ///
     /// A lease whose VM was never ready has no expiry yet, so the call leaves it unchanged.
     ///
+    /// If another client is attached to the lease, it receives the new expiry too. Its
+    /// `macpool lease` tries to attach again until that expiry when the connection breaks.
+    ///
     /// - Parameters:
     ///   - id: The lease.
-    ///   - owner: Who asks for the renewal.
+    ///   - client: The client that asks for the renewal.
+    ///   - owner: Who the client acts for.
     ///   - now: The current time.
-    /// - Returns: The lease with its new expiry.
+    /// - Returns: A `renewed` reply for `client`, and one for the attached client when the expiry
+    ///   moved.
     /// - Throws: ``PoolError/unknownLease(id:)`` when no such lease holds a slot or the owner may
     ///   not act on it, or ``PoolError/leaseEnding(id:)`` when it is stopping.
-    mutating func renew(_ id: LeaseID, owner: LeaseOwner, now: Date) throws(PoolError) -> LeaseSummary {
+    mutating func renew(
+        _ id: LeaseID,
+        client: ClientID,
+        owner: LeaseOwner,
+        now: Date,
+    ) throws(PoolError) -> [LedgerAction] {
         var record = try record(id, for: owner)
         guard record.phase != .stopping else {
             throw .leaseEnding(id: id.rawValue)
         }
+        var actions: [LedgerAction] = []
         if record.expiresAt != nil {
             record.expiresAt = now.addingTimeInterval(TimeInterval(record.terms.timeToLive))
             leases[id] = record
+            if let holder = clients[id], holder != client {
+                actions.append(.notify(holder, .renewed(summary(of: record))))
+            }
         }
-        return summary(of: record, for: owner)
+        return [.notify(client, .renewed(summary(of: record, for: owner)))] + actions
     }
 
     /// Records the process of a lease's new supervisor.

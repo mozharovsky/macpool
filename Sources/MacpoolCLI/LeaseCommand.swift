@@ -190,6 +190,9 @@ struct LeaseCommand: AsyncParsableCommand {
         var interruption: Int32?
         var failure = CommandError.interrupted
         loop: for await event in events {
+            if case let .reply(reply) = event {
+                expiry = Self.expiry(after: reply, of: id, from: expiry)
+            }
             switch event {
             case let .reply(.queued(position)):
                 Report.line("queued position=\(position)")
@@ -206,7 +209,6 @@ struct LeaseCommand: AsyncParsableCommand {
                 Report.line("expires_at=\(lease.expiresAt.map(LeaseOutput.timestamp) ?? "")")
                 Report.line("ready")
                 isReady = true
-                expiry = lease.expiresAt
                 if detach {
                     return 0
                 }
@@ -350,6 +352,28 @@ struct LeaseCommand: AsyncParsableCommand {
             } catch {
                 sink.yield(.reattachFailed(error))
             }
+        }
+    }
+
+    /// Chooses the expiry at which the attempts to attach again end after a reply about the lease.
+    ///
+    /// A `ready` reply carries the expiry. If another client renews the lease later, the daemon
+    /// sends a `renewed` reply with the new expiry on this connection too.
+    ///
+    /// - Parameters:
+    ///   - reply: A reply on the connection that holds the lease.
+    ///   - id: The lease, or `nil` before the daemon granted one.
+    ///   - expiry: The expiry before the reply.
+    /// - Returns: The expiry in a `ready` reply or in a `renewed` reply about `id`. Otherwise
+    ///   `expiry`.
+    static func expiry(after reply: PoolReply, of id: LeaseID?, from expiry: Date?) -> Date? {
+        switch reply {
+        case let .ready(lease):
+            lease.expiresAt
+        case let .renewed(lease) where lease.id == id:
+            lease.expiresAt
+        default:
+            expiry
         }
     }
 
