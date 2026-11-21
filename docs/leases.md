@@ -21,8 +21,8 @@ next daemon picks them up.
 
 Every pool command except `daemon uninstall` takes `--data-dir`. A daemon's data directory must be
 on the same APFS volume as its sources. With `--pool`, the directory holds only this Mac's key and
-paired hosts, so any volume works. The daemon refuses a directory that belongs to another user or
-that other users can write to.
+paired hosts, and it need not be on the same volume as any source. The daemon refuses a directory
+that belongs to another user or that other users can write to.
 
 ## Leasing a clone
 
@@ -80,8 +80,8 @@ When a lease ends, the daemon stops the VM by force and deletes the clone.
 
 `lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
 daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
-command line can't pair Macs yet, so only a host that a program built on `MacpoolPool` paired works
-here.
+command line can't pair Macs yet. `--pool` works only with a host that a program paired through
+`MacpoolPool`.
 
 With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
 `--share` isn't allowed. The host shows this Mac only its own leases and no paths on its disk.
@@ -93,6 +93,9 @@ $macpool lease --pool lab --from base --detach
 $macpool ssh --pool lab LEASE -- sw_vers
 $macpool release --pool lab LEASE
 ```
+
+A shell in the guest runs on the host's NAT network. The [ssh section](commands.md#ssh) of the
+command reference lists what the guest can reach there.
 
 If the connection to the host breaks while `lease` holds a lease, `lease` connects again and
 attaches to the lease. The host keeps the lease for 60 seconds after it notices the break, and it

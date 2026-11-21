@@ -136,6 +136,7 @@ lease one that is not ready.
 - ``MachineSession``
 - ``PoolOptions``
 - ``HostSelection``
+- ``ReattachSchedule``
 - ``StandardRelay``
 - ``ProxyCommand``
 - ``GuestLogin``

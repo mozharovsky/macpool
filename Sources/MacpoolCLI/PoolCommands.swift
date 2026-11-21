@@ -108,8 +108,9 @@ struct ListCommand: AsyncParsableCommand {
 
     /// Asks the daemon for its state and formats it.
     ///
-    /// A paired host shows only the leases and requests of this Mac. Its text passes through
-    /// ``HostSelection/shown(_:)``.
+    /// A paired host shows only the leases and requests of this Mac. The table passes its text
+    /// through ``HostSelection/shown(_:)``. The JSON escapes the text of every daemon with
+    /// ``PeerText/escapedJSON(_:)``.
     ///
     /// - Returns: The lines to print without line breaks.
     /// - Throws: ``CommandError`` when the paired host is unknown or no daemon answers.

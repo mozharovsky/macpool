@@ -436,10 +436,13 @@ public enum PoolClient {
 
     /// Sends one request to a paired host and returns the host's first reply.
     ///
-    /// The host must present the key in `host`.
+    /// The host must present the key in `host`. The call closes the connection after the first
+    /// reply. Send a lease or attach request on a connection from
+    /// ``connect(to:directory:timeout:)``, and open a stream with
+    /// ``openStream(to:on:directory:timeout:)``.
     ///
     /// - Parameters:
-    ///   - request: The request, which must not be a lease request.
+    ///   - request: The request, which must not be a lease, attach, or connect request.
     ///   - host: The host from this Mac's list of paired hosts.
     ///   - directory: This Mac's data directory, which holds its key.
     ///   - timeout: The longest wait for the handshake, the greeting, and then the host's reply.
@@ -599,8 +602,10 @@ public enum PoolClient {
 
     /// Sends one request and returns the daemon's first reply.
     ///
+    /// The call closes the connection after the first reply.
+    ///
     /// - Parameters:
-    ///   - request: The request, which must not be a lease request.
+    ///   - request: The request, which must not be a lease, attach, or connect request.
     ///   - directory: The daemon's data directory.
     /// - Returns: The reply.
     /// - Throws: ``PoolError/invalidRequest(reason:)`` for a heartbeat, which gets no reply,

@@ -111,7 +111,7 @@ struct HostSelection: ParsableArguments {
     /// Sends one request to the selected daemon and returns its first reply.
     ///
     /// - Parameters:
-    ///   - request: The request, which must not be a lease request.
+    ///   - request: The request, which must not be a lease, attach, or connect request.
     ///   - directory: This Mac's data directory.
     ///   - timeout: The longest wait for each step with a paired host, which are the handshake, the
     ///     greeting, and the reply. The call waits for the daemon on this Mac without a limit.
