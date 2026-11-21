@@ -103,8 +103,9 @@ doesn't count the time it sleeps. `lease` tries until the lease expires, with pa
 seconds, so a host that sleeps doesn't end the lease. Before the first `ready`, `lease` tries for
 60 seconds.
 
-If the host doesn't confirm the release at Control-C or at the end of the command after `--`,
-`lease` fails. The host then ends the lease 60 seconds after it notices the closed connection.
+If the host doesn't confirm the release when the command after `--` ends, `lease` prints a warning
+and still exits with the command's status. At Control-C, it fails instead. The host ends the lease
+60 seconds after it notices the closed connection.
 
 ## Restarts
 

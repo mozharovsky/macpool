@@ -31,8 +31,10 @@ import System
 /// The command tries until the lease expires, because the host may sleep for longer. See
 /// ``ReattachSchedule``.
 ///
-/// If a paired host does not confirm the release, the command fails. The host then ends the lease
-/// 60 seconds after it notices that the command's connection closed.
+/// If a paired host does not confirm the release at Control-C, `macpool lease` fails. If the host
+/// does not confirm it after the command after `--` ends, `macpool lease` prints a warning and still
+/// exits with the command's status. In both cases the host ends the lease 60 seconds after it
+/// notices that the connection closed.
 struct LeaseCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -159,7 +161,7 @@ struct LeaseCommand: AsyncParsableCommand {
     /// - Returns: The exit status, which is the command's status when one ran.
     /// - Throws: ``CommandError`` when the paired host is unknown, no daemon answers, the daemon
     ///   rejects the request, the lease ends early, a signal interrupts the wait, or a paired host
-    ///   does not confirm the release.
+    ///   does not confirm the release at Control-C.
     private func perform() async throws(CommandError) -> Int32 {
         let directory = location.directory
         let selection = selection
@@ -262,8 +264,13 @@ struct LeaseCommand: AsyncParsableCommand {
                 return isReady ? 0 : 128 + number
             case let .commandEnded(status):
                 if let id {
-                    try await Self.release(id, through: selection, in: directory)
-                    Report.line("released \(id)")
+                    do throws(CommandError) {
+                        try await Self.release(id, through: selection, in: directory)
+                        Report.line("released \(id)")
+                    } catch {
+                        // A CI job reads the command's status, and the host ends the lease by itself.
+                        Report.warning(error.description)
+                    }
                 }
                 if let interruption {
                     return 128 + interruption
