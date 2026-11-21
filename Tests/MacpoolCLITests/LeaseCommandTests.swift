@@ -95,6 +95,27 @@ struct LeaseCommandTests {
         #expect(stopped < 120 + ReattachSchedule.longestPause / .seconds(1))
     }
 
+    /// Counts only the time that this Mac stays awake between refusals, because the host keeps the
+    /// lease for 120 seconds of its own awake time.
+    @Test func ignoresASleepOfThisMacBetweenRefusals() async throws {
+        let clock = ReattachClock()
+
+        await #expect(throws: CommandError.reattachRefused(
+            seconds: 120,
+            reason: ReattachClock.refusal.description,
+        )) {
+            try await clock.schedule(until: clock.start.addingTimeInterval(3600)).run { () throws(CommandError) in
+                if clock.attempts.count == 3 {
+                    clock.sleep(for: 600)
+                }
+                return try clock.attempt(cost: 0) { _ in ReattachClock.refusal }
+            }
+        }
+        let stopped = clock.now.timeIntervalSince(clock.start)
+        #expect(stopped >= 600 + 120)
+        #expect(stopped < 600 + 120 + ReattachSchedule.longestPause / .seconds(1))
+    }
+
     /// Keeps trying through refusals shorter than 120 seconds. A failure that does not reach the
     /// host, such as a sleep of the host, starts the count again.
     @Test func keepsReattachingThroughShortRefusals() async throws {
@@ -147,13 +168,18 @@ struct LeaseCommandTests {
     }
 }
 
-/// A clock for the attempts to attach again, which moves only when an attempt or a pause moves
-/// it.
+/// A clock for the attempts to attach again.
+///
+/// The clock moves only when an attempt fails, the schedule pauses, or the test calls
+/// ``sleep(for:)``.
 private final class ReattachClock: Sendable {
     /// The readings and the records of the attempts.
     private struct State {
         /// The current time.
         var now: Date
+
+        /// The time this Mac stayed awake since the clock started.
+        var awake: Duration = .zero
 
         /// The pauses in the order the schedule asked for them.
         var pauses: [Duration] = []
@@ -174,6 +200,9 @@ private final class ReattachClock: Sendable {
     /// The time at which every clock starts.
     private static let origin = Date(timeIntervalSince1970: 1_800_000_000)
 
+    /// The awake time at which the clock started.
+    private let awakeStart = SuspendingClock().now
+
     /// The current readings and records.
     private let state = Mutex(State(now: ReattachClock.origin))
 
@@ -185,6 +214,11 @@ private final class ReattachClock: Sendable {
     /// The current time.
     var now: Date {
         state.withLock { $0.now }
+    }
+
+    /// The current time on a clock that stops while this Mac sleeps.
+    var awakeTime: SuspendingClock.Instant {
+        awakeStart.advanced(by: state.withLock { $0.awake })
     }
 
     /// The pauses in the order the schedule asked for them.
@@ -202,12 +236,20 @@ private final class ReattachClock: Sendable {
     /// - Parameter deadline: The time after which no attempt starts.
     /// - Returns: The schedule.
     func schedule(until deadline: Date) -> ReattachSchedule {
-        ReattachSchedule(deadline: deadline, now: { self.now }) { duration in
+        ReattachSchedule(deadline: deadline, now: { self.now }, awakeTime: { self.awakeTime }) { duration in
             self.state.withLock {
                 $0.pauses.append(duration)
                 $0.now += duration / .seconds(1)
+                $0.awake += duration
             }
         }
+    }
+
+    /// Moves only the current time, as a sleep of this Mac does.
+    ///
+    /// - Parameter seconds: The length of the sleep.
+    func sleep(for seconds: TimeInterval) {
+        state.withLock { $0.now += seconds }
     }
 
     /// Records an attempt that fails like a handshake with a host that does not answer.
@@ -237,6 +279,7 @@ private final class ReattachClock: Sendable {
             let failure = outcome(started.timeIntervalSince(Self.origin))
             if failure != nil {
                 state.now += cost
+                state.awake += .seconds(cost)
             }
             return (started, failure)
         }
