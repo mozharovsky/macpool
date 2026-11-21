@@ -87,7 +87,7 @@ In the second terminal, run this.
 
 ```sh
 macpool=.build/release/macpool
-$macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE"'
+$macpool lease --from .cache/vms/base -- sh -c "$macpool ssh \$MACPOOL_LEASE_ID"
 ```
 
 The daemon clones the source, boots the clone, and gives it its own password and host key. `lease`

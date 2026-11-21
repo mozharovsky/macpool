@@ -77,7 +77,7 @@ Lease an image by its path.
 
 ```sh
 $macpool lease --from "$HOME/Library/Application Support/macpool/images/xcode" -- \
-  sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE" xcodebuild -version'
+  sh -c "$macpool ssh \$MACPOOL_LEASE_ID -- xcodebuild -version"
 ```
 
 A lease of the image reached `ready` in 19 seconds, and its simulator booted in 9 seconds. The
