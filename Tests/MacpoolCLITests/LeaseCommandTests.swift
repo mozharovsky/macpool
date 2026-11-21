@@ -135,6 +135,25 @@ struct LeaseCommandTests {
         #expect(try #require(attached).timeIntervalSince(clock.start) >= 500)
     }
 
+    /// Ends the attempts at the expiry of the last `ready` reply, or of a later renewal of the
+    /// lease by another client.
+    @Test func followsTheExpiryOfARenewal() throws {
+        let id = try #require(LeaseID("0a1b2c3d"))
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let ready = Self.lease(id, expiringAt: start.addingTimeInterval(3600))
+        var expiry = LeaseCommand.expiry(after: .ready(ready), of: id, from: nil)
+        #expect(expiry == start.addingTimeInterval(3600))
+
+        let other = try Self.lease(#require(LeaseID("4e5f6a7b")), expiringAt: start.addingTimeInterval(9000))
+        expiry = LeaseCommand.expiry(after: .renewed(other), of: id, from: expiry)
+        #expect(expiry == start.addingTimeInterval(3600))
+        let renewed = Self.lease(id, expiringAt: start.addingTimeInterval(7100))
+        expiry = LeaseCommand.expiry(after: .renewed(renewed), of: id, from: expiry)
+        expiry = LeaseCommand.expiry(after: .released(id), of: id, from: expiry)
+        let deadline = ReattachSchedule.deadline(expiry: expiry, pairedHost: true, now: start.addingTimeInterval(3590))
+        #expect(deadline == start.addingTimeInterval(7100))
+    }
+
     /// Fails within a few seconds when a paired host does not answer a release, and says that the
     /// host ends the lease by itself.
     @Test func reportsAReleaseThatAPairedHostDoesNotConfirm() async throws {
@@ -165,6 +184,26 @@ struct LeaseCommandTests {
         }
         #expect(id == "0a1b2c3d")
         #expect(error?.description.contains("The host ends the lease 60 seconds after") == true)
+    }
+
+    /// Creates a ready lease as a paired host shows it.
+    ///
+    /// - Parameters:
+    ///   - id: The lease's identifier.
+    ///   - expiry: The lease's expiry.
+    /// - Returns: The lease.
+    private static func lease(_ id: LeaseID, expiringAt expiry: Date) -> LeaseSummary {
+        LeaseSummary(
+            id: id,
+            source: "base",
+            bundle: nil,
+            phase: .ready,
+            address: nil,
+            expiresAt: expiry,
+            restarts: 0,
+            detached: false,
+            priority: 0,
+        )
     }
 }
 

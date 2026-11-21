@@ -114,7 +114,8 @@ struct PoolDaemonTests {
         await daemon.shutdown()
     }
 
-    /// Ends a lease at its expiry, which a renewal moves.
+    /// Ends a lease at its expiry, which a renewal moves. The client attached to the lease
+    /// receives the renewal of another client.
     @Test func endsLeaseAtItsExpiry() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
@@ -124,6 +125,7 @@ struct PoolDaemonTests {
         await daemon.tick()
         let renewed = try await PoolClient.send(.renew(id), to: pool.directory)
         #expect(renewed.lease?.expiresAt == pool.clock.now.addingTimeInterval(60))
+        #expect(try await next(granted.client) == renewed)
         pool.clock.advance(by: 59)
         await daemon.tick()
         #expect(await daemon.summary().leases.first?.phase == .ready)
