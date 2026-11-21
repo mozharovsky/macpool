@@ -309,8 +309,9 @@ grants the slot to the next request.
 
 An attached lease of a paired Mac survives the loss of its connection for
 ``PoolPolicy/reattachGrace``. If no connection of that Mac attaches within that time, the lease
-ends. A new connection of the Mac may attach while the host still serves the old one, because the
-Mac may have lost the old one first. The old connection then receives a failure.
+ends. The host counts only the time it stays awake. A new connection of the Mac may attach while
+the host still serves the old one, because the Mac may have lost the old one first. The old
+connection then receives a failure.
 
 A VM that stops unexpectedly boots again from the same clone when its policy allows. The waits
 between restarts double up to a limit, and ``PoolPolicy`` sets the number of restarts.

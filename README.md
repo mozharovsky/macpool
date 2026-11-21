@@ -50,7 +50,7 @@ $macpool daemon
 
 # In the second terminal, set macpool there too, then lease a fresh clone and open a shell in it.
 macpool=.build/release/macpool
-$macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE"'
+$macpool lease --from .cache/vms/base -- sh -c "$macpool ssh \$MACPOOL_LEASE_ID"
 ```
 
 You end up in a shell inside a fresh clone. When you leave the shell, the lease ends and the clone
@@ -60,7 +60,8 @@ what each one prints.
 This is what a lease looks like with a command instead of a shell.
 
 ```console
-$ .build/release/macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE" sw_vers'
+$ .build/release/macpool lease --from .cache/vms/base -- \
+  sh -c '.build/release/macpool ssh "$MACPOOL_LEASE_ID" -- sw_vers'
 lease_id=3f9c21ab
 bundle=/Users/you/Library/Application Support/macpool/leases/3f9c21ab
 address=192.168.64.12
@@ -105,7 +106,8 @@ flowchart LR
   DAEMON -- starts --> SUP["Supervisor<br/>one per VM"]
   SUP -- boots --> VM["Leased VM"]
   CLONE --- VM
-  CLIENT -- "Scripts/ssh.sh over SSH" --> VM
+  SSH["macpool ssh"] -- Unix socket --> DAEMON
+  DAEMON -- relays SSH --> VM
 ```
 
 ## How it works
@@ -121,13 +123,14 @@ its first boot macpool replaces the password and host key it inherited, and only
 
 The **daemon** does that for you. It owns the Mac's VM slots and hands out clones as **leases**.
 Each leased VM runs in its own supervisor process. When the lease ends, the daemon stops the VM
-and deletes the clone. A job reaches its VM over SSH with `Scripts/ssh.sh`.
+and deletes the clone. A job logs in to its VM with `macpool ssh`, which reaches the guest through
+the daemon.
 
 ## Security
 
 Every clone gets its own random guest password and its own Ed25519 SSH host key on its first boot.
-The password stays in the clone's bundle, readable only by you. `Scripts/ssh.sh` pins the host key
-in the bundle and refuses any other key.
+The password stays in the clone's bundle, readable only by you. `macpool ssh` accepts only the host
+key in the bundle and passes the password to `ssh` in no file, argument, or environment variable.
 
 Until a clone prints `ready`, it still accepts its source's password and host key. Someone who
 knows that password could log in during that window. Use a clone only after `ready`.
@@ -136,10 +139,11 @@ replacement fails.
 
 ## Status
 
-macpool works on one Mac today. These parts don't exist yet.
+These parts don't exist yet.
 
-- One Mac can't lease a VM from another.
-- The command line can't run a command in a guest by itself. You go through SSH.
+- The command line can't pair two Macs. [`--pool`](docs/leases.md#leasing-from-another-mac) works
+  only with a host that a program paired through `MacpoolPool`.
+- A command reaches a guest only over SSH. macpool has no agent inside the guest.
 - Prepared VMs have no layers. Each one is a full macOS install.
 - There's no packaged release. You build macpool from source.
 
