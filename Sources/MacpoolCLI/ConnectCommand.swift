@@ -113,17 +113,23 @@ struct HostSelection: ParsableArguments {
     /// - Parameters:
     ///   - request: The request, which must not be a lease request.
     ///   - directory: This Mac's data directory.
+    ///   - timeout: The longest wait for each step with a paired host, which are the handshake, the
+    ///     greeting, and the reply. The call waits for the daemon on this Mac without a limit.
     /// - Returns: The reply.
     /// - Throws: ``CommandError/pool(_:)`` when the host is unknown, the connection fails, or the
     ///   daemon refuses the request. A paired host's error passes through
     ///   ``escapingPeerText(_:)``.
-    func send(_ request: PoolRequest, in directory: PoolDirectory) async throws(CommandError) -> PoolReply {
+    func send(
+        _ request: PoolRequest,
+        in directory: PoolDirectory,
+        timeout: Duration = .seconds(10),
+    ) async throws(CommandError) -> PoolReply {
         guard let host else {
             return try await pool { () async throws(PoolError) in try await PoolClient.send(request, to: directory) }
         }
         do {
             let paired = try TrustedHost.named(host, in: directory)
-            return try await PoolClient.send(request, to: paired, directory: directory)
+            return try await PoolClient.send(request, to: paired, directory: directory, timeout: timeout)
         } catch {
             throw .pool(Self.escapingPeerText(error))
         }

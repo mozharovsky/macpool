@@ -81,6 +81,15 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: Why the lease ended.
     case leaseEnded(id: String, reason: String)
 
+    /// A paired host did not confirm the release of a lease that `macpool lease` held.
+    ///
+    /// The command closes its connection, and the host ends the lease after its reattach grace.
+    ///
+    /// - Parameters:
+    ///   - id: The lease's identifier.
+    ///   - reason: Why the release failed.
+    case releaseUnconfirmed(id: String, reason: String)
+
     /// A step of an image build failed.
     ///
     /// - Parameters:
@@ -141,6 +150,9 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             error.description
         case let .leaseEnded(id, reason):
             "lease \(id) ended: \(reason)"
+        case let .releaseUnconfirmed(id, reason):
+            "the host did not confirm the release of lease \(id): \(reason). The host ends the lease 60 seconds "
+                + "after it notices that this connection closed"
         case let .supervisedRunFailed(reason):
             reason
         case let .standardIO(operation, reason):

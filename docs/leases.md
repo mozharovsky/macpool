@@ -94,7 +94,13 @@ $macpool release --pool lab LEASE
 ```
 
 If the connection to the host breaks while `lease` holds a lease, `lease` connects again and
-attaches to the lease. The host keeps the lease for 60 seconds meanwhile.
+attaches to the lease. The host keeps the lease for 60 seconds after it notices the break, and it
+doesn't count the time it sleeps. `lease` tries until the lease expires, with pauses of up to 15
+seconds, so a host that sleeps doesn't end the lease. Before the first `ready`, `lease` tries for
+60 seconds.
+
+If the host doesn't confirm the release at Control-C or at the end of the command after `--`,
+`lease` fails. The host then ends the lease 60 seconds after it notices the closed connection.
 
 ## Restarts
 

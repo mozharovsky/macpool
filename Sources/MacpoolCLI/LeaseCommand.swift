@@ -24,9 +24,15 @@ import System
 ///
 /// With `--pool` the command leases from a paired host, and `--from` names a source that the host
 /// offers. The lease then has no bundle or address on this Mac, so `MACPOOL_BUNDLE` and
-/// `MACPOOL_ADDRESS` are empty. Reach the guest with `macpool ssh --pool`. When the connection to
-/// the host breaks, the command connects again and attaches to the lease. The host keeps the lease
-/// for 60 seconds meanwhile.
+/// `MACPOOL_ADDRESS` are empty. Reach the guest with `macpool ssh --pool`.
+///
+/// When the connection to a paired host breaks, the command connects again and attaches to the
+/// lease. The host keeps the lease for 60 seconds of its awake time after it notices the break.
+/// The command tries until the lease expires, because the host may sleep for longer. See
+/// ``ReattachSchedule``.
+///
+/// If a paired host does not confirm the release, the command fails. The host then ends the lease
+/// 60 seconds after it notices that the command's connection closed.
 struct LeaseCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -34,8 +40,15 @@ struct LeaseCommand: AsyncParsableCommand {
         abstract: "Leases a clone of a stopped bundle and holds it until release.",
     )
 
-    /// How long a client tries to reach a daemon that went away while it held a lease.
+    /// How long a client tries to attach to its lease again after the daemon went away.
+    ///
+    /// The limit applies to the daemon on this Mac, and to a paired host before the lease is first
+    /// ready.
     static let reconnectTimeout = Duration.seconds(60)
+
+    /// The longest wait for each step of a release on a paired host, which are the handshake, the
+    /// greeting, and the reply.
+    static let releaseTimeout = Duration.seconds(3)
 
     /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
     @OptionGroup var location: PoolOptions
@@ -138,7 +151,8 @@ struct LeaseCommand: AsyncParsableCommand {
     ///
     /// - Returns: The exit status, which is the command's status when one ran.
     /// - Throws: ``CommandError`` when the paired host is unknown, no daemon answers, the daemon
-    ///   rejects the request, the lease ends early, or a signal interrupts the wait.
+    ///   rejects the request, the lease ends early, a signal interrupts the wait, or a paired host
+    ///   does not confirm the release.
     private func perform() async throws(CommandError) -> Int32 {
         let directory = location.directory
         let selection = selection
@@ -162,6 +176,7 @@ struct LeaseCommand: AsyncParsableCommand {
         }
 
         var id: LeaseID?
+        var expiry: Date?
         var isReady = false
         var interruption: Int32?
         var failure = CommandError.interrupted
@@ -182,6 +197,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 Report.line("expires_at=\(lease.expiresAt.map(LeaseOutput.timestamp) ?? "")")
                 Report.line("ready")
                 isReady = true
+                expiry = lease.expiresAt
                 if detach {
                     return 0
                 }
@@ -207,7 +223,14 @@ struct LeaseCommand: AsyncParsableCommand {
                     break loop
                 }
                 channel.close()
-                reattaching = Self.reattach(id, through: selection, in: directory, into: sink)
+                let deadline = ReattachSchedule.deadline(expiry: expiry, pairedHost: selection.host != nil, now: Date())
+                reattaching = Self.reattach(
+                    id,
+                    through: selection,
+                    in: directory,
+                    on: ReattachSchedule(deadline: deadline),
+                    into: sink,
+                )
             case let .reattached(reattached):
                 reattaching = nil
                 channel = reattached
@@ -226,13 +249,13 @@ struct LeaseCommand: AsyncParsableCommand {
                     // Closing the connection withdraws the queued request.
                     break loop
                 }
-                await Self.release(id, through: selection, in: directory)
+                try await Self.release(id, through: selection, in: directory)
                 Report.line("released \(id)")
                 // Control-C is the normal end of a held lease, so only an interrupted boot fails.
                 return isReady ? 0 : 128 + number
             case let .commandEnded(status):
                 if let id {
-                    await Self.release(id, through: selection, in: directory)
+                    try await Self.release(id, through: selection, in: directory)
                     Report.line("released \(id)")
                 }
                 if let interruption {
@@ -278,51 +301,70 @@ struct LeaseCommand: AsyncParsableCommand {
     ///   - id: The lease.
     ///   - selection: The daemon on this Mac or the paired host that holds the lease.
     ///   - directory: This Mac's data directory.
+    ///   - schedule: The pauses between attempts and their deadline.
     ///   - sink: The event stream that receives the new connection, on which the daemon reports
-    ///     the lease's stage, or the last error when no daemon answers within
-    ///     ``reconnectTimeout``.
+    ///     the lease's stage, or the error that ended the attempts.
     /// - Returns: The reconnecting task, which stops trying when cancelled.
     private static func reattach(
         _ id: LeaseID,
         through selection: HostSelection,
         in directory: PoolDirectory,
+        on schedule: ReattachSchedule,
         into sink: AsyncStream<LeaseEvent>.Continuation,
     ) -> Task<Void, Never> {
         Report.line("reconnecting")
         return Task {
-            let clock = ContinuousClock()
-            let deadline = clock.now + reconnectTimeout
-            while !Task.isCancelled {
-                do throws(CommandError) {
+            do throws(CommandError) {
+                let attached = try await schedule.run { () async throws(CommandError) in
                     let channel = try await selection.connect(in: directory)
-                    try pool { () throws(PoolError) in try channel.send(PoolRequest.attach(id)) }
-                    guard !Task.isCancelled else {
+                    do throws(CommandError) {
+                        try pool { () throws(PoolError) in try channel.send(PoolRequest.attach(id)) }
+                    } catch {
                         channel.close()
-                        return
+                        throw error
                     }
-                    sink.yield(.reattached(channel))
-                    return
-                } catch {
-                    guard clock.now < deadline else {
-                        sink.yield(.reattachFailed(error))
-                        return
-                    }
+                    return channel
                 }
-                try? await Task.sleep(for: .seconds(1))
+                guard let attached else {
+                    return
+                }
+                guard !Task.isCancelled else {
+                    attached.close()
+                    return
+                }
+                sink.yield(.reattached(attached))
+            } catch {
+                sink.yield(.reattachFailed(error))
             }
         }
     }
 
-    /// Releases a lease over a new connection and ignores failures.
+    /// Releases a lease over a new connection.
     ///
-    /// A lease that the daemon cannot release now still ends, because its client is gone.
+    /// The daemon on this Mac ends an attached lease when its client's connection closes, so a
+    /// failed release there goes unreported. A paired host keeps the lease for its reattach grace
+    /// instead, so a failed release there fails the call.
     ///
     /// - Parameters:
     ///   - id: The lease.
     ///   - selection: The daemon on this Mac or the paired host that holds the lease.
     ///   - directory: This Mac's data directory.
-    private static func release(_ id: LeaseID, through selection: HostSelection, in directory: PoolDirectory) async {
-        _ = try? await selection.send(.release(id), in: directory)
+    /// - Throws: ``CommandError/releaseUnconfirmed(id:reason:)`` when a paired host does not
+    ///   confirm the release within ``releaseTimeout`` for each step.
+    static func release(
+        _ id: LeaseID,
+        through selection: HostSelection,
+        in directory: PoolDirectory,
+    ) async throws(CommandError) {
+        guard selection.host != nil else {
+            _ = try? await selection.send(.release(id), in: directory)
+            return
+        }
+        do throws(CommandError) {
+            _ = try await selection.send(.release(id), in: directory, timeout: releaseTimeout)
+        } catch {
+            throw .releaseUnconfirmed(id: id.rawValue, reason: error.description)
+        }
     }
 
     /// Runs the command after `--` with the lease in its environment.
