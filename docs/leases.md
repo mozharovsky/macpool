@@ -53,7 +53,7 @@ after `--` runs with `MACPOOL_LEASE_ID`, `MACPOOL_BUNDLE`, and `MACPOOL_ADDRESS`
 environment. The lease ends when the command exits, and `lease` exits with the command's status.
 
 ```sh
-$macpool lease --from .cache/vms/base -- sh -c 'Scripts/ssh.sh "$MACPOOL_BUNDLE" sw_vers'
+$macpool lease --from .cache/vms/base -- sh -c "$macpool ssh \$MACPOOL_LEASE_ID -- sw_vers"
 ```
 
 With `--detach`, the lease lasts until you release it or it expires. Every lease expires after its
