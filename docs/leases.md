@@ -19,9 +19,10 @@ next daemon picks them up.
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | Where the daemon keeps its state, clones, sockets, and logs. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. Only `run` takes it. |
 
-Every pool command except `daemon uninstall` takes `--data-dir`. The directory must be on the same
-APFS volume as your sources. The daemon refuses a directory that belongs to another user or that
-other users can write to.
+Every pool command except `daemon uninstall` takes `--data-dir`. A daemon's data directory must be
+on the same APFS volume as its sources. With `--pool`, the directory holds only this Mac's key and
+paired hosts, so any volume works. The daemon refuses a directory that belongs to another user or
+that other users can write to.
 
 ## Leasing a clone
 

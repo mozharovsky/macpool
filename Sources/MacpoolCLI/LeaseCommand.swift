@@ -173,12 +173,12 @@ struct LeaseCommand: AsyncParsableCommand {
                 if id == nil {
                     id = lease.id
                     Report.line("lease_id=\(lease.id)")
-                    Report.line("bundle=\(lease.bundle ?? "")")
+                    Report.line("bundle=\(selection.shown(lease.bundle ?? ""))")
                 } else {
                     Report.line("starting")
                 }
             case let .reply(.ready(lease)):
-                Report.line("address=\(lease.address ?? "")")
+                Report.line("address=\(selection.shown(lease.address ?? ""))")
                 Report.line("expires_at=\(lease.expiresAt.map(LeaseOutput.timestamp) ?? "")")
                 Report.line("ready")
                 isReady = true
