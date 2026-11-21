@@ -129,11 +129,13 @@ A channel queues at most 4 MiB for a peer that does not read and closes the conn
 that. After the daemon handles a request, it reads the next one only once the messages that it
 sent to the client so far left.
 
+``PoolClient/connect(to:directory:timeout:)`` opens a connection to a paired host for lease
+requests and other requests, and ``PoolClient/send(_:to:directory:timeout:)`` sends one request.
 A paired Mac's connection that sends no request for 60 seconds counts as lost, and the host
-closes it. ``PoolClient`` therefore sends a ``PoolRequest/heartbeat`` every
-``PoolClient/heartbeatInterval`` on each connection to a host. The host counts only the time it
-stays awake, so its own sleep or a new system time closes no connection. TCP drops a connection
-whose sent data stays unacknowledged for 60 seconds.
+closes it. A connection for requests therefore sends a ``PoolRequest/heartbeat`` every
+``PoolClient/heartbeatInterval``. The host counts only the time it stays awake, so its own sleep or
+a new system time closes no connection. TCP drops a connection whose sent data stays
+unacknowledged for 60 seconds.
 
 Network does not pass the end of one direction through TLS, so
 ``ByteStream/finishSending(within:)`` closes a TLS connection once its bytes left. If the timeout

@@ -19,9 +19,10 @@ next daemon picks them up.
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | Where the daemon keeps its state, clones, sockets, and logs. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. Only `run` takes it. |
 
-Every pool command except `daemon uninstall` takes `--data-dir`. The directory must be on the same
-APFS volume as your sources. The daemon refuses a directory that belongs to another user or that
-other users can write to.
+Every pool command except `daemon uninstall` takes `--data-dir`. A daemon's data directory must be
+on the same APFS volume as its sources. With `--pool`, the directory holds only this Mac's key and
+paired hosts, and it need not be on the same volume as any source. The daemon refuses a directory
+that belongs to another user or that other users can write to.
 
 ## Leasing a clone
 
@@ -39,7 +40,8 @@ busy, it prints `queued position=N` and waits. Once the clone is ready, it print
 | `--share-read-only` | off | Lets the guest only read the shared directory. |
 | `--boot-timeout SECONDS` | 900 | The longest wait for each boot, including SSH and the credential replacement. |
 | `--detach` | off | Exits at `ready` and leaves the lease with the daemon. |
-| `--data-dir DIR` | see above | The daemon to ask. |
+| `--data-dir DIR` | see above | The daemon to ask, and the directory with this Mac's key and paired hosts. |
+| `--pool HOST` | the daemon on this Mac | A paired host to lease from. See [Leasing from another Mac](#leasing-from-another-mac). |
 
 The daemon refuses a source that's running, has never booted, lies on another volume, or didn't
 finish replacing its credentials. It also refuses a `--share` directory that doesn't exist, that
@@ -73,6 +75,41 @@ $macpool release LEASE
 | `macpool release LEASE` | Ends the lease right away. |
 
 When a lease ends, the daemon stops the VM by force and deletes the clone.
+
+## Leasing from another Mac
+
+`lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
+daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
+command line can't pair Macs yet. `--pool` works only with a host that a program paired through
+`MacpoolPool`.
+
+With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
+`--share` isn't allowed. The host shows this Mac only its own leases and no paths on its disk.
+`bundle=` and `address=` stay empty, and so do `MACPOOL_BUNDLE` and `MACPOOL_ADDRESS`. Reach the
+guest with `macpool ssh --pool`.
+
+```sh
+$macpool lease --pool lab --from base --detach
+$macpool ssh --pool lab LEASE -- sw_vers
+$macpool release --pool lab LEASE
+```
+
+A shell in the guest runs on the host's NAT network. The [ssh section](commands.md#ssh) of the
+command reference lists what the guest can reach there.
+
+If the connection to the host breaks while `lease` holds a lease, `lease` connects again and
+attaches to the lease. The host keeps the lease for 60 seconds after it notices the break, and it
+doesn't count the time it sleeps. `lease` tries until the lease expires, with pauses of up to 15
+seconds, so a host that sleeps doesn't end the lease. Before the first `ready`, `lease` tries for
+60 seconds.
+
+`lease` stops at once if the host presents another key or greets with another protocol version.
+It also stops if the host answers but refuses this Mac for 120 seconds, because an awake host has
+ended the lease by then.
+
+If the host doesn't confirm the release when the command after `--` ends, `lease` prints a warning
+and still exits with the command's status. At Control-C, it fails instead. The host ends the lease
+60 seconds after it notices the closed connection.
 
 ## Restarts
 

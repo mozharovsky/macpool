@@ -81,6 +81,25 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: Why the lease ended.
     case leaseEnded(id: String, reason: String)
 
+    /// A paired host did not confirm the release of a lease that `macpool lease` held.
+    ///
+    /// The command closes its connection, and the host ends the lease after its reattach grace.
+    ///
+    /// - Parameters:
+    ///   - id: The lease's identifier.
+    ///   - reason: Why the release failed.
+    case releaseUnconfirmed(id: String, reason: String)
+
+    /// A paired host finished the handshake and refused every attempt of `macpool lease` to
+    /// attach again for longer than its silence limit and reattach grace together.
+    ///
+    /// An awake host that refuses this long has ended the lease.
+    ///
+    /// - Parameters:
+    ///   - seconds: How long the host refused the attempts.
+    ///   - reason: The last refusal.
+    case reattachRefused(seconds: Int, reason: String)
+
     /// A step of an image build failed.
     ///
     /// - Parameters:
@@ -141,6 +160,12 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
             error.description
         case let .leaseEnded(id, reason):
             "lease \(id) ended: \(reason)"
+        case let .releaseUnconfirmed(id, reason):
+            "the host did not confirm the release of lease \(id): \(reason). The host ends the lease 60 seconds "
+                + "after it notices that this connection closed"
+        case let .reattachRefused(seconds, reason):
+            "the host refused every attempt to attach to the lease for \(seconds) seconds and no longer holds it: "
+                + reason
         case let .supervisedRunFailed(reason):
             reason
         case let .standardIO(operation, reason):

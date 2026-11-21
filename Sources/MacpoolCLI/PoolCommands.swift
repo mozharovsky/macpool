@@ -10,8 +10,11 @@ struct ReleaseCommand: AsyncParsableCommand {
         abstract: "Ends a lease, which stops its VM and deletes its clone.",
     )
 
-    /// The daemon's data directory.
+    /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
     @OptionGroup var location: PoolOptions
+
+    /// The paired host that holds the lease, if any.
+    @OptionGroup var selection: HostSelection
 
     /// The lease to end.
     @Argument(help: "The lease to end.")
@@ -19,20 +22,19 @@ struct ReleaseCommand: AsyncParsableCommand {
 
     /// Asks the daemon to end the lease.
     ///
-    /// - Throws: ``CommandError`` when the identifier is malformed, no daemon answers, or the
-    ///   daemon knows no such lease.
+    /// - Throws: ``CommandError`` when the identifier is malformed, the paired host is unknown, no
+    ///   daemon answers, or the daemon knows no such lease.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when the identifier is malformed, no daemon answers, or the
-    ///   daemon knows no such lease.
+    /// - Throws: ``CommandError`` when the identifier is malformed, the paired host is unknown, no
+    ///   daemon answers, or the daemon knows no such lease.
     private func perform() async throws(CommandError) {
         let id = try LeaseID.parse(lease)
-        let directory = location.directory
-        _ = try await pool { () async throws(PoolError) in try await PoolClient.send(.release(id), to: directory) }
+        _ = try await selection.send(.release(id), in: location.directory)
         Report.line("released \(id)")
     }
 }
@@ -45,8 +47,11 @@ struct RenewCommand: AsyncParsableCommand {
         abstract: "Moves a lease's expiry to its time to live after now.",
     )
 
-    /// The daemon's data directory.
+    /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
     @OptionGroup var location: PoolOptions
+
+    /// The paired host that holds the lease, if any.
+    @OptionGroup var selection: HostSelection
 
     /// The lease to renew.
     @Argument(help: "The lease to renew.")
@@ -54,22 +59,19 @@ struct RenewCommand: AsyncParsableCommand {
 
     /// Asks the daemon to renew the lease and prints the new expiry.
     ///
-    /// - Throws: ``CommandError`` when the identifier is malformed, no daemon answers, or the
-    ///   lease is unknown or ending.
+    /// - Throws: ``CommandError`` when the identifier is malformed, the paired host is unknown, no
+    ///   daemon answers, or the lease is unknown or ending.
     func run() async throws {
         try await perform()
     }
 
     /// Performs the subcommand with typed errors.
     ///
-    /// - Throws: ``CommandError`` when the identifier is malformed, no daemon answers, or the
-    ///   lease is unknown or ending.
+    /// - Throws: ``CommandError`` when the identifier is malformed, the paired host is unknown, no
+    ///   daemon answers, or the lease is unknown or ending.
     private func perform() async throws(CommandError) {
         let id = try LeaseID.parse(lease)
-        let directory = location.directory
-        let reply = try await pool { () async throws(PoolError) in
-            try await PoolClient.send(.renew(id), to: directory)
-        }
+        let reply = try await selection.send(.renew(id), in: location.directory)
         guard case let .renewed(summary) = reply else {
             throw .pool(.malformedMessage(reason: "unexpected reply to renew"))
         }
@@ -85,8 +87,11 @@ struct ListCommand: AsyncParsableCommand {
         abstract: "Prints the daemon's slots, leases, queue, and images.",
     )
 
-    /// The daemon's data directory.
+    /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
     @OptionGroup var location: PoolOptions
+
+    /// The paired host that holds the leases, if any.
+    @OptionGroup var selection: HostSelection
 
     /// Whether to print the pool as JSON.
     @Flag(help: "Prints the pool as one JSON object.")
@@ -94,27 +99,30 @@ struct ListCommand: AsyncParsableCommand {
 
     /// Asks the daemon for its state and prints it.
     ///
-    /// - Throws: ``CommandError`` when no daemon answers.
+    /// - Throws: ``CommandError`` when the paired host is unknown or no daemon answers.
     func run() async throws {
-        try await perform()
+        for line in try await lines() {
+            Report.line(line)
+        }
     }
 
-    /// Performs the subcommand with typed errors.
+    /// Asks the daemon for its state and formats it.
     ///
-    /// - Throws: ``CommandError`` when no daemon answers.
-    private func perform() async throws(CommandError) {
-        let directory = location.directory
-        let reply = try await pool { () async throws(PoolError) in try await PoolClient.send(.status, to: directory) }
+    /// A paired host shows only the leases and requests of this Mac. The table passes its text
+    /// through ``HostSelection/shown(_:)``. The JSON escapes the text of every daemon with
+    /// ``PeerText/escapedJSON(_:)``.
+    ///
+    /// - Returns: The lines to print without line breaks.
+    /// - Throws: ``CommandError`` when the paired host is unknown or no daemon answers.
+    func lines() async throws(CommandError) -> [String] {
+        let reply = try await selection.send(.status, in: location.directory)
         guard case let .status(summary) = reply else {
             throw .pool(.malformedMessage(reason: "unexpected reply to list"))
         }
         if json {
-            try Report.line(LeaseOutput.json(summary, describing: "the pool summary"))
-        } else {
-            for line in LeaseOutput.table(summary) {
-                Report.line(line)
-            }
+            return try [LeaseOutput.json(summary, describing: "the pool summary")]
         }
+        return LeaseOutput.table(summary).map(selection.shown)
     }
 }
 

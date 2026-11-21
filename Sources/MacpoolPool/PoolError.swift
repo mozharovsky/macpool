@@ -45,6 +45,35 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
     ///   - reason: The network framework's description of the failure.
     case connection(path: String, reason: String)
 
+    /// Another Mac presented a key other than the one that this Mac expects.
+    ///
+    /// Every attempt meets the same key until this Mac pairs with the other Mac again.
+    ///
+    /// - Parameters:
+    ///   - path: The other Mac's address and port.
+    ///   - presented: The fingerprint of the key that the other Mac presented.
+    ///   - expected: The fingerprint of the expected key, or a description of it.
+    case hostKeyMismatch(path: String, presented: String, expected: String)
+
+    /// A host greeted with a protocol version or a role other than the ones that this build
+    /// speaks.
+    ///
+    /// - Parameters:
+    ///   - path: The host's address and port.
+    ///   - version: The protocol version in the greeting.
+    ///   - role: The role in the greeting.
+    case protocolMismatch(path: String, version: Int, role: String)
+
+    /// A host finished the TLS handshake and then refused the connection or sent no greeting.
+    ///
+    /// The host was awake and reachable when it happened. A host that refuses this Mac's key
+    /// finishes the handshake on this side and then closes the connection.
+    ///
+    /// - Parameters:
+    ///   - path: The host's address and port.
+    ///   - reason: What the host did instead of the greeting.
+    case greetingFailed(path: String, reason: String)
+
     /// A message on a socket could not be encoded or decoded.
     ///
     /// - Parameter reason: What was wrong with the message.
@@ -156,8 +185,13 @@ public enum PoolError: Error, Sendable, Equatable, CustomStringConvertible {
         case let .socketPathTooLong(path, length):
             "the socket path \(path) has \(length) bytes, and no alias fits the "
                 + "\(SocketPath.capacity - 1) bytes of a Unix socket address, so choose a shorter --data-dir"
-        case let .connection(path, reason):
+        case let .connection(path, reason), let .greetingFailed(path, reason):
             "the connection on \(path) failed: \(reason)"
+        case let .hostKeyMismatch(path, presented, expected):
+            "the connection on \(path) failed: the host presented the key \(presented) instead of \(expected)"
+        case let .protocolMismatch(path, version, role):
+            "the connection on \(path) failed: the peer greeted with protocol version \(version) in the role "
+                + "\(role), and this Mac expects version \(PeerSecurity.protocolVersion) in the role host"
         case let .malformedMessage(reason):
             "malformed message: \(reason)"
         case let .invalidState(path, reason):
