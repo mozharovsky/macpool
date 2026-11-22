@@ -68,7 +68,8 @@ struct ReattachSchedule: Sendable {
     /// expires.
     ///
     /// - Parameters:
-    ///   - expiry: The lease's expiry from its last `ready` reply, or `nil` before the first one.
+    ///   - expiry: The lease's expiry from its last `ready` or `renewed` reply, or `nil` before the
+    ///     first `ready`.
     ///   - pairedHost: Whether a paired host holds the lease.
     ///   - now: The current time.
     /// - Returns: The expiry for a paired host that reported one. Otherwise

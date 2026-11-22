@@ -100,8 +100,9 @@ command reference lists what the guest can reach there.
 If the connection to the host breaks while `lease` holds a lease, `lease` connects again and
 attaches to the lease. The host keeps the lease for 60 seconds after it notices the break, and it
 doesn't count the time it sleeps. `lease` tries until the lease expires, with pauses of up to 15
-seconds, so a host that sleeps doesn't end the lease. Before the first `ready`, `lease` tries for
-60 seconds.
+seconds, so a host that sleeps doesn't end the lease. If `macpool renew` moves the expiry from
+another shell or Mac, the host tells `lease`, and `lease` tries until the new expiry. Before the
+first `ready`, `lease` tries for 60 seconds.
 
 `lease` stops at once if the host presents another key or greets with another protocol version.
 It also stops if the host answers but refuses this Mac for 120 seconds, because an awake host has

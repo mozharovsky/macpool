@@ -90,6 +90,19 @@ struct LeaseLedgerTests {
         }
     }
 
+    /// Finds the leases in the `renewed` replies of a list of actions.
+    ///
+    /// - Parameter actions: The actions.
+    /// - Returns: The leases in the order of the replies.
+    static func renewed(_ actions: [LedgerAction]) -> [LeaseSummary] {
+        actions.compactMap { action in
+            if case let .notify(_, .renewed(lease)) = action {
+                return lease
+            }
+            return nil
+        }
+    }
+
     /// Requests a lease and reports its supervisor ready.
     ///
     /// - Parameters:
@@ -200,12 +213,16 @@ struct LeaseLedgerTests {
         #expect(ledger.queue.isEmpty)
     }
 
-    /// Starts the time to live at the first ready report and moves it on renewal.
+    /// Starts the time to live at the first ready report and moves it on renewal. The attached
+    /// client receives a moved expiry too.
     @Test func readyStartsTimeToLiveAndRenewalMovesIt() throws {
         var ledger = Self.ledger()
         let requested = ledger.request(Self.terms(), from: Self.client(1), owner: .local, now: Self.start)
         let id = try #require(Self.launches(requested).first)
-        #expect(try ledger.renew(id, owner: .local, now: Self.at(5)).expiresAt == nil)
+        let early = try ledger.renew(id, client: Self.client(2), owner: .local, now: Self.at(5))
+        let unchanged = try #require(ledger.leases[id].map(ledger.summary(of:)))
+        #expect(unchanged.expiresAt == nil)
+        #expect(early == [.notify(Self.client(2), .renewed(unchanged))])
 
         let ready = ledger.supervisorReported(
             id,
@@ -218,12 +235,17 @@ struct LeaseLedgerTests {
         #expect(summary.expiresAt == Self.at(610))
         #expect(summary.bundle == "/pool/leases/\(id)")
 
-        #expect(try ledger.renew(id, owner: .local, now: Self.at(100)).expiresAt == Self.at(700))
+        let renewed = try ledger.renew(id, client: Self.client(2), owner: .local, now: Self.at(100))
+        let moved = try #require(ledger.leases[id].map(ledger.summary(of:)))
+        #expect(moved.expiresAt == Self.at(700))
+        #expect(renewed == [.notify(Self.client(2), .renewed(moved)), .notify(Self.client(1), .renewed(moved))])
+        let own = try ledger.renew(id, client: Self.client(1), owner: .local, now: Self.at(100))
+        #expect(own == [.notify(Self.client(1), .renewed(moved))])
         #expect(ledger.tick(now: Self.at(699), awake: Self.awake(699)).isEmpty)
         let expired = ledger.tick(now: Self.at(700), awake: Self.awake(700))
         #expect(expired == [.notify(Self.client(1), .ended(id, reason: "the lease expired")), .stop(id)])
         #expect(throws: PoolError.leaseEnding(id: id.rawValue)) {
-            try ledger.renew(id, owner: .local, now: Self.at(701))
+            try ledger.renew(id, client: Self.client(2), owner: .local, now: Self.at(701))
         }
     }
 
@@ -314,7 +336,8 @@ struct LeaseLedgerTests {
         #expect([seen.source, seen.bundle, seen.address] == ["base", nil, nil])
         let local = ledger.summary(of: record, for: .local)
         #expect([local.source, local.bundle, local.address] == ["/vms/base", "/pool/leases/\(id)", "192.168.64.2"])
-        #expect(try ledger.renew(id, owner: alice, now: Self.at(2)).bundle == nil)
+        let renewed = try ledger.renew(id, client: Self.client(1), owner: alice, now: Self.at(2))
+        #expect(Self.renewed(renewed).map(\.bundle) == [nil])
 
         let restarting = ledger.machineExited(id, .failed("the disk at /vms/base failed"), now: Self.at(3))
         let hidden = try #require(ledger.leases[id].map { ledger.summary(of: $0, for: alice) })
@@ -527,7 +550,7 @@ struct LeaseLedgerTests {
 
         let unknown = PoolError.unknownLease(id: local.rawValue)
         #expect(throws: unknown) {
-            try ledger.renew(local, owner: alice, now: Self.at(3))
+            try ledger.renew(local, client: Self.client(4), owner: alice, now: Self.at(3))
         }
         #expect(throws: unknown) {
             try ledger.release(local, owner: alice, reason: "taken")
@@ -538,7 +561,14 @@ struct LeaseLedgerTests {
         #expect(ledger.leases[local]?.phase == .ready)
         #expect(ledger.clients[local] == Self.client(1))
 
-        #expect(try ledger.renew(own, owner: alice, now: Self.at(3)).expiresAt == Self.at(603))
+        let renewed = try ledger.renew(own, client: Self.client(2), owner: alice, now: Self.at(3))
+        #expect(Self.renewed(renewed).map(\.expiresAt) == [Self.at(603)])
+        let renewedOnHost = try ledger.renew(own, client: Self.client(9), owner: .local, now: Self.at(3))
+        let record = try #require(ledger.leases[own])
+        #expect(renewedOnHost == [
+            .notify(Self.client(9), .renewed(ledger.summary(of: record, for: .local))),
+            .notify(Self.client(2), .renewed(ledger.summary(of: record, for: alice))),
+        ])
         let released = try ledger.release(own, owner: .local, reason: "released on the host")
         #expect(released == [.notify(Self.client(2), .ended(own, reason: "released on the host")), .stop(own)])
         #expect(ledger.leases[own]?.owner == alice)
