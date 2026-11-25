@@ -20,7 +20,7 @@ public struct LaunchAgent: Sendable, Equatable {
     public var slots: Int
 
     /// The arguments of `macpool daemon run` that make the daemon listen for paired Macs, such as
-    /// `--listen 192.0.2.20:7373`, or none.
+    /// `--listen=192.0.2.20:7373`, or none.
     ///
     /// The job passes them after the other arguments. The job runs in the root directory, so the
     /// paths in them must be absolute.
