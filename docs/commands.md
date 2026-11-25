@@ -140,7 +140,7 @@ pairs. The daemon on this Mac must listen for paired Macs. See
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of the daemon. |
-| `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. |
+| `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. It must lead to the address that the daemon listens on. |
 | `--priority-ceiling N` | `0` | The highest priority that the Mac may ask for when it leases. |
 
 The command prints the code and its end, and then waits.
@@ -233,8 +233,9 @@ prints the host and the number of leases that ended, such as
 `removed 7xkq-4mzp-c2rd-6tvw lab leases=0`. If the host can't be reached or refuses, the host stays
 in the list.
 
-`--local` suits a host that is gone or that revoked this Mac. The host then keeps this Mac's record
-until you run `host revoke` there.
+`--local` suits a host that is gone or that revoked this Mac. The host then keeps this Mac in its
+`host list`. Run `host revoke` there to block this Mac. The record stays, with `BLOCKED` set to
+`yes`.
 
 ## connect
 

@@ -35,8 +35,10 @@ that belongs to another user or that other users can write to.
 
 With `--listen`, the daemon also accepts paired Macs over TLS on one numeric address of this Mac,
 such as `192.0.2.20` or `[2001:db8::20]:7480`. The default port is 7373. A host name, `0.0.0.0`,
-and `::` don't work, because the daemon would then listen on every interface. A Tailscale address
-stays the same when the Mac changes networks, so it suits a Mac that moves.
+and `::` don't work, because the daemon would then listen on every interface. Other Macs connect
+only to this address, so pick one that they reach, such as a LAN or Tailscale address. A loopback
+address such as `127.0.0.1` serves no other Mac. A Tailscale address stays the same when the Mac
+changes networks, so it suits a Mac that moves.
 
 ```sh
 $macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base"
