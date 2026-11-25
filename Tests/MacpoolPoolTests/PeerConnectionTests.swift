@@ -421,6 +421,7 @@ struct PeerConnectionTests {
             queue: [],
             listener: ListenerSummary(address: "127.0.0.1", port: port, problem: nil),
         )))
+        #expect(await daemon.summary().listener == ListenerSummary(address: "127.0.0.1", port: port, problem: nil))
         let remote = try await fixture.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
         try remote.send(PoolRequest.status)
         #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))

@@ -574,10 +574,11 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, queue, and images, as the local user sees them.
+    /// - Returns: The slots, leases, queue, images, and listener, as the local user sees them.
     public func summary() -> PoolSummary {
         var summary = ledger.summary(for: .local)
         summary.images = configuration.directory.images()
+        summary.listener = listenerSummary()
         return summary
     }
 
@@ -1176,13 +1177,8 @@ public actor PoolDaemon {
             case let .renew(id):
                 try perform(ledger.renew(id, client: client, owner: owner, now: configuration.now()))
             case .status:
-                var summary = ledger.summary(for: owner)
                 // A paired Mac gets no paths on this Mac's disk and nothing about the listener.
-                if owner == .local {
-                    summary.images = configuration.directory.images()
-                    summary.listener = listenerSummary()
-                }
-                reply(.status(summary), to: client)
+                reply(.status(owner == .local ? summary() : ledger.summary(for: owner)), to: client)
             case let .invite(address, priorityCeiling):
                 try reply(
                     invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),

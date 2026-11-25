@@ -88,7 +88,7 @@ struct DaemonCommandTests {
         let agent = install.agent(running: URL(filePath: "/opt/macpool"))
         #expect(agent.slots == 1)
         #expect(agent.peerArguments == [
-            "--listen", "[2001:db8::20]:7480", "--host-name", "lab", "--offer", "base=\(base)",
+            "--listen=[2001:db8::20]:7480", "--host-name=lab", "--offer=base=\(base)",
         ])
         let run = try #require(try Macpool.parseAsRoot(["daemon", "run"] + agent.peerArguments) as? DaemonRunCommand)
         #expect(run.listening.settings?.address == "2001:db8::20")
@@ -98,6 +98,19 @@ struct DaemonCommandTests {
 
         let local = try #require(try Macpool.parseAsRoot(["daemon", "install"]) as? DaemonInstallCommand)
         #expect(local.agent(running: URL(filePath: "/opt/macpool")).peerArguments.isEmpty)
+    }
+
+    /// Passes a host name and a source name that start with a dash to `daemon run` as values.
+    @Test func passesValuesThatStartWithADash() throws {
+        let install = try #require(
+            try Macpool.parseAsRoot([
+                "daemon", "install", "--listen", "192.0.2.20", "--host-name=-lab", "--offer=-base=/vms/base",
+            ]) as? DaemonInstallCommand,
+        )
+        let arguments = install.agent(running: URL(filePath: "/opt/macpool")).peerArguments
+        let run = try #require(try Macpool.parseAsRoot(["daemon", "run"] + arguments) as? DaemonRunCommand)
+        #expect(run.listening.settings?.name == "-lab")
+        #expect(run.listening.offeredSources == ["-base": "/vms/base"])
     }
 
     /// Prints whether the daemon listens for paired Macs after the first line of `list`.
