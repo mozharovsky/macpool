@@ -56,7 +56,9 @@ provisioning only once.
 ### Pool
 
 `macpool daemon` runs the pool daemon from MacpoolPool in the foreground, and
-`macpool daemon install` registers it as a launchd job in the user's session. `macpool lease`
+`macpool daemon install` registers it as a launchd job in the user's session. ``ListenOptions``
+makes either one listen for paired Macs on a ``ListenAddress`` and offer each ``OfferedSource``
+to them. `macpool lease`
 waits for a slot, prints the clone's lease identifier, bundle, and address, and holds the lease
 until Control-C, the end of a command after `--`, or `--detach` hands it to the daemon.
 `macpool release`, `macpool renew`, and `macpool list` act on leases by their identifiers. With
@@ -135,6 +137,9 @@ lease one that is not ready.
 - ``LogLevel``
 - ``MachineSession``
 - ``PoolOptions``
+- ``ListenOptions``
+- ``ListenAddress``
+- ``OfferedSource``
 - ``HostSelection``
 - ``ReattachSchedule``
 - ``StandardRelay``

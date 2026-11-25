@@ -22,6 +22,10 @@ struct DaemonCommand: AsyncParsableCommand {
 ///
 /// The daemon leaves its supervisors and their VMs running when it exits. A daemon that starts
 /// later on the same data directory resumes the leases.
+///
+/// With `--listen` the daemon also listens for paired Macs. If the address is not on an
+/// interface yet or another process holds the port, the daemon serves its local socket and tries
+/// to listen again every 10 seconds.
 struct DaemonRunCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -35,6 +39,9 @@ struct DaemonRunCommand: AsyncParsableCommand {
     /// The number of VMs that run at once.
     @Option(help: "The number of VMs that run at once, 1 or 2.")
     var slots = PoolPolicy.maximumSlots
+
+    /// The listener for paired Macs and the sources that they may lease.
+    @OptionGroup var listening: ListenOptions
 
     /// The diagnostic output options.
     @OptionGroup var logging: LoggingOptions
@@ -67,6 +74,8 @@ struct DaemonRunCommand: AsyncParsableCommand {
             directory: directory,
             policy: PoolPolicy(slots: slots),
             launcher: ProcessSupervisorLauncher(executable: executable),
+            offeredSources: listening.offeredSources,
+            peers: listening.settings,
             logger: logging.makeLogger(label: "macpool.daemon"),
         )
         let (signals, continuation) = AsyncStream.makeStream(of: Int32.self)
@@ -88,6 +97,9 @@ struct DaemonRunCommand: AsyncParsableCommand {
 /// The job runs the executable that runs this command, so a later build at the same path takes
 /// effect at the job's next start. Installing again replaces a loaded job and restarts the daemon,
 /// while leased VMs keep running under their supervisors.
+///
+/// The job passes `--listen`, `--host-name`, and `--offer` on to `daemon run`. Installing again
+/// without `--listen` stops the listener for paired Macs.
 struct DaemonInstallCommand: AsyncParsableCommand {
     /// The subcommand's name and summary.
     static let configuration = CommandConfiguration(
@@ -102,6 +114,9 @@ struct DaemonInstallCommand: AsyncParsableCommand {
     @Option(help: "The number of VMs that run at once, 1 or 2.")
     var slots = PoolPolicy.maximumSlots
 
+    /// The listener for paired Macs and the sources that they may lease.
+    @OptionGroup var listening: ListenOptions
+
     /// Rejects a slot count that macOS does not allow.
     ///
     /// - Throws: `ValidationError` when the count is not 1 or 2.
@@ -109,6 +124,19 @@ struct DaemonInstallCommand: AsyncParsableCommand {
         guard (1 ... PoolPolicy.maximumSlots).contains(slots) else {
             throw ValidationError("--slots takes 1 to \(PoolPolicy.maximumSlots).")
         }
+    }
+
+    /// The description of the job.
+    ///
+    /// - Parameter executable: The signed `macpool` executable that the job runs.
+    /// - Returns: The job with the data directory, the slots, and the listener's arguments.
+    func agent(running executable: URL) -> LaunchAgent {
+        LaunchAgent(
+            executable: executable,
+            directory: location.directory,
+            slots: slots,
+            peerArguments: listening.arguments,
+        )
     }
 
     /// Writes the job's property list and loads it.
@@ -122,7 +150,7 @@ struct DaemonInstallCommand: AsyncParsableCommand {
     ///
     /// - Throws: ``CommandError`` when the job file cannot be written or launchd rejects it.
     private func perform() async throws(CommandError) {
-        let agent = try LaunchAgent(executable: Executable.current(), directory: location.directory, slots: slots)
+        let agent = try agent(running: Executable.current())
         try pool { () throws(PoolError) in try agent.directory.prepare() }
         let data = try pool { () throws(PoolError) in try agent.propertyList() }
         let file = LaunchAgent.propertyListFile

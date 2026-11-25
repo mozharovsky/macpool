@@ -108,7 +108,8 @@ requests only after that line. Both sides then exchange the same lines as on the
 
 The daemon loads the key when it starts listening. A key or a list that cannot be loaded, or a
 port that another process holds, leaves the local socket serving. The daemon logs the failure and
-tries again after ``PeerSettings/retryInterval``.
+tries again after ``PeerSettings/retryInterval``. A status reply to the local user carries a
+``ListenerSummary`` with the address, the port, and the reason of the last failure.
 
 Every connection holds a file descriptor. When the daemon starts, it raises the process's soft
 limit of open files to 4096, or to the hard limit or `kern.maxfilesperproc` when either is lower.
@@ -361,6 +362,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``LeaseSummary``
 - ``QueuedSummary``
 - ``PoolSummary``
+- ``ListenerSummary``
 - ``ImageSummary``
 
 ### Supervisors

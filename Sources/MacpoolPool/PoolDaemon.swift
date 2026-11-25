@@ -294,7 +294,8 @@ public actor PoolDaemon {
     /// the limit, or `nil` when the limit cannot be read.
     private var openFileLimit: rlim_t?
 
-    /// Why the listener for paired Macs last failed to start, or `nil` after it started.
+    /// Why the listener for paired Macs last failed to start or stopped, or `nil` after it
+    /// started.
     ///
     /// The daemon logs a failure only when its reason differs from this one. A failure that
     /// repeats on every attempt therefore appears in the log once.
@@ -681,6 +682,7 @@ public actor PoolDaemon {
         }
         stopped.close()
         peerListener = nil
+        peerListenerFailure = "the listener stopped"
         configuration.logger.error("The listener for paired Macs stopped")
     }
 
@@ -1021,6 +1023,21 @@ public actor PoolDaemon {
         peerListener?.port
     }
 
+    /// Describes the listener for paired Macs for the local user.
+    ///
+    /// - Returns: The address, the port, and the reason of the last failure, or `nil` when the
+    ///   configuration sets no listener.
+    private func listenerSummary() -> ListenerSummary? {
+        guard let peers = configuration.peers else {
+            return nil
+        }
+        guard let peerListener else {
+            let problem = peerListenerFailure ?? "the daemon has not started to listen yet"
+            return ListenerSummary(address: peers.address, port: peers.port, problem: problem)
+        }
+        return ListenerSummary(address: peers.address, port: peerListener.port, problem: nil)
+    }
+
     /// Reads a client's requests until it disconnects.
     ///
     /// - Parameters:
@@ -1158,9 +1175,10 @@ public actor PoolDaemon {
                 try perform(ledger.renew(id, client: client, owner: owner, now: configuration.now()))
             case .status:
                 var summary = ledger.summary(for: owner)
-                // A paired Mac gets no paths on this Mac's disk.
+                // A paired Mac gets no paths on this Mac's disk and nothing about the listener.
                 if owner == .local {
                     summary.images = configuration.directory.images()
+                    summary.listener = listenerSummary()
                 }
                 reply(.status(summary), to: client)
             case let .invite(address, priorityCeiling):

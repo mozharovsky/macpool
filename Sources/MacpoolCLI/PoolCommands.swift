@@ -173,12 +173,22 @@ enum LeaseOutput {
 
     /// Formats the pool as tables of leases and images, with one line per queued request.
     ///
+    /// A line about the listener for paired Macs follows the first line when the summary has one.
+    ///
     /// - Parameter pool: The pool.
     /// - Returns: The lines without line breaks.
     static func table(_ pool: PoolSummary) -> [String] {
         var lines = [
             "slots \(pool.slots), leases \(pool.leases.count), queued \(pool.queue.count), images \(pool.images.count)",
         ]
+        if let listener = pool.listener {
+            let place = ListenAddress(address: listener.address, port: listener.port)
+            if let problem = listener.problem {
+                lines.append("not listening for paired Macs on \(place): \(problem)")
+            } else {
+                lines.append("listening for paired Macs on \(place)")
+            }
+        }
         if !pool.leases.isEmpty {
             let header = ["LEASE", "PHASE", "ADDRESS", "EXPIRES", "RESTARTS", "SOURCE"]
             lines += aligned([header] + pool.leases.map { lease in

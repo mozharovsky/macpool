@@ -17,12 +17,37 @@ next daemon picks them up.
 | --- | --- | --- |
 | `--slots N` | 2 | How many VMs run at once, 1 or 2. `run` and `install` take it. |
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | Where the daemon keeps its state, clones, sockets, and logs. |
+| `--listen ADDRESS[:PORT]` | off | Listens for paired Macs. See [Listening for other Macs](#listening-for-other-macs). |
+| `--host-name NAME` | this Mac's name | The name that a Mac sees for this host when it pairs. Needs `--listen`. |
+| `--offer NAME=BUNDLE` | none | A stopped source that paired Macs may lease by its name. Repeat it for more sources. Needs `--listen`. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. Only `run` takes it. |
+
+`install` writes these options into the job, so the next start of the daemon uses them too. To
+change them, run `install` again with the new options.
 
 Every pool command except `daemon uninstall` takes `--data-dir`. A daemon's data directory must be
 on the same APFS volume as its sources. With `--pool`, the directory holds only this Mac's key and
 paired hosts, and it need not be on the same volume as any source. The daemon refuses a directory
 that belongs to another user or that other users can write to.
+
+## Listening for other Macs
+
+With `--listen`, the daemon also accepts paired Macs over TLS on one numeric address of this Mac,
+such as `192.0.2.20` or `[2001:db8::20]:7480`. The default port is 7373. A host name, `0.0.0.0`,
+and `::` don't work, because the daemon would then listen on every interface. A Tailscale address
+stays the same when the Mac changes networks, so it suits a Mac that moves.
+
+```sh
+$macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base"
+$macpool list
+```
+
+`list` then prints `listening for paired Macs on 192.0.2.20:7373`. If the address isn't on an
+interface yet or another process holds the port, `list` prints why the daemon isn't listening. The
+daemon keeps serving this Mac and tries again every 10 seconds.
+
+A paired Mac leases only the sources that `--offer` names, by their names. It can't share a
+directory of this Mac with its guest.
 
 ## Leasing a clone
 

@@ -417,6 +417,12 @@ public struct PoolSummary: Codable, Sendable, Equatable {
     /// Only clients on this Mac receive images. A paired Mac receives an empty array.
     public var images: [ImageSummary]
 
+    /// The state of the listener for paired Macs, or `nil` when the daemon serves only its local
+    /// socket.
+    ///
+    /// Only clients on this Mac receive it.
+    public var listener: ListenerSummary?
+
     /// Creates a summary.
     ///
     /// - Parameters:
@@ -424,16 +430,25 @@ public struct PoolSummary: Codable, Sendable, Equatable {
     ///   - leases: The leases that hold a slot.
     ///   - queue: The requests that wait for a slot.
     ///   - images: The images in the data directory.
-    public init(slots: Int, leases: [LeaseSummary], queue: [QueuedSummary], images: [ImageSummary] = []) {
+    ///   - listener: The state of the listener for paired Macs, or `nil`.
+    public init(
+        slots: Int,
+        leases: [LeaseSummary],
+        queue: [QueuedSummary],
+        images: [ImageSummary] = [],
+        listener: ListenerSummary? = nil,
+    ) {
         self.slots = slots
         self.leases = leases
         self.queue = queue
         self.images = images
+        self.listener = listener
     }
 
     /// Decodes a summary and treats a missing `images` key as no images.
     ///
-    /// A daemon from before images existed sends no such key.
+    /// A daemon from before images existed sends no such key, and one from before listeners
+    /// existed sends no `listener` key.
     ///
     /// - Parameter decoder: The decoder.
     /// - Throws: `DecodingError` when a key is missing or holds a value of the wrong type.
@@ -443,6 +458,7 @@ public struct PoolSummary: Codable, Sendable, Equatable {
         leases = try container.decode([LeaseSummary].self, forKey: .leases)
         queue = try container.decode([QueuedSummary].self, forKey: .queue)
         images = try container.decodeIfPresent([ImageSummary].self, forKey: .images) ?? []
+        listener = try container.decodeIfPresent(ListenerSummary.self, forKey: .listener)
     }
 
     /// The JSON keys of the summary.
@@ -455,6 +471,36 @@ public struct PoolSummary: Codable, Sendable, Equatable {
         case queue
         /// The `images` key.
         case images
+        /// The `listener` key.
+        case listener
+    }
+}
+
+/// The state of the daemon's listener for paired Macs.
+public struct ListenerSummary: Codable, Sendable, Equatable {
+    /// The address that the listener binds to.
+    public var address: String
+
+    /// The port of the listener, or the port that the daemon tries while the listener is not up.
+    ///
+    /// While the daemon does not listen on a port that the system picks, the port is 0.
+    public var port: UInt16
+
+    /// Why the daemon does not listen, or `nil` while it listens.
+    ///
+    /// The daemon tries again after ``PeerSettings/retryInterval``.
+    public var problem: String?
+
+    /// Creates a summary of the listener.
+    ///
+    /// - Parameters:
+    ///   - address: The address that the listener binds to.
+    ///   - port: The port of the listener, or the port that the daemon tries.
+    ///   - problem: Why the daemon does not listen, or `nil` while it listens.
+    public init(address: String, port: UInt16, problem: String?) {
+        self.address = address
+        self.port = port
+        self.problem = problem
     }
 }
 
@@ -1093,7 +1139,7 @@ public struct PairedMac: Sendable, Equatable, Codable {
     static let maximumNameLength = 64
 
     /// The rule for a Mac's name in the words of error messages.
-    static let nameRule = "1 to \(maximumNameLength) printable characters that include a letter, digit, "
+    public static let nameRule = "1 to \(maximumNameLength) printable characters that include a letter, digit, "
         + "punctuation mark, or symbol and do not start with a combining mark"
 
     /// Reports whether a Mac's name can be shown to people as it is.
@@ -1102,7 +1148,8 @@ public struct PairedMac: Sendable, Equatable, Codable {
     ///
     /// - It has 1 to 64 Unicode scalars.
     /// - Its first scalar is not a mark.
-    /// - It has a letter, number, punctuation, or symbol scalar that is not in ``blankSymbols``.
+    /// - It has a letter, number, punctuation, or symbol scalar other than the blank Braille pattern
+    ///   U+2800 and the musical null notehead U+1D159.
     /// - It has no control, format, line or paragraph separator, private-use, surrogate,
     ///   unassigned, or default-ignorable scalar.
     ///
@@ -1115,12 +1162,22 @@ public struct PairedMac: Sendable, Equatable, Codable {
     ///
     /// - Parameter name: A name that a Mac gave for itself.
     /// - Returns: Whether the name meets every condition.
-    static func isValidName(_ name: String) -> Bool {
+    public static func isValidName(_ name: String) -> Bool {
         let scalars = name.unicodeScalars
         guard let first = scalars.first, scalars.count <= maximumNameLength else {
             return false
         }
         return !isMark(first) && scalars.allSatisfy(isPrintable) && scalars.contains(where: isVisible)
+    }
+
+    /// Returns this Mac's name in Sharing settings in a form that a pairing accepts.
+    ///
+    /// - Returns: The first 64 Unicode scalars of the name, or `Mac` when they are not a valid
+    ///   name.
+    public static func localName() -> String {
+        let scalars = (Host.current().localizedName ?? "").unicodeScalars.prefix(maximumNameLength)
+        let name = String(String.UnicodeScalarView(scalars))
+        return isValidName(name) ? name : "Mac"
     }
 
     /// Reports whether a scalar may appear in a Mac's name.

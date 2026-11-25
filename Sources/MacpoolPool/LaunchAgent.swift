@@ -19,16 +19,25 @@ public struct LaunchAgent: Sendable, Equatable {
     /// The number of VMs that the daemon runs at once.
     public var slots: Int
 
+    /// The arguments of `macpool daemon run` that make the daemon listen for paired Macs, such as
+    /// `--listen 192.0.2.20:7373`, or none.
+    ///
+    /// The job passes them after the other arguments. The job runs in the root directory, so the
+    /// paths in them must be absolute.
+    public var peerArguments: [String]
+
     /// Creates a job description.
     ///
     /// - Parameters:
     ///   - executable: The signed `macpool` executable.
     ///   - directory: The data directory.
     ///   - slots: The number of VMs that run at once.
-    public init(executable: URL, directory: PoolDirectory, slots: Int) {
+    ///   - peerArguments: The arguments that make the daemon listen for paired Macs, or none.
+    public init(executable: URL, directory: PoolDirectory, slots: Int, peerArguments: [String] = []) {
         self.executable = executable
         self.directory = directory
         self.slots = slots
+        self.peerArguments = peerArguments
     }
 
     /// The job's property list file in the user's `~/Library/LaunchAgents`.
@@ -59,7 +68,7 @@ public struct LaunchAgent: Sendable, Equatable {
                 String(slots),
                 "--log-level",
                 "info",
-            ],
+            ] + peerArguments,
             "RunAtLoad": true,
             "KeepAlive": true,
             "AbandonProcessGroup": true,

@@ -26,9 +26,7 @@ public struct PeerSettings: Sendable {
     /// Creates listener settings.
     ///
     /// - Parameters:
-    ///   - name: The host's name for clients, or `nil` for the first 64 Unicode scalars of this
-    ///     Mac's name in Sharing settings. If that name has characters that a pairing rejects, the
-    ///     default is `Mac`.
+    ///   - name: The host's name for clients, or `nil` for ``PairedMac/localName()``.
     ///   - address: The numeric IP address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - retryInterval: The wait before another attempt to listen.
@@ -38,20 +36,19 @@ public struct PeerSettings: Sendable {
         port: UInt16,
         retryInterval: Duration = .seconds(10),
     ) {
-        self.name = name ?? Self.computerName()
+        self.name = name ?? PairedMac.localName()
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
     }
 
-    /// Returns this Mac's name in Sharing settings in a form that a pairing accepts.
+    /// Reports whether the listener can bind to an address.
     ///
-    /// - Returns: The first 64 Unicode scalars of the name, or `Mac` when they are not a valid
-    ///   name.
-    private static func computerName() -> String {
-        let scalars = (Host.current().localizedName ?? "").unicodeScalars.prefix(PairedMac.maximumNameLength)
-        let name = String(String.UnicodeScalarView(scalars))
-        return PairedMac.isValidName(name) ? name : "Mac"
+    /// - Parameter address: An address for ``address``.
+    /// - Returns: Whether the address is a numeric IPv4 address in its canonical dotted form or a
+    ///   numeric IPv6 address without a zone, and is neither `0.0.0.0` nor `::`.
+    public static func isValidAddress(_ address: String) -> Bool {
+        PeerListener.listeningHost(for: address) != nil
     }
 }
 
