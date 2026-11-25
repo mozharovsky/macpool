@@ -140,7 +140,7 @@ pairs. The daemon on this Mac must listen for paired Macs. See
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of the daemon. |
-| `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. |
+| `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. It must lead to the address that the daemon listens on. |
 | `--priority-ceiling N` | `0` | The highest priority that the Mac may ask for when it leases. |
 
 The command prints the code and its end, and then waits.
