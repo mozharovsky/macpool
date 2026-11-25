@@ -233,8 +233,9 @@ prints the host and the number of leases that ended, such as
 `removed 7xkq-4mzp-c2rd-6tvw lab leases=0`. If the host can't be reached or refuses, the host stays
 in the list.
 
-`--local` suits a host that is gone or that revoked this Mac. The host then keeps this Mac's record
-until you run `host revoke` there.
+`--local` suits a host that is gone or that revoked this Mac. The host then keeps this Mac in its
+`host list`. Run `host revoke` there to block this Mac. The record stays, with `BLOCKED` set to
+`yes`.
 
 ## connect
 
