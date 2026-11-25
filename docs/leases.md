@@ -107,7 +107,8 @@ When a lease ends, the daemon stops the VM by force and deletes the clone.
 
 `lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
 daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
-command line can't pair Macs yet. `--pool` works only with a host that a program paired through
+host prints a pairing code with [`macpool host invite`](commands.md#host-invite). The client has
+no command to pair yet, so `--pool` works only with a host that a program paired through
 `MacpoolPool`.
 
 With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
