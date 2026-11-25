@@ -87,6 +87,8 @@ released 3f9c21ab
 - **Shared folders.** You can share a host directory with the guest, read-write or read-only.
 - **Leases survive a daemon restart.** Each leased VM runs in its own process and keeps running
   while the daemon restarts.
+- **Leases from your other Macs.** Pair two Macs with a one-time code, and lease VMs from the other
+  Mac over TLS with pinned keys.
 
 ## What you can do with it
 
@@ -141,8 +143,8 @@ replacement fails.
 
 These parts don't exist yet.
 
-- The command line can't pair two Macs. [`--pool`](docs/leases.md#leasing-from-another-mac) works
-  only with a host that a program paired through `MacpoolPool`.
+- A client reaches each paired host by the address in its pairing code. Nothing finds hosts or
+  spreads leases across them.
 - A command reaches a guest only over SSH. macpool has no agent inside the guest.
 - Prepared VMs have no layers. Each one is a full macOS install.
 - There's no packaged release. You build macpool from source.

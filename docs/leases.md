@@ -103,10 +103,27 @@ When a lease ends, the daemon stops the VM by force and deletes the clone.
 
 ## Leasing from another Mac
 
+The host is the Mac that runs the VMs, and the client is the Mac that leases them. Pair them once.
+On the host, start the daemon with `--listen` and `--offer`, as in
+[Listening for other Macs](#listening-for-other-macs), and print a code.
+
+```sh
+$macpool host invite
+```
+
+On the client, pair within 10 minutes. Copy the code to the client's clipboard over a channel that
+you trust, because anyone with the code can pair while it works.
+
+```sh
+pbpaste | $macpool pool add
+```
+
+The host prints `paired` with the client's short key, and the client prints the same key as
+`this_mac=`. If the keys differ, another Mac used the code. Revoke it on the host with
+`macpool host revoke`. [Commands](commands.md#host-invite) describes the pairing commands.
+
 `lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
-daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
-command line can't pair Macs yet. `--pool` works only with a host that a program paired through
-`MacpoolPool`.
+daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`.
 
 With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
 `--share` isn't allowed. The host shows this Mac only its own leases and no paths on its disk.

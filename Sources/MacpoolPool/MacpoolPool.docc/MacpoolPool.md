@@ -178,9 +178,10 @@ already knows keeps its record and its ceiling.
 
 ``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
 it sends the secret. The host then adds the client to `clients.json`, and the client adds the
-host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``. If the two
-texts differ, someone else used the code. ``TrustedClient/paired(in:)`` and
-``TrustedHost/paired(in:)`` read the two lists without a running daemon.
+host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``, and
+``KeyFingerprint/thisMac(in:)`` returns it on the client. If the two texts differ, someone else
+used the code. ``TrustedClient/paired(in:)`` and ``TrustedHost/paired(in:)`` read the two lists
+without a running daemon.
 
 A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
 5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
@@ -260,7 +261,8 @@ cannot be read, the request fails and the daemon changes nothing. If the save fa
 reads the list again, because a save can fail after the rename that puts the new list in place.
 When the list no longer names the client, the daemon forgets the client. Otherwise the request
 fails and the daemon changes nothing. The daemon refuses this request from a blocked client. A
-blocked record therefore stays.
+blocked record therefore stays. After the host forgot the client, or when the host cannot be
+reached, ``TrustedHost/remove(_:from:)`` removes the host from the client's list.
 
 ### Supervisors
 

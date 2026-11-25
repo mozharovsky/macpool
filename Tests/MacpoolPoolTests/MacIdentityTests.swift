@@ -30,6 +30,7 @@ struct MacIdentityTests {
         #expect(try String(contentsOfFile: file, encoding: .utf8).hasPrefix("-----BEGIN PRIVATE KEY-----\n"))
         let backup = try directory.trustDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey])
         #expect(backup.isExcludedFromBackup == true)
+        #expect(try KeyFingerprint.thisMac(in: directory) == KeyFingerprint(digest: created.keyDigest))
     }
 
     /// Leaves processes that create the key at the same time with one shared key.

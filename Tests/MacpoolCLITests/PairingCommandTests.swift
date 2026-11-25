@@ -96,10 +96,7 @@ struct PairingCommandTests {
     /// Revokes a Mac by its short key in any case and prints what ended.
     @Test func revokesAMac() async throws {
         let host = try await PairingDaemon()
-        let client = try host.clientDirectory()
-        let invitation = try await host.invite()
-        _ = try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
-        _ = try await invitation.finish()
+        let client = try await host.pairedClient()
         let key = try PairingDaemon.key(of: client)
 
         let revoke = try #require(
@@ -118,6 +115,105 @@ struct PairingCommandTests {
         }
         #expect(error?.description.contains("no paired Mac has the key aaaa-aaaa-aaaa-aaaa") == true)
         await host.stop()
+    }
+
+    /// Pairs with the code and prints the host and this Mac's key, which the host prints too.
+    @Test func addsAHost() async throws {
+        let host = try await PairingDaemon()
+        let invitation = try await host.invite()
+        let client = try host.clientDirectory()
+        let add = try #require(
+            try Macpool.parseAsRoot([
+                "pool", "add", "--data-dir", client.root.path(percentEncoded: false), "--name", "runner",
+                invitation.code.description,
+            ]) as? PoolAddCommand,
+        )
+        let hostKey = try PairingDaemon.key(of: host.directory)
+        let clientKey = try PairingDaemon.key(of: client)
+        #expect(try await add.lines(pairingWith: #require(add.code)) == [
+            "paired \(PeerText.name("lab", key: hostKey))",
+            "this_mac=\(clientKey.shortKey)",
+        ])
+        #expect(try await invitation.finish() == ["paired \(PeerText.name("runner", key: clientKey))"])
+        let hosts = try TrustedHost.paired(in: client)
+        #expect(hosts.map(\.key) == [hostKey])
+        #expect(hosts.first?.address == "127.0.0.1")
+        await host.stop()
+    }
+
+    /// Gives the host this Mac's name when `--name` is missing.
+    @Test func addsWithThisMacsName() async throws {
+        let host = try await PairingDaemon()
+        let invitation = try await host.invite()
+        let client = try host.clientDirectory()
+        let add = try #require(
+            try Macpool.parseAsRoot(["pool", "add", "--data-dir", client.root.path(percentEncoded: false)])
+                as? PoolAddCommand,
+        )
+        _ = try await add.lines(pairingWith: " \(invitation.code)\n")
+        _ = try await invitation.finish()
+        #expect(try TrustedClient.paired(in: host.directory).map(\.name) == [PairedMac.localName()])
+        await host.stop()
+    }
+
+    /// Refuses text that is not a code and a name that a host would refuse.
+    @Test func refusesInvalidAdditions() async throws {
+        let add = try #require(try Macpool.parseAsRoot(["pool", "add"]) as? PoolAddCommand)
+        await #expect(throws: CommandError.self) {
+            try await add.lines(pairingWith: "macpool1:192.0.2.20:7373")
+        }
+        #expect(throws: (any Error).self) {
+            try Macpool.parseAsRoot(["pool", "add", "--name", "\u{202E}runner"])
+        }
+    }
+
+    /// Asks the host to forget this Mac and removes the host from the list.
+    @Test func removesAHost() async throws {
+        let host = try await PairingDaemon()
+        let client = try await host.pairedClient()
+        let hostKey = try PairingDaemon.key(of: host.directory)
+        let remove = try #require(
+            try Macpool.parseAsRoot(["pool", "remove", "--data-dir", client.root.path(percentEncoded: false), "lab"])
+                as? PoolRemoveCommand,
+        )
+        #expect(try await remove.lines() == ["removed \(PeerText.name("lab", key: hostKey)) leases=0"])
+        #expect(try TrustedHost.paired(in: client).isEmpty)
+        #expect(try TrustedClient.paired(in: host.directory).isEmpty)
+        await host.stop()
+    }
+
+    /// Keeps a host that refuses this Mac, and removes it with `--local`.
+    @Test func removesARevokingHostLocally() async throws {
+        let host = try await PairingDaemon()
+        let client = try await host.pairedClient()
+        let clientKey = try PairingDaemon.key(of: client)
+        _ = try await PoolClient.send(.revoke(key: clientKey.shortKey), to: host.directory)
+        let path = client.root.path(percentEncoded: false)
+
+        let remove = try #require(
+            try Macpool.parseAsRoot(["pool", "remove", "--data-dir", path, "lab"]) as? PoolRemoveCommand,
+        )
+        let error = await #expect(throws: CommandError.self) {
+            try await remove.lines()
+        }
+        #expect(error?.description.contains("--local") == true)
+        #expect(try TrustedHost.paired(in: client).count == 1)
+
+        let local = try #require(
+            try Macpool.parseAsRoot(["pool", "remove", "--data-dir", path, "--local", "lab"]) as? PoolRemoveCommand,
+        )
+        let hostKey = try PairingDaemon.key(of: host.directory)
+        #expect(try await local.lines() == ["removed \(PeerText.name("lab", key: hostKey))"])
+        #expect(try TrustedHost.paired(in: client).isEmpty)
+        #expect(try TrustedClient.paired(in: host.directory).first?.isBlocked == true)
+        await host.stop()
+    }
+
+    /// Refuses `--end-leases` with `--local`, because only the host can end leases.
+    @Test func refusesEndingLeasesLocally() {
+        #expect(throws: (any Error).self) {
+            try Macpool.parseAsRoot(["pool", "remove", "--local", "--end-leases", "lab"])
+        }
     }
 }
 
@@ -211,6 +307,18 @@ private final class PairingDaemon {
     func clientDirectory() throws -> PoolDirectory {
         clients += 1
         return PoolDirectory(root: parent.appending(path: "client\(clients)", directoryHint: .isDirectory))
+    }
+
+    /// Pairs a new client Mac named `runner` through `host invite`.
+    ///
+    /// - Returns: The client's data directory.
+    /// - Throws: An error when the invitation or the pairing fails.
+    func pairedClient() async throws -> PoolDirectory {
+        let client = try clientDirectory()
+        let invitation = try await invite()
+        _ = try await PoolClient.pair(using: invitation.code, name: "runner", directory: client)
+        _ = try await invitation.finish()
+        return client
     }
 
     /// Returns the fingerprint of the key in a data directory.

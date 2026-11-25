@@ -71,7 +71,9 @@ terminal shows them. Each table prints a Mac's short key in a column before its 
 name can imitate a short key.
 
 `macpool host invite` asks the daemon for a pairing code and waits until a Mac pairs with it.
-`macpool host revoke` asks the daemon to block a paired client.
+`macpool host revoke` asks the daemon to block a paired client. On the client, `macpool pool add`
+pairs with the code, and `macpool pool remove` asks the host to forget this Mac before it removes
+the host from the list.
 
 `macpool connect` relays its standard input and output to the SSH server of a lease's guest, for
 the `ProxyCommand` option of `ssh`. ``HostSelection`` picks the daemon on this Mac or a paired
@@ -122,6 +124,8 @@ lease one that is not ready.
 - ``HostRevokeCommand``
 - ``PoolCommand``
 - ``PoolListCommand``
+- ``PoolAddCommand``
+- ``PoolRemoveCommand``
 - ``SuperviseCommand``
 
 ### Image commands

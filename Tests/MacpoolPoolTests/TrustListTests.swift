@@ -86,6 +86,24 @@ struct TrustListTests {
         }
     }
 
+    /// Removes one host and leaves the list alone for a key that it does not hold.
+    @Test func removesAHost() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let pairedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let lab = TrustedHost(key: randomKey(), name: "lab", address: "192.0.2.10", port: 7373, pairedAt: pairedAt)
+        let desk = TrustedHost(key: randomKey(), name: "desk", address: "192.0.2.12", port: 7373, pairedAt: pairedAt)
+        var hosts = TrustList<TrustedHost>()
+        hosts.insert(lab)
+        hosts.insert(desk)
+        try hosts.save(to: directory)
+
+        try TrustedHost.remove(lab.key, from: directory)
+        #expect(try TrustedHost.paired(in: directory) == [desk])
+        try TrustedHost.remove(randomKey(), from: directory)
+        #expect(try TrustedHost.paired(in: directory) == [desk])
+    }
+
     /// Reads a record without a priority ceiling with a ceiling of 0.
     @Test func readsRecordsWithoutACeiling() throws {
         let root = try ShortDirectory()

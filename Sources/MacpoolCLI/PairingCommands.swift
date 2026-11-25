@@ -145,3 +145,166 @@ struct HostRevokeCommand: AsyncParsableCommand {
         return ["revoked \(PeerText.name(mac.name, key: mac.key)) connections=\(connections) leases=\(leases)"]
     }
 }
+
+/// Pairs this Mac with a host from the code that `macpool host invite` printed on the host.
+struct PoolAddCommand: AsyncParsableCommand {
+    /// The subcommand's name, summary, and discussion.
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Pairs this Mac with a host from the code of macpool host invite.",
+        discussion: """
+        Without a code, the command reads it from standard input, so the code stays out of the \
+        process list.
+        """,
+    )
+
+    /// The data directory of this Mac's daemon, which holds this Mac's key and paired hosts.
+    @OptionGroup var location: PoolOptions
+
+    /// The code from the host, or `nil` to read it from standard input.
+    @Argument(help: "The code that macpool host invite printed on the host.")
+    var code: String?
+
+    /// The name that the host shows for this Mac, or `nil` for this Mac's name.
+    @Option(
+        name: .customLong("name"),
+        help: "The name that the host shows for this Mac. The default is this Mac's name.",
+    )
+    var name: String?
+
+    /// Rejects a name that a host would refuse.
+    ///
+    /// - Throws: `ValidationError` when the name is not a valid name for a Mac.
+    func validate() throws {
+        if let name, !PairedMac.isValidName(name) {
+            throw ValidationError("--name takes \(PairedMac.nameRule).")
+        }
+    }
+
+    /// Pairs with the host and prints the host and this Mac's key.
+    ///
+    /// - Throws: ``CommandError`` when the code is malformed or the pairing fails.
+    func run() async throws {
+        let text: String
+        if let code {
+            text = code
+        } else {
+            guard let line = readLine() else {
+                throw CommandError.invalidValue("no code on standard input")
+            }
+            text = line
+        }
+        for line in try await lines(pairingWith: text) {
+            Report.line(line)
+        }
+    }
+
+    /// Pairs with the host of a code.
+    ///
+    /// - Parameter text: The code.
+    /// - Returns: The line `paired` with the host's short key and name, and the line `this_mac=`
+    ///   with this Mac's short key.
+    /// - Throws: ``CommandError/invalidValue(_:)`` when the text is not a pairing code, or
+    ///   ``CommandError/pool(_:)`` when the pairing fails. A host's text in the error passes
+    ///   through ``HostSelection/escapingPeerText(_:)``.
+    func lines(pairingWith text: String) async throws(CommandError) -> [String] {
+        guard let code = PairingCode(text) else {
+            throw .invalidValue("\(PeerText.escaped(text)) is not a pairing code. macpool host invite prints one")
+        }
+        let directory = location.directory
+        let host: PairedMac
+        do {
+            host = try await PoolClient.pair(using: code, name: name ?? PairedMac.localName(), directory: directory)
+        } catch {
+            throw .pool(HostSelection.escapingPeerText(error))
+        }
+        let key = try pool { () throws(PoolError) in try KeyFingerprint.thisMac(in: directory) }
+        return ["paired \(PeerText.name(host.name, key: host.key))", "this_mac=\(key.shortKey)"]
+    }
+}
+
+/// Ends this Mac's pairing with a host.
+struct PoolRemoveCommand: AsyncParsableCommand {
+    /// The subcommand's name, summary, and discussion.
+    static let configuration = CommandConfiguration(
+        commandName: "remove",
+        abstract: "Ends this Mac's pairing with a host.",
+        discussion: """
+        The command asks the host to forget this Mac and then removes the host from this Mac's \
+        list. With --local, it only removes the host from this Mac's list, and the host keeps \
+        this Mac's record.
+        """,
+    )
+
+    /// The data directory of this Mac's daemon, which holds this Mac's key and paired hosts.
+    @OptionGroup var location: PoolOptions
+
+    /// The host's name or key.
+    @Argument(help: "The host's name or short key from macpool pool list.")
+    var host: String
+
+    /// Whether the host also ends this Mac's leases.
+    @Flag(name: .customLong("end-leases"), help: "Ends this Mac's leases on the host.")
+    var endLeases = false
+
+    /// Whether the command skips the host.
+    @Flag(
+        name: .customLong("local"),
+        help: "Removes the host from this Mac's list without asking the host, for example when the host is gone.",
+    )
+    var local = false
+
+    /// Rejects `--end-leases` together with `--local`.
+    ///
+    /// - Throws: `ValidationError` when both flags are set.
+    func validate() throws {
+        guard !(endLeases && local) else {
+            throw ValidationError("--end-leases needs the host, so it doesn't work with --local.")
+        }
+    }
+
+    /// Ends the pairing and prints the result.
+    ///
+    /// - Throws: ``CommandError`` when the host is unknown, the host does not forget this Mac,
+    ///   or the list cannot be saved.
+    func run() async throws {
+        for line in try await lines() {
+            Report.line(line)
+        }
+    }
+
+    /// Asks the host to forget this Mac, unless `--local` is set, and removes the host from the
+    /// list.
+    ///
+    /// - Returns: The line `removed` with the host's short key and name. Without `--local`, the
+    ///   line ends with the number of this Mac's leases that the host ended.
+    /// - Throws: ``CommandError/pool(_:)`` when no host or more than one host matches or the list
+    ///   cannot be read or saved, or ``CommandError/hostKeptPairing(host:reason:)`` when the host
+    ///   cannot be reached or refuses. A host's text in the error passes through
+    ///   ``HostSelection/escapingPeerText(_:)``.
+    func lines() async throws(CommandError) -> [String] {
+        let directory = location.directory
+        let paired: TrustedHost
+        do {
+            paired = try TrustedHost.named(host, in: directory)
+        } catch {
+            throw .pool(HostSelection.escapingPeerText(error))
+        }
+        let shown = PeerText.name(paired.name, key: paired.key)
+        var line = "removed \(shown)"
+        if !local {
+            let reply: PoolReply
+            do {
+                reply = try await PoolClient.send(.forget(endLeases: endLeases), to: paired, directory: directory)
+            } catch {
+                throw .hostKeptPairing(host: shown, reason: HostSelection.escapingPeerText(error).description)
+            }
+            guard case let .forgotten(leases) = reply else {
+                throw .pool(.malformedMessage(reason: "unexpected reply to a request to forget this Mac"))
+            }
+            line += " leases=\(leases)"
+        }
+        try pool { () throws(PoolError) in try TrustedHost.remove(paired.key, from: directory) }
+        return [line]
+    }
+}
