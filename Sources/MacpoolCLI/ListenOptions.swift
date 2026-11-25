@@ -69,16 +69,19 @@ struct ListenOptions: ParsableArguments {
     }
 
     /// The options in the form that `daemon run` parses, with absolute paths.
+    ///
+    /// Each option and its value form one argument, such as `--host-name=lab`. A value that starts
+    /// with `-` would otherwise read as another option.
     var arguments: [String] {
         guard let address else {
             return []
         }
-        var arguments = ["--listen", address.description]
+        var arguments = ["--listen=\(address)"]
         if let hostName {
-            arguments += ["--host-name", hostName]
+            arguments.append("--host-name=\(hostName)")
         }
         for offer in offers {
-            arguments += ["--offer", "\(offer.name)=\(offer.path)"]
+            arguments.append("--offer=\(offer.name)=\(offer.path)")
         }
         return arguments
     }
