@@ -963,7 +963,7 @@ public actor PoolDaemon {
     /// Opens an invitation for the local user.
     ///
     /// - Parameters:
-    ///   - address: The host's address for the code.
+    ///   - address: The host's address for the code, or `nil` for the listener's address.
     ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
     ///   - client: The inviting connection.
     ///   - owner: Who the client acts for.
@@ -972,7 +972,7 @@ public actor PoolDaemon {
     ///   cannot be part of a code, the ceiling is below 0, the daemon does not listen for paired
     ///   Macs, or the host's name for clients is not a valid name or contains a host path.
     private func invite(
-        address: String,
+        address: String?,
         priorityCeiling: Int,
         from client: ClientID,
         owner: LeaseOwner,
@@ -980,7 +980,7 @@ public actor PoolDaemon {
         guard owner == .local else {
             throw .invalidRequest(reason: "only the host's own user can invite Macs")
         }
-        guard PairingCode.isValidAddress(address) else {
+        if let address, !PairingCode.isValidAddress(address) {
             throw .invalidRequest(reason: "\(address) is not a host name or an IP address")
         }
         // A negative ceiling would restrict the client, and a build that does not know the field
@@ -988,11 +988,13 @@ public actor PoolDaemon {
         guard priorityCeiling >= 0 else {
             throw .invalidRequest(reason: "the priority ceiling must be 0 or more")
         }
-        guard let listener = peerListener else {
+        guard let listener = peerListener, let peers = configuration.peers else {
             throw .invalidRequest(reason: "the host does not listen for paired Macs"
                 + (peerListenerFailure.map { ": \($0)" } ?? ""))
         }
-        let hostName = configuration.peers?.name ?? ""
+        // The listener binds only a numeric address, which a code can always carry.
+        let address = address ?? peers.address
+        let hostName = peers.name
         guard PairedMac.isValidName(hostName) else {
             throw .invalidRequest(reason: "the host's name for clients must have \(PairedMac.nameRule)")
         }

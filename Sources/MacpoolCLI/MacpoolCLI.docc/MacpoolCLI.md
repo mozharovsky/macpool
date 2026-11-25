@@ -70,6 +70,9 @@ Another Mac chose the names and addresses in these lists. ``PeerText`` escapes t
 terminal shows them. Each table prints a Mac's short key in a column before its name, because a
 name can imitate a short key.
 
+`macpool host invite` asks the daemon for a pairing code and waits until a Mac pairs with it.
+`macpool host revoke` asks the daemon to block a paired client.
+
 `macpool connect` relays its standard input and output to the SSH server of a lease's guest, for
 the `ProxyCommand` option of `ssh`. ``HostSelection`` picks the daemon on this Mac or a paired
 host, and ``StandardRelay`` copies the bytes.
@@ -115,6 +118,8 @@ lease one that is not ready.
 - ``SshCommand``
 - ``HostCommand``
 - ``HostListCommand``
+- ``HostInviteCommand``
+- ``HostRevokeCommand``
 - ``PoolCommand``
 - ``PoolListCommand``
 - ``SuperviseCommand``

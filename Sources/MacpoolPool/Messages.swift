@@ -544,9 +544,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     ///
     /// - Parameters:
     ///   - address: The host's address that the code carries to clients, such as
-    ///     `example.local`.
+    ///     `example.local`, or `nil` for the address that the daemon listens on.
     ///   - priorityCeiling: The highest priority that the client may ask for, 0 or more.
-    case invite(address: String, priorityCeiling: Int = 0)
+    case invite(address: String? = nil, priorityCeiling: Int = 0)
 
     /// Pairs the sending Mac with the host.
     ///
@@ -670,7 +670,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = .status
         case "invite":
             self = try .invite(
-                address: container.decode(String.self, forKey: .address),
+                address: container.decodeIfPresent(String.self, forKey: .address),
                 priorityCeiling: container.decodeIfPresent(Int.self, forKey: .priorityCeiling) ?? 0,
             )
         case "pair":
@@ -723,7 +723,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode("status", forKey: .request)
         case let .invite(address, priorityCeiling):
             try container.encode("invite", forKey: .request)
-            try container.encode(address, forKey: .address)
+            try container.encodeIfPresent(address, forKey: .address)
             try container.encode(priorityCeiling, forKey: .priorityCeiling)
         case let .pair(secret, name):
             try container.encode("pair", forKey: .request)

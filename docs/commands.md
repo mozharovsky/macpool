@@ -1,7 +1,7 @@
 # Commands
 
-This page lists the commands that prepare, boot, and clone VMs, the commands that list paired
-Macs, and the scripts that reach a guest. The daemon's commands are in
+This page lists the commands that prepare, boot, and clone VMs, the commands that pair Macs, and
+the scripts that reach a guest. The daemon's commands are in
 [Leases and the daemon](leases.md), and `image xcode` is in [Xcode images](xcode-image.md).
 
 `macpool --help` lists the commands, and `macpool help COMMAND` shows a command's options.
@@ -130,6 +130,56 @@ Right-to-left letters then don't reorder the columns.
 
 `--json` keeps the exact names and the full keys. It writes the same characters as JSON escapes
 such as `\u202E`. A JSON parser reads them back as the original text.
+
+## host invite
+
+`macpool host invite` prints a code that lets one Mac pair with this Mac, and then waits until a Mac
+pairs. The daemon on this Mac must listen for paired Macs. See
+[Listening for other Macs](leases.md#listening-for-other-macs).
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of the daemon. |
+| `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. |
+| `--priority-ceiling N` | `0` | The highest priority that the Mac may ask for when it leases. |
+
+The command prints the code and its end, and then waits.
+
+```text
+code=macpool1:192.0.2.20:7373:...
+expires_at=2027-01-15T08:10:00Z
+```
+
+The other Mac pairs with the code through `MacpoolPool`. The code works once and for 10 minutes.
+It stops working when the command exits, and a newer invitation replaces it. The code holds the
+first half of the host key's fingerprint and a secret. Send it over a channel that you trust,
+because anyone with the code can pair while it works.
+
+When a Mac pairs, the command prints its short key and name, such as
+`paired mzxw-6ytb-oi2d-k3lq runner`, and exits. Compare the short key with the key of the other
+Mac. If a Mac that paired before uses the code, the line starts with `already paired`, and the host
+keeps the Mac's name and priority ceiling. If a Mac sends a wrong code, the command warns and keeps
+the invitation open.
+
+## host revoke
+
+`macpool host revoke KEY` blocks a paired Mac and closes its connections. `KEY` is the short key or
+the full key from `host list`.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of the daemon. |
+| `--end-leases` | off | Also ends the Mac's detached leases. |
+
+The Mac's queued requests and its leases with a connection end at once. Its detached leases run
+until they expire unless you pass `--end-leases`. The command prints the Mac and the number of
+connections and leases that ended.
+
+```text
+revoked mzxw-6ytb-oi2d-k3lq runner connections=1 leases=0
+```
+
+The Mac stays in `host list` with `BLOCKED` set to `yes`, and it can't pair again.
 
 ## pool list
 

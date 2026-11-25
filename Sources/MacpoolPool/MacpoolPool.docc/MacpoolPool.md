@@ -170,7 +170,8 @@ connections. If the guest refuses the connection, a paired Mac's failure names n
 
 A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
 code with ``PoolRequest/invite(address:priorityCeiling:)``. The code carries the host's address
-and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to
+and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Without an
+address, the code carries the address that the daemon listens on. Pass it to
 the person who pairs the client, because anyone with the code can pair in that client's place. The
 client gets the invitation's priority ceiling when the host records it. A Mac that the host
 already knows keeps its record and its ceiling.
