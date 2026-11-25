@@ -5,15 +5,16 @@ import Testing
 
 /// Tests of the ranges of addresses that may reach the listener for paired Macs.
 struct AddressRangeTests {
-    /// Reads ranges and one address, and prints them in CIDR notation.
+    /// Reads ranges and single addresses, and prints them in CIDR notation with mapped ranges as
+    /// IPv4 ranges.
     @Test(arguments: zip(
         [
             "192.0.2.0/24", "192.0.2.30", "100.64.0.0/10", "0.0.0.0/0", "2001:DB8::/32", "fd7a:115c:a1e0::/48",
-            "::1",
+            "::1", "::ffff:192.0.2.20", "::ffff:192.0.2.0/120", "::ffff:0:0/96",
         ],
         [
             "192.0.2.0/24", "192.0.2.30/32", "100.64.0.0/10", "0.0.0.0/0", "2001:db8::/32", "fd7a:115c:a1e0::/48",
-            "::1/128",
+            "::1/128", "192.0.2.20/32", "192.0.2.0/24", "0.0.0.0/0",
         ],
     ))
     func readsRanges(text: String, shown: String) throws {
@@ -47,6 +48,15 @@ struct AddressRangeTests {
         let single = try #require(AddressRange("192.0.2.30"))
         #expect(single.contains(host("192.0.2.30")))
         #expect(!single.contains(host("192.0.2.31")))
+
+        let mapped = try #require(AddressRange("::ffff:192.0.2.0/120"))
+        #expect(mapped.contains(host("192.0.2.7")))
+        #expect(mapped.contains(host("::ffff:192.0.2.7")))
+        #expect(!mapped.contains(host("192.0.3.7")))
+        let mappedSingle = try #require(AddressRange("::ffff:192.0.2.20"))
+        #expect(mappedSingle.contains(host("::ffff:192.0.2.20")))
+        #expect(mappedSingle.contains(host("192.0.2.20")))
+        #expect(!mappedSingle.contains(host("192.0.2.21")))
     }
 
     /// Lets every endpoint through without ranges, and only an IP address in a range with them.

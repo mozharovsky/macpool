@@ -55,7 +55,8 @@ be zero. One address without a prefix length allows that address alone. Tailscal
 devices addresses in `100.64.0.0/10` and `fd7a:115c:a1e0::/48`.
 
 ```sh
-$macpool daemon install --listen 192.0.2.20 --allow-from 192.0.2.0/24
+$macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base" \
+  --allow-from 192.0.2.0/24
 ```
 
 A paired Mac leases only the sources that `--offer` names, by their names. It can't share a

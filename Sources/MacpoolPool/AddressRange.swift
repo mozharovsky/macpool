@@ -19,7 +19,8 @@ public struct AddressRange: Sendable, Hashable, CustomStringConvertible {
     /// Reads a range.
     ///
     /// An address without a prefix length stands for itself alone, as `/32` for IPv4 and `/128`
-    /// for IPv6.
+    /// for IPv6. An IPv4-mapped IPv6 range becomes its IPv4 range, so `::ffff:192.0.2.0/120` reads
+    /// as `192.0.2.0/24`.
     ///
     /// - Parameter text: The range, such as `192.0.2.0/24`.
     /// - Returns: `nil` when the address is not a numeric IP address in its usual form, has a
@@ -30,6 +31,7 @@ public struct AddressRange: Sendable, Hashable, CustomStringConvertible {
         let addressText = String(parts[0])
         let bytes: [UInt8]
         let shown: String
+        var mapped: IPv4Address?
         // Network also reads shortened IPv4 forms such as 127.1, which the range refuses.
         if let ipv4 = IPv4Address(addressText), addressText == "\(ipv4)" {
             bytes = [UInt8](ipv4.rawValue)
@@ -37,6 +39,7 @@ public struct AddressRange: Sendable, Hashable, CustomStringConvertible {
         } else if !addressText.contains("%"), let ipv6 = IPv6Address(addressText) {
             bytes = [UInt8](ipv6.rawValue)
             shown = "\(ipv6)"
+            mapped = ipv6.isIPv4Mapped ? ipv6.asIPv4 : nil
         } else {
             return nil
         }
@@ -56,9 +59,17 @@ public struct AddressRange: Sendable, Hashable, CustomStringConvertible {
         guard Self.masked(bytes, to: length) == bytes else {
             return nil
         }
-        network = bytes
-        address = shown
-        prefixLength = length
+        // `contains` reads a mapped peer as its IPv4 address, so a mapped range keeps only the
+        // IPv4 part. The check above leaves no mapped range with a prefix below 96.
+        if let mapped, length >= 96 {
+            network = [UInt8](mapped.rawValue)
+            address = "\(mapped)"
+            prefixLength = length - 96
+        } else {
+            network = bytes
+            address = shown
+            prefixLength = length
+        }
     }
 
     /// Reports whether the range holds an address.
