@@ -12,12 +12,14 @@ struct DaemonCommandTests {
             try Macpool.parseAsRoot([
                 "daemon", "run", "--listen", "192.0.2.20:7480", "--host-name", "lab",
                 "--offer", "base=/vms/base", "--offer", "xcode=/vms/xcode/",
+                "--allow-from", "100.64.0.0/10", "--allow-from", "FD7A:115C:A1E0::/48",
             ]) as? DaemonRunCommand,
         )
         let settings = try #require(run.listening.settings)
         #expect(settings.address == "192.0.2.20")
         #expect(settings.port == 7480)
         #expect(settings.name == "lab")
+        #expect(settings.allowedSources.map(\.description) == ["100.64.0.0/10", "fd7a:115c:a1e0::/48"])
         #expect(run.listening.offeredSources == ["base": "/vms/base", "xcode": "/vms/xcode"])
     }
 
@@ -56,12 +58,15 @@ struct DaemonCommandTests {
         }
     }
 
-    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, and
-    /// options that need `--listen` without it.
+    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, a range
+    /// with bits after its prefix, and options that need `--listen` without it.
     @Test func refusesInvalidListenerOptions() {
         let invalid: [[String]] = [
             ["--offer", "base=/vms/base"],
             ["--host-name", "lab"],
+            ["--allow-from", "192.0.2.0/24"],
+            ["--listen", "192.0.2.20", "--allow-from", "192.0.2.20/24"],
+            ["--listen", "192.0.2.20", "--allow-from", "lab.local"],
             ["--listen", "192.0.2.20", "--offer", "/vms/base"],
             ["--listen", "192.0.2.20", "--offer", "=/vms/base"],
             ["--listen", "192.0.2.20", "--offer", "base="],
@@ -81,20 +86,21 @@ struct DaemonCommandTests {
         let install = try #require(
             try Macpool.parseAsRoot([
                 "daemon", "install", "--data-dir", "/pool", "--slots", "1", "--listen", "[2001:db8::20]:7480",
-                "--host-name", "lab", "--offer", "base=vms/base",
+                "--host-name", "lab", "--offer", "base=vms/base", "--allow-from", "2001:db8::/32",
             ]) as? DaemonInstallCommand,
         )
         let base = FileManager.default.currentDirectoryPath + "/vms/base"
         let agent = install.agent(running: URL(filePath: "/opt/macpool"))
         #expect(agent.slots == 1)
         #expect(agent.peerArguments == [
-            "--listen=[2001:db8::20]:7480", "--host-name=lab", "--offer=base=\(base)",
+            "--listen=[2001:db8::20]:7480", "--host-name=lab", "--offer=base=\(base)", "--allow-from=2001:db8::/32",
         ])
         let run = try #require(try Macpool.parseAsRoot(["daemon", "run"] + agent.peerArguments) as? DaemonRunCommand)
         #expect(run.listening.settings?.address == "2001:db8::20")
         #expect(run.listening.settings?.port == 7480)
         #expect(run.listening.settings?.name == "lab")
         #expect(run.listening.offeredSources == ["base": base])
+        #expect(run.listening.settings?.allowedSources == install.listening.allowedSources)
 
         let local = try #require(try Macpool.parseAsRoot(["daemon", "install"]) as? DaemonInstallCommand)
         #expect(local.agent(running: URL(filePath: "/opt/macpool")).peerArguments.isEmpty)

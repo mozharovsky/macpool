@@ -26,6 +26,12 @@ enum PeerLogLine: Hashable, Sendable {
     /// The line names the address. The rate counts no address, because the Mac chooses it.
     case tooManyHandshakes
 
+    /// The listener for paired Macs refused a connection from an address outside
+    /// ``PeerSettings/allowedSources``.
+    ///
+    /// The line names the address. The rate counts no address, because the Mac chooses it.
+    case outsideAllowedSources
+
     /// A paired client's request found the list of paired clients unreadable.
     case unreadableClientList
 

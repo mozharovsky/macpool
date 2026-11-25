@@ -23,6 +23,12 @@ public struct PeerSettings: Sendable {
     /// clients, or the port failed, or after the listener stopped.
     public var retryInterval: Duration
 
+    /// The ranges of addresses that may connect, or an empty array for every address.
+    ///
+    /// The listener closes a connection from another address before its TLS handshake starts.
+    /// Such a connection takes no handshake place.
+    public var allowedSources: [AddressRange]
+
     /// Creates listener settings.
     ///
     /// - Parameters:
@@ -30,16 +36,20 @@ public struct PeerSettings: Sendable {
     ///   - address: The numeric IP address to listen on.
     ///   - port: The TCP port, or 0 for a free port.
     ///   - retryInterval: The wait before another attempt to listen.
+    ///   - allowedSources: The ranges of addresses that may connect, or an empty array for every
+    ///     address.
     public init(
         name: String? = nil,
         address: String,
         port: UInt16,
         retryInterval: Duration = .seconds(10),
+        allowedSources: [AddressRange] = [],
     ) {
         self.name = name ?? PairedMac.localName()
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
+        self.allowedSources = allowedSources
     }
 
     /// Reports whether the listener can bind to an address.
@@ -162,7 +172,16 @@ final class PeerListener: Sendable {
         let (connections, continuation) = AsyncStream.makeStream(of: Peer.self)
         let places = HandshakeCount(limit: handshakeLimit, sourceLimit: sourceHandshakeLimit)
         let rate = LockedPeerLogRate(now: now)
+        let allowed = settings.allowedSources
         listener.newConnectionHandler = { connection in
+            guard Self.allows(connection.endpoint, from: allowed) else {
+                let level = rate.level(of: .outsideAllowedSources, full: .warning)
+                logger.log(level: level, "Refused a connection from outside the allowed sources", metadata: [
+                    "address": "\(connection.endpoint)",
+                ])
+                connection.cancel()
+                return
+            }
             guard let source = HandshakeSource(connection.endpoint, listener: host) else {
                 connection.cancel()
                 return
@@ -212,6 +231,22 @@ final class PeerListener: Sendable {
         hostKey = KeyFingerprint(digest: identity.keyDigest)
         self.connections = connections
         self.continuation = continuation
+    }
+
+    /// Reports whether an endpoint may connect.
+    ///
+    /// - Parameters:
+    ///   - endpoint: A connection's remote endpoint.
+    ///   - ranges: The allowed ranges, or an empty array for every address.
+    /// - Returns: Whether `ranges` is empty or the endpoint is an IP address in one of them.
+    static func allows(_ endpoint: NWEndpoint, from ranges: [AddressRange]) -> Bool {
+        guard !ranges.isEmpty else {
+            return true
+        }
+        guard case let .hostPort(host, _) = endpoint else {
+            return false
+        }
+        return ranges.contains { $0.contains(host) }
     }
 
     /// Reads the address that the listener binds to.

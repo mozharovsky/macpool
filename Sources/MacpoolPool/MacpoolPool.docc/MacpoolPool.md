@@ -116,7 +116,8 @@ limit of open files to 4096, or to the hard limit or `kern.maxfilesperproc` when
 If the process may still open fewer than 1024 files, the daemon does not listen for paired Macs.
 
 Anyone who reaches the port can start a handshake, because a client proves its key only at the
-end. At most 16 connections hold a handshake place at once, and at most 4 of them come from one
+end. If ``PeerSettings/allowedSources`` holds an ``AddressRange``, the host closes a connection
+from an address outside every range before its handshake. Such a connection takes no place. At most 16 connections hold a handshake place at once, and at most 4 of them come from one
 address. The host closes a connection beyond either limit before its handshake begins. It logs a
 warning about an address at the limit at most once a minute. An IPv6 address outside the /64 of
 the listener's address counts by its /64, because one party usually controls a whole /64. Inside
@@ -343,6 +344,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``PoolPolicy``
 - ``PoolDirectory``
 - ``PeerSettings``
+- ``AddressRange``
 - ``LaunchAgent``
 
 ### Clients

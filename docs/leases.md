@@ -20,6 +20,7 @@ next daemon picks them up.
 | `--listen ADDRESS[:PORT]` | off | Listens for paired Macs. See [Listening for other Macs](#listening-for-other-macs). |
 | `--host-name NAME` | this Mac's name | The name that a Mac sees for this host when it pairs. Needs `--listen`. |
 | `--offer NAME=BUNDLE` | none | A stopped source that paired Macs may lease by its name. Repeat it for more sources. Needs `--listen`. |
+| `--allow-from CIDR` | every address | A range of addresses that may connect, such as `100.64.0.0/10`. Repeat it for more ranges. Needs `--listen`. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. Only `run` takes it. |
 
 `install` writes these options into the job, so the next start of the daemon uses them too. To
@@ -45,6 +46,15 @@ $macpool list
 `list` then prints `listening for paired Macs on 192.0.2.20:7373`. If the address isn't on an
 interface yet or another process holds the port, `list` prints why the daemon isn't listening. The
 daemon keeps serving this Mac and tries again every 10 seconds.
+
+With `--allow-from`, the listener closes a connection from any other address before the TLS
+handshake. A range takes a numeric address and a prefix length, and the bits after the prefix must
+be zero. One address without a prefix length allows that address alone. Tailscale gives your
+devices addresses in `100.64.0.0/10` and `fd7a:115c:a1e0::/48`.
+
+```sh
+$macpool daemon install --listen 192.0.2.20 --allow-from 192.0.2.0/24
+```
 
 A paired Mac leases only the sources that `--offer` names, by their names. It can't share a
 directory of this Mac with its guest.

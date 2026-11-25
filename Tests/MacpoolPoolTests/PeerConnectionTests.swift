@@ -774,6 +774,49 @@ struct PeerConnectionTests {
         })
     }
 
+    /// Closes a connection from outside the allowed sources before its handshake and warns once a
+    /// minute. Admits a connection from inside them.
+    @Test func admitsOnlyTheAllowedSources() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        let logs = LogRecorder()
+        var elsewhere = loopbackSettings()
+        elsewhere.allowedSources = try [#require(AddressRange("192.0.2.0/24"))]
+        let refusing = try await PeerListener(
+            identity: host,
+            settings: elsewhere,
+            logger: testLogger(logs),
+            admits: { $0 == clientKey },
+        )
+        defer { refusing.close() }
+        let refused = try loopback(refusing.port)
+        #expect(await refusesAtOnce(refused, using: parameters))
+        #expect(await refusesAtOnce(refused, using: parameters))
+        let warnings = logs.entries("Refused a connection from outside the allowed sources")
+        #expect(warnings.map(\.level) == [.warning, .debug])
+        #expect(warnings.allSatisfy { $0.metadata["address"]?.hasPrefix("127.0.0.1:") == true })
+
+        var loopbackOnly = loopbackSettings()
+        loopbackOnly.allowedSources = try [
+            #require(AddressRange("192.0.2.0/24")),
+            #require(AddressRange("127.0.0.0/8")),
+        ]
+        let admitting = try await PeerListener(
+            identity: host,
+            settings: loopbackOnly,
+            logger: testLogger(),
+            admits: { $0 == clientKey },
+        )
+        defer { admitting.close() }
+        let channel = try await MessageChannel.connect(to: loopback(admitting.port), using: parameters)
+        defer { channel.close() }
+        var connections = admitting.connections.makeAsyncIterator()
+        #expect(try #require(await connections.next()).fingerprint == clientKey)
+    }
+
     /// Frees a connection's place when its owner releases it, while the connection stays open.
     @Test(arguments: PlaceLimits.both)
     func freesAPlaceWhenItsOwnerReleasesIt(limits: PlaceLimits) async throws {

@@ -41,13 +41,27 @@ struct ListenOptions: ParsableArguments {
     )
     var offers: [OfferedSource] = []
 
+    /// The ranges of addresses that may connect, in the order of the command line.
+    @Option(
+        name: .customLong("allow-from"),
+        help: ArgumentHelp(
+            """
+            A range of addresses that may connect, such as 100.64.0.0/10 or 192.0.2.30. Repeat it \
+            for more ranges. The default lets every address connect. Needs --listen.
+            """,
+            valueName: "cidr",
+        ),
+        transform: ListenOptions.range(parsing:),
+    )
+    var allowedSources: [AddressRange] = []
+
     /// Rejects options that need `--listen` without it, an invalid host name, and a source name
     /// that appears twice.
     ///
     /// - Throws: `ValidationError` for each of these cases.
     func validate() throws {
-        guard address != nil || (hostName == nil && offers.isEmpty) else {
-            throw ValidationError("--host-name and --offer need --listen.")
+        guard address != nil || (hostName == nil && offers.isEmpty && allowedSources.isEmpty) else {
+            throw ValidationError("--host-name, --offer, and --allow-from need --listen.")
         }
         if let hostName, !PairedMac.isValidName(hostName) {
             throw ValidationError("--host-name takes \(PairedMac.nameRule).")
@@ -60,7 +74,9 @@ struct ListenOptions: ParsableArguments {
 
     /// The listener's settings for the daemon, or `nil` without `--listen`.
     var settings: PeerSettings? {
-        address.map { PeerSettings(name: hostName, address: $0.address, port: $0.port) }
+        address.map {
+            PeerSettings(name: hostName, address: $0.address, port: $0.port, allowedSources: allowedSources)
+        }
     }
 
     /// The absolute paths of the offered sources, keyed by their names.
@@ -83,7 +99,25 @@ struct ListenOptions: ParsableArguments {
         for offer in offers {
             arguments.append("--offer=\(offer.name)=\(offer.path)")
         }
+        for range in allowedSources {
+            arguments.append("--allow-from=\(range)")
+        }
         return arguments
+    }
+
+    /// Reads a range of `--allow-from`.
+    ///
+    /// - Parameter text: The range in CIDR notation, or one address.
+    /// - Returns: The range.
+    /// - Throws: `ValidationError` when `AddressRange.init(_:)` refuses the text.
+    static func range(parsing text: String) throws -> AddressRange {
+        guard let range = AddressRange(text) else {
+            throw ValidationError("""
+            --allow-from \(text) needs a numeric address with an optional prefix length, such as \
+            100.64.0.0/10. The bits after the prefix must be zero.
+            """)
+        }
+        return range
     }
 }
 
