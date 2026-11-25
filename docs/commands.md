@@ -215,8 +215,10 @@ this_mac=mzxw-6ytb-oi2d-k3lq
 ```
 
 `host invite` on the host prints the same `this_mac` key after `paired`. If the two keys differ,
-or if `pool add` fails after the host printed `paired`, another Mac used the code. Revoke the key
-from the host's `paired` line with `host revoke`.
+another Mac used the code. Revoke the key from the host's `paired` line with `host revoke`. If
+`pool add` fails after the host printed `paired`, pair again with a new code before you revoke
+anything. The host prints `already paired` for a Mac that paired before, and the new `this_mac`
+line shows whether the first `paired` line named this Mac.
 
 ## pool remove
 

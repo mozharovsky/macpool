@@ -131,8 +131,13 @@ pbpaste | $macpool pool add
 ```
 
 The host prints `paired` with the client's short key, and the client prints the same key as
-`this_mac=`. If the keys differ, or if `pool add` fails after the host printed `paired`, another
-Mac used the code. Revoke the key from the host's `paired` line with `macpool host revoke`.
+`this_mac=`. If the keys differ, another Mac used the code. Revoke the key from the host's `paired`
+line with `macpool host revoke`.
+
+If `pool add` fails after the host printed `paired`, this Mac may have paired anyway. A revoked Mac
+can't pair again, so don't revoke yet. Run `host invite` and `pool add` again. The host prints
+`already paired` for a Mac that paired before. The new `this_mac=` line then shows whether the
+first `paired` line named this Mac.
 [Commands](commands.md#host-invite) describes the pairing commands.
 
 `lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
