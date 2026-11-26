@@ -31,6 +31,10 @@ import System
 /// The command tries until the lease expires, because the host may sleep for longer. See
 /// ``ReattachSchedule``.
 ///
+/// The command sends the release on the connection that holds the lease. A paired host limits the
+/// connections of one Mac, so a new connection could be refused. Only while the command attaches
+/// again does the release go over a new connection.
+///
 /// If a paired host does not confirm the release at Control-C, `macpool lease` fails. If the host
 /// does not confirm it after the command after `--` ends, `macpool lease` prints a warning and still
 /// exits with the command's status. In both cases the host ends the lease 60 seconds after it
@@ -48,8 +52,10 @@ struct LeaseCommand: AsyncParsableCommand {
     /// ready.
     static let reconnectTimeout = Duration.seconds(60)
 
-    /// The longest wait for each step of a release on a paired host, which are the handshake, the
-    /// greeting, and the reply.
+    /// The longest wait for each step of a release, which are the handshake, the greeting, and the
+    /// reply.
+    ///
+    /// A release on the connection that holds the lease waits only for the reply.
     static let releaseTimeout = Duration.seconds(3)
 
     /// The data directory of this Mac's daemon, which also holds this Mac's key and paired hosts.
@@ -189,9 +195,21 @@ struct LeaseCommand: AsyncParsableCommand {
         var isReady = false
         var interruption: Int32?
         var failure = CommandError.interrupted
+        var releasing: PendingRelease?
+        defer { releasing?.timer.cancel() }
         loop: for await event in events {
             if case let .reply(reply) = event {
                 expiry = Self.expiry(after: reply, of: id, from: expiry)
+            }
+            if let pending = releasing, let id {
+                switch pending.outcome(of: event, for: id) {
+                case nil:
+                    continue
+                case .confirmed:
+                    return try finish(pending, of: id, failure: nil)
+                case let .failed(reason):
+                    return try finish(pending, of: id, failure: selection.shown(reason))
+                }
             }
             switch event {
             case let .reply(.queued(position)):
@@ -226,7 +244,8 @@ struct LeaseCommand: AsyncParsableCommand {
                 failure = .pool(.daemonRefused(message: selection.shown(message)))
                 break loop
             case .reply(.released), .reply(.renewed), .reply(.status), .reply(.invitation), .reply(.paired),
-                 .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten), .reply(.access):
+                 .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten), .reply(.access),
+                 .releaseTimedOut:
                 break
             case .disconnected:
                 guard let id else {
@@ -260,12 +279,20 @@ struct LeaseCommand: AsyncParsableCommand {
                     // Closing the connection withdraws the queued request.
                     break loop
                 }
-                try await Self.release(id, through: selection, in: directory)
-                Report.line("released \(id)")
                 // Control-C is the normal end of a held lease, so only an interrupted boot fails.
-                return isReady ? 0 : 128 + number
-            case let .commandEnded(status):
-                if let id {
+                let status = isReady ? 0 : 128 + number
+                guard reattaching == nil else {
+                    try await Self.release(id, through: selection, in: directory)
+                    Report.line("released \(id)")
+                    return status
+                }
+                releasing = Self.release(id, on: channel, exitingWith: status, failing: true, into: sink)
+            case let .commandEnded(commandStatus):
+                let status = interruption.map { 128 + $0 } ?? commandStatus
+                guard let id else {
+                    return status
+                }
+                guard reattaching == nil else {
                     do throws(CommandError) {
                         try await Self.release(id, through: selection, in: directory)
                         Report.line("released \(id)")
@@ -273,11 +300,9 @@ struct LeaseCommand: AsyncParsableCommand {
                         // A CI job reads the command's status, and the host ends the lease by itself.
                         Report.warning(error.description)
                     }
+                    return status
                 }
-                if let interruption {
-                    return 128 + interruption
-                }
-                return status
+                releasing = Self.release(id, on: channel, exitingWith: status, failing: false, into: sink)
             }
         }
         // The command must not outlive the lease, because its VM goes away with the lease.
@@ -286,6 +311,64 @@ struct LeaseCommand: AsyncParsableCommand {
             await running.value
         }
         throw failure
+    }
+
+    /// Ends a release that the command sent on the connection that holds the lease.
+    ///
+    /// The daemon on this Mac ends the lease when the connection closes, so a failed release there
+    /// goes unreported. A paired host keeps the lease for its reattach grace instead.
+    ///
+    /// - Parameters:
+    ///   - pending: The release.
+    ///   - id: The lease.
+    ///   - reason: Why the release failed, or `nil` after the daemon confirmed it.
+    /// - Returns: The status that the command exits with.
+    /// - Throws: ``CommandError/releaseUnconfirmed(id:reason:)`` when a paired host did not confirm
+    ///   a release that fails the command.
+    private func finish(_ pending: PendingRelease, of id: LeaseID, failure reason: String?) throws(CommandError)
+        -> Int32 {
+        pending.timer.cancel()
+        guard let reason, selection.host != nil else {
+            Report.line("released \(id)")
+            return pending.status
+        }
+        let error = CommandError.releaseUnconfirmed(id: id.rawValue, reason: reason)
+        guard !pending.failsCommand else {
+            throw error
+        }
+        // A CI job reads the command's status, and the host ends the lease by itself.
+        Report.warning(error.description)
+        return pending.status
+    }
+
+    /// Sends a release on the connection that holds the lease and starts the wait for its reply.
+    ///
+    /// - Parameters:
+    ///   - id: The lease.
+    ///   - channel: The connection that holds the lease.
+    ///   - status: The status that the command exits with once the release ends.
+    ///   - failing: Whether a paired host that does not confirm the release fails the command.
+    ///   - sink: The event stream that receives ``LeaseEvent/releaseTimedOut`` after
+    ///     ``releaseTimeout``.
+    /// - Returns: The release.
+    private static func release(
+        _ id: LeaseID,
+        on channel: MessageChannel,
+        exitingWith status: Int32,
+        failing: Bool,
+        into sink: AsyncStream<LeaseEvent>.Continuation,
+    ) -> PendingRelease {
+        // A send fails only on a broken connection, and the reader then reports the disconnect.
+        try? channel.send(PoolRequest.release(id))
+        let timer = Task {
+            do {
+                try await Task.sleep(for: releaseTimeout)
+                sink.yield(.releaseTimedOut)
+            } catch {
+                // The release ended first and cancelled the wait.
+            }
+        }
+        return PendingRelease(status: status, failsCommand: failing, timer: timer)
     }
 
     /// Forwards a channel's replies to the event stream until the connection ends.
@@ -379,6 +462,7 @@ struct LeaseCommand: AsyncParsableCommand {
 
     /// Releases a lease over a new connection.
     ///
+    /// The command uses a new connection only while the connection that holds the lease is down.
     /// The daemon on this Mac ends an attached lease when its client's connection closes, so a
     /// failed release there goes unreported. A paired host keeps the lease for its reattach grace
     /// instead, so a failed release there fails the call.
@@ -472,6 +556,54 @@ private enum LeaseEvent: Sendable {
     case signal(Int32)
     /// The command after `--` exited with a status.
     case commandEnded(Int32)
+    /// The daemon did not confirm a release within ``LeaseCommand/releaseTimeout``.
+    case releaseTimedOut
+}
+
+/// A release that the command sent on the connection that holds the lease.
+private struct PendingRelease {
+    /// The status that the command exits with once the release ends.
+    let status: Int32
+
+    /// Whether a paired host that does not confirm the release fails the command.
+    let failsCommand: Bool
+
+    /// The task that sends ``LeaseEvent/releaseTimedOut``.
+    let timer: Task<Void, Never>
+
+    /// How a release ended.
+    enum Outcome: Equatable {
+        /// The daemon confirmed the release.
+        case confirmed
+        /// The daemon refused the release, the connection closed, or no reply came in time.
+        ///
+        /// - Parameter reason: Why the release failed.
+        case failed(String)
+    }
+
+    /// Decides whether an event ends the release.
+    ///
+    /// The daemon reports the end of the lease before it confirms the release, and the command
+    /// ignores a signal while it waits.
+    ///
+    /// - Parameters:
+    ///   - event: The event.
+    ///   - id: The released lease.
+    /// - Returns: How the release ended, or `nil` while it goes on.
+    func outcome(of event: LeaseEvent, for id: LeaseID) -> Outcome? {
+        switch event {
+        case let .reply(.released(released)) where released == id:
+            .confirmed
+        case let .reply(.failure(message)):
+            .failed(message)
+        case .disconnected:
+            .failed(PoolError.connectionClosed.description)
+        case .releaseTimedOut:
+            .failed("the daemon sent no reply within \(LeaseCommand.releaseTimeout)")
+        default:
+            nil
+        }
+    }
 }
 
 /// Parsing of restart policies from the command line.

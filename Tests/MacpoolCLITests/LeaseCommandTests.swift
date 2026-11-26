@@ -186,6 +186,34 @@ struct LeaseCommandTests {
         #expect(error?.description.contains("The host ends the lease 60 seconds after") == true)
     }
 
+    /// Sends the release on the connection that holds the lease after the command ends, and opens
+    /// no second connection. A paired host may refuse a new connection when the Mac has its limit.
+    @Test func releasesOnTheConnectionThatHoldsTheLease() async throws {
+        let daemon = try await LeaseDaemon()
+        let command = try daemon.command()
+        let run = Task { try await command.run() }
+        let holder = try await daemon.grant(command)
+        #expect(try await holder.receive(PoolRequest.self) == .release(daemon.id))
+        try holder.send(PoolReply.ended(daemon.id, reason: "released by a client"))
+        try holder.send(PoolReply.released(daemon.id))
+        try await run.value
+        #expect(await daemon.otherConnections() == 0)
+    }
+
+    /// Exits with the command's status when the daemon on this Mac does not confirm the release,
+    /// because the daemon ends the lease once the connection closes.
+    @Test func exitsWhenTheDaemonDoesNotConfirmTheRelease() async throws {
+        let daemon = try await LeaseDaemon()
+        let command = try daemon.command()
+        let started = ContinuousClock.now
+        let run = Task { try await command.run() }
+        let holder = try await daemon.grant(command)
+        #expect(try await holder.receive(PoolRequest.self) == .release(daemon.id))
+        try await run.value
+        #expect(ContinuousClock.now - started < .seconds(9))
+        #expect(await daemon.otherConnections() == 0)
+    }
+
     /// Creates a ready lease as a paired host shows it.
     ///
     /// - Parameters:
@@ -200,6 +228,94 @@ struct LeaseCommandTests {
             phase: .ready,
             address: nil,
             expiresAt: expiry,
+            restarts: 0,
+            detached: false,
+            priority: 0,
+        )
+    }
+}
+
+/// A daemon socket in the test process that grants one lease and follows a script.
+private final class LeaseDaemon {
+    /// The temporary directory that holds the data directory.
+    private let parent: URL
+
+    /// The data directory, whose daemon socket the test serves.
+    let directory: PoolDirectory
+
+    /// The socket.
+    private let listener: SocketListener
+
+    /// The lease that the daemon grants.
+    let id = LeaseID("0a1b2c3d") ?? LeaseID.random()
+
+    /// Listens on the data directory's daemon socket.
+    ///
+    /// - Throws: An error when the directory cannot be prepared or the socket cannot listen.
+    init() async throws {
+        parent = FileManager.default.temporaryDirectory
+            .appending(path: "mp-lease-" + UUID().uuidString.prefix(8).lowercased(), directoryHint: .isDirectory)
+        directory = PoolDirectory(root: parent.appending(path: "pool", directoryHint: .isDirectory))
+        try directory.prepare()
+        listener = try await SocketListener(socket: directory.daemonSocket)
+    }
+
+    /// Stops listening and removes the data directory.
+    deinit {
+        listener.close()
+        try? FileManager.default.removeItem(at: parent)
+    }
+
+    /// Parses a `macpool lease` that runs `/usr/bin/true` with this data directory.
+    ///
+    /// - Returns: The command.
+    /// - Throws: An error when the options do not parse.
+    func command() throws -> LeaseCommand {
+        let path = directory.root.path(percentEncoded: false)
+        return try #require(
+            try Macpool.parseAsRoot(["lease", "--data-dir", path, "--from", "/base", "--", "/usr/bin/true"])
+                as? LeaseCommand,
+        )
+    }
+
+    /// Accepts the command's connection, reads its request, and reports the lease ready.
+    ///
+    /// - Parameter command: The running command.
+    /// - Returns: The connection that holds the lease.
+    /// - Throws: An error when no connection or no lease request arrives.
+    func grant(_ command: LeaseCommand) async throws -> MessageChannel {
+        var connections = listener.connections.makeAsyncIterator()
+        let holder = try #require(await connections.next())
+        #expect(try await holder.receive(PoolRequest.self) == .lease(command.terms))
+        try holder.send(PoolReply.starting(lease(in: .starting)))
+        try holder.send(PoolReply.ready(lease(in: .ready)))
+        return holder
+    }
+
+    /// Stops listening and counts the connections after the first.
+    ///
+    /// - Returns: The number of connections that the daemon did not accept with ``grant(_:)``.
+    func otherConnections() async -> Int {
+        listener.close()
+        var count = 0
+        for await _ in listener.connections {
+            count += 1
+        }
+        return count
+    }
+
+    /// Creates the lease as the daemon shows it.
+    ///
+    /// - Parameter phase: The lease's phase.
+    /// - Returns: The lease.
+    private func lease(in phase: LeasePhase) -> LeaseSummary {
+        LeaseSummary(
+            id: id,
+            source: "/base",
+            bundle: "/clone",
+            phase: phase,
+            address: phase == .ready ? "192.168.64.2" : nil,
+            expiresAt: phase == .ready ? Date().addingTimeInterval(3600) : nil,
             restarts: 0,
             detached: false,
             priority: 0,
