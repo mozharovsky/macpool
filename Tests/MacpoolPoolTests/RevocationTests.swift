@@ -174,7 +174,8 @@ struct RevocationTests {
         await daemon.shutdown()
     }
 
-    /// Keeps the Mac blocked and reports the failed save when the list cannot be saved.
+    /// Keeps the Mac blocked, also in memory, and reports the failed save when the list cannot be
+    /// saved.
     @Test func keepsTheBlockWhenTheUnblockCannotBeSaved() async throws {
         let pool = try PoolFixture()
         let daemon = try await pool.start()
@@ -194,6 +195,7 @@ struct RevocationTests {
             #expect(message.contains("the host cannot save its list of paired Macs, so the Mac stays blocked"))
         }
         #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
+        #expect(await daemon.unsavedBlocks == [key])
         let logs = pool.logs.entries("The host cannot save the list of paired Macs to unblock a Mac")
         #expect(logs.map(\.level) == [.error])
         await daemon.shutdown()
