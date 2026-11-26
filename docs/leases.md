@@ -59,6 +59,9 @@ $macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base" 
   --allow-from 192.0.2.0/24
 ```
 
+`list` then also prints `allowing connections only from 192.0.2.0/24`, and `list --json` has the
+ranges under `listener.allowed_sources`.
+
 A paired Mac leases only the sources that `--offer` names, by their names. It can't share a
 directory of this Mac with its guest.
 

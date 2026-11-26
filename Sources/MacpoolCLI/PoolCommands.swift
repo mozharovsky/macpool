@@ -174,6 +174,7 @@ enum LeaseOutput {
     /// Formats the pool as tables of leases and images, with one line per queued request.
     ///
     /// A line about the listener for paired Macs follows the first line when the summary has one.
+    /// When the listener admits only some ranges of addresses, a line that names them comes next.
     ///
     /// - Parameter pool: The pool.
     /// - Returns: The lines without line breaks.
@@ -187,6 +188,9 @@ enum LeaseOutput {
                 lines.append("not listening for paired Macs on \(place): \(problem)")
             } else {
                 lines.append("listening for paired Macs on \(place)")
+            }
+            if !listener.allowedSources.isEmpty {
+                lines.append("allowing connections only from \(listener.allowedSources.joined(separator: ", "))")
             }
         }
         if !pool.leases.isEmpty {
