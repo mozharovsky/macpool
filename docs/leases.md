@@ -190,8 +190,9 @@ $macpool host invite --may-host
 ```
 
 On the host, add the coordinator with the code and name it in `--coordinator` next to `--listen`
-and `--offer`. The host connects to the coordinator only while its own listener is up, because the
-coordinator's clients connect to that listener.
+and `--offer`. `--coordinator` takes a name or short key from `macpool pool list`, so replace
+`hub` below with the coordinator's name. The host connects to the coordinator only while its own
+listener is up, because the coordinator's clients connect to that listener.
 
 ```sh
 pbpaste | $macpool pool add

@@ -39,8 +39,8 @@ struct HostInviteCommand: AsyncParsableCommand {
     @Flag(
         name: .customLong("may-host"),
         help: """
-        Lets the Mac report to this Mac as a host, so that this Mac places leases on it as their \
-        coordinator. A Mac that is already paired gains this right too.
+        Lets the Mac report its free slots and sources to this Mac as a host, so that this Mac \
+        lists it as their coordinator. A Mac that is already paired gains this right too.
         """,
     )
     var mayHost = false

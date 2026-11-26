@@ -60,8 +60,8 @@ struct ListenOptions: ParsableArguments {
         name: .customLong("coordinator"),
         help: ArgumentHelp(
             """
-            A paired host from macpool pool list that places leases on this Mac. The daemon \
-            reports its free slots and sources to it. Needs --listen.
+            A paired host from macpool pool list, by name or short key, that coordinates the \
+            pool. The daemon reports its free slots and sources to it. Needs --listen.
             """,
             valueName: "host",
         ),
@@ -83,6 +83,10 @@ struct ListenOptions: ParsableArguments {
         var names: Set<String> = []
         for offer in offers where !names.insert(offer.name).inserted {
             throw ValidationError("--offer names the source \(offer.name) twice.")
+        }
+        // The coordinator refuses a report with more sources, so the host would never appear there.
+        if coordinator != nil, offers.count > HostReport.maximumSources {
+            throw ValidationError("A daemon with --coordinator offers at most \(HostReport.maximumSources) sources.")
         }
     }
 
