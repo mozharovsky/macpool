@@ -39,7 +39,8 @@ public struct TrustedClient: TrustRecord {
     /// Whether the host refuses the client.
     ///
     /// A blocked client opens no new connection, and its open connections close at their next
-    /// request. The record stays. A person then sees which key the host refuses.
+    /// request. The record stays. A person then sees which key the host refuses, and
+    /// ``PoolRequest/unblock(key:)`` lets the client in again.
     public var isBlocked: Bool
 
     /// The highest priority that the client may ask for, 0 or more.
@@ -337,6 +338,16 @@ extension TrustList where Record == TrustedClient {
     mutating func block(_ key: KeyFingerprint) {
         if let index = records.firstIndex(where: { $0.key == key }) {
             records[index].isBlocked = true
+        }
+    }
+
+    /// Clears the block of a client and keeps the other fields of its record.
+    ///
+    /// - Parameter key: The client's fingerprint. If the list has no record of it, the call does
+    ///   nothing.
+    mutating func unblock(_ key: KeyFingerprint) {
+        if let index = records.firstIndex(where: { $0.key == key }) {
+            records[index].isBlocked = false
         }
     }
 }

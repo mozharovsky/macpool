@@ -341,8 +341,8 @@ public actor PoolDaemon {
     ///
     /// The daemon refuses these keys like blocked records until it restarts. It removes a key
     /// when a later revocation saves the block, or when that save fails and the list read again
-    /// holds the block. It also removes the key when a person deletes the Mac's record and the Mac
-    /// pairs again with a new code.
+    /// holds the block. It also removes the key when the local user unblocks the Mac, and when a
+    /// person deletes the Mac's record and the Mac pairs again with a new code.
     private(set) var unsavedBlocks: Set<KeyFingerprint> = []
 
     /// The connected clients.
@@ -1194,6 +1194,11 @@ public actor PoolDaemon {
                     throw .invalidRequest(reason: "only the host's own user can revoke Macs")
                 }
                 try reply(revoke(key, endLeases: endLeases), to: client)
+            case let .unblock(key):
+                guard owner == .local else {
+                    throw .invalidRequest(reason: "only the host's own user can unblock Macs")
+                }
+                try reply(unblock(key), to: client)
             case let .forget(endLeases):
                 guard case let .client(key) = owner else {
                     throw .invalidRequest(reason: "only a paired Mac can ask the host to forget it")
@@ -1309,6 +1314,47 @@ public actor PoolDaemon {
             connections: ended.connections,
             leases: ended.leases,
         )
+    }
+
+    /// Clears the block of a paired Mac, so the Mac may connect again.
+    ///
+    /// The daemon also drops a block of the key that it keeps in ``unsavedBlocks``. If the save of
+    /// the list fails, the daemon reads the list again, because a save can fail after the rename
+    /// that puts the new list in place. When the record there is not blocked, the call succeeds as
+    /// after a save that succeeded. Otherwise the daemon keeps the block in ``unsavedBlocks``.
+    ///
+    /// - Parameter text: The Mac's short key or full fingerprint.
+    /// - Returns: The reply to the local user.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when no paired Mac has the key, when a short
+    ///   key names more than one Mac, or when the save fails and the list still blocks the Mac. The
+    ///   errors of ``TrustList/load(from:)`` propagate.
+    private func unblock(_ text: String) throws(PoolError) -> PoolReply {
+        let list = try TrustList<TrustedClient>.load(from: configuration.directory)
+        let record = try Self.onlyMatch(of: text, in: list.records.filter { $0.key.isNamed(by: text) })
+        if record.isBlocked {
+            var unblocked = list
+            unblocked.unblock(record.key)
+            if let saveError = save(unblocked) {
+                let saved = try? TrustList<TrustedClient>.load(from: configuration.directory)
+                guard saved?[record.key]?.isBlocked == false else {
+                    // The failed save may have put the unblocked list in place before the read
+                    // failed, so the block stays in memory.
+                    unsavedBlocks.insert(record.key)
+                    configuration.logger.error(
+                        "The host cannot save the list of paired Macs to unblock a Mac",
+                        metadata: ["key": "\(record.key)", "reason": "\(saveError)"],
+                    )
+                    throw .invalidRequest(reason: "the host cannot save its list of paired Macs, so the Mac stays "
+                        + "blocked: \(saveError)")
+                }
+            }
+        }
+        unsavedBlocks.remove(record.key)
+        configuration.logger.notice("Unblocked a paired Mac", metadata: [
+            "key": "\(record.key)",
+            "name": "\(record.name)",
+        ])
+        return .unblocked(PairedMac(name: record.name, key: record.key))
     }
 
     /// The reason of the leases that a revocation ends.
@@ -2779,7 +2825,7 @@ private extension PoolReply {
             [message]
         case let .invitation(code, _):
             [code.description]
-        case let .paired(mac), let .alreadyPaired(mac), let .revoked(mac, _, _):
+        case let .paired(mac), let .alreadyPaired(mac), let .revoked(mac, _, _), let .unblocked(mac):
             [mac.name]
         }
     }

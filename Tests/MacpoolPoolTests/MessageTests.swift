@@ -46,6 +46,7 @@ struct MessageTests {
             .invite(address: "127.0.0.1", priorityCeiling: 3),
             .invite(),
             .revoke(key: "mzxw-6ytb-oi2d-k3lq", endLeases: true),
+            .unblock(key: "mzxw-6ytb-oi2d-k3lq"),
             .forget(endLeases: true),
             .heartbeat,
             .connect(id),
@@ -70,6 +71,7 @@ struct MessageTests {
             .alreadyPaired(PairedMac(name: "runner", key: randomKey())),
             .wrongCode,
             .revoked(PairedMac(name: "runner", key: randomKey()), connections: 2, leases: 1),
+            .unblocked(PairedMac(name: "runner", key: randomKey())),
             .forgotten(leases: 3),
         ]
         for reply in replies {

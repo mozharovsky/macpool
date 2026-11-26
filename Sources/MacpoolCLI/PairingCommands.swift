@@ -103,7 +103,7 @@ struct HostRevokeCommand: AsyncParsableCommand {
         discussion: """
         The Mac's queued requests and its leases with a connection end. Its detached leases run \
         until they expire unless you pass --end-leases. The Mac stays in macpool host list as \
-        blocked and can't pair again.
+        blocked and can't connect or pair again until macpool host unblock.
         """,
     )
 
@@ -143,6 +143,53 @@ struct HostRevokeCommand: AsyncParsableCommand {
             throw .pool(.malformedMessage(reason: "unexpected reply to revoke"))
         }
         return ["revoked \(PeerText.name(mac.name, key: mac.key)) connections=\(connections) leases=\(leases)"]
+    }
+}
+
+/// Lets a revoked Mac connect again.
+struct HostUnblockCommand: AsyncParsableCommand {
+    /// The subcommand's name, summary, and discussion.
+    static let configuration = CommandConfiguration(
+        commandName: "unblock",
+        abstract: "Lets a revoked Mac connect again.",
+        discussion: """
+        The Mac keeps its name and priority ceiling. It connects with its key as before and needs \
+        no new code.
+        """,
+    )
+
+    /// The data directory of this Mac's daemon.
+    @OptionGroup var location: PoolOptions
+
+    /// The Mac's short key or full key.
+    @Argument(help: "The Mac's short key or full key from macpool host list.")
+    var key: String
+
+    /// Asks the daemon to unblock the Mac and prints the result.
+    ///
+    /// - Throws: ``CommandError/pool(_:)`` when no daemon answers or the daemon cannot unblock
+    ///   the Mac.
+    func run() async throws {
+        for line in try await lines() {
+            Report.line(line)
+        }
+    }
+
+    /// Asks the daemon to unblock the Mac.
+    ///
+    /// The command lowercases the key, because the daemon compares it with keys in lowercase.
+    ///
+    /// - Returns: The line that names the unblocked Mac.
+    /// - Throws: ``CommandError/pool(_:)`` when no daemon answers, no paired Mac has the key, a
+    ///   short key names more than one Mac, or the daemon cannot save the list.
+    func lines() async throws(CommandError) -> [String] {
+        let request = PoolRequest.unblock(key: key.lowercased())
+        let directory = location.directory
+        let reply = try await pool { () async throws(PoolError) in try await PoolClient.send(request, to: directory) }
+        guard case let .unblocked(mac) = reply else {
+            throw .pool(.malformedMessage(reason: "unexpected reply to unblock"))
+        }
+        return ["unblocked \(PeerText.name(mac.name, key: mac.key))"]
     }
 }
 

@@ -179,7 +179,20 @@ connections and leases that ended.
 revoked mzxw-6ytb-oi2d-k3lq runner connections=1 leases=0
 ```
 
-The Mac stays in `host list` with `BLOCKED` set to `yes`, and it can't pair again.
+The Mac stays in `host list` with `BLOCKED` set to `yes`. It can't connect or pair again until you
+run [`host unblock`](#host-unblock).
+
+## host unblock
+
+`macpool host unblock KEY` lets a revoked Mac connect again. `KEY` is the short key or the full key
+from `host list`. The command takes `--data-dir` like `host revoke`.
+
+```text
+unblocked mzxw-6ytb-oi2d-k3lq runner
+```
+
+The Mac keeps its name and priority ceiling, and `BLOCKED` turns to `no`. It connects with its key as
+before and needs no new code. Unblocking a Mac that isn't blocked changes nothing.
 
 ## pool list
 

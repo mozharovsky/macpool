@@ -578,6 +578,20 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     ///   - endLeases: Whether the daemon also ends the Mac's detached leases.
     case revoke(key: String, endLeases: Bool = false)
 
+    /// Lets a revoked Mac connect again.
+    ///
+    /// Only the local user may unblock a Mac. The daemon clears the block of the Mac's record and
+    /// keeps the record's other fields, so the Mac keeps its name and priority ceiling. It also
+    /// drops a block that it keeps only in memory. The Mac then connects with its key as before and
+    /// needs no new pairing code. The daemon replies with ``PoolReply/unblocked(_:)``, also for a
+    /// Mac that was not blocked.
+    ///
+    /// If the save of the list fails, the daemon reads the list again. When the record there is
+    /// not blocked, the request succeeds. Otherwise it fails, and the Mac stays blocked.
+    ///
+    /// - Parameter key: The Mac's ``KeyFingerprint/shortKey`` or its full fingerprint.
+    case unblock(key: String)
+
     /// Asks the host to forget the sending Mac.
     ///
     /// Only a paired Mac may send this request. If the Mac has leases and `endLeases` is not set,
@@ -644,7 +658,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case secret
         /// The name of a pairing Mac.
         case name
-        /// The key of a Mac to revoke.
+        /// The key of a Mac to revoke or unblock.
         case key
         /// Whether a revocation or a request to forget ends leases.
         case endLeases = "end_leases"
@@ -683,6 +697,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
                 key: container.decode(String.self, forKey: .key),
                 endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false,
             )
+        case "unblock":
+            self = try .unblock(key: container.decode(String.self, forKey: .key))
         case "forget":
             self = try .forget(endLeases: container.decodeIfPresent(Bool.self, forKey: .endLeases) ?? false)
         case "connect":
@@ -733,6 +749,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode("revoke", forKey: .request)
             try container.encode(key, forKey: .key)
             try container.encode(endLeases, forKey: .endLeases)
+        case let .unblock(key):
+            try container.encode("unblock", forKey: .request)
+            try container.encode(key, forKey: .key)
         case let .forget(endLeases):
             try container.encode("forget", forKey: .request)
             try container.encode(endLeases, forKey: .endLeases)
@@ -957,6 +976,11 @@ public enum PoolReply: Sendable, Equatable, Codable {
     ///   - leases: The number of the Mac's leases that the revocation ended.
     case revoked(PairedMac, connections: Int, leases: Int)
 
+    /// The host lets a paired Mac connect again.
+    ///
+    /// - Parameter mac: The Mac with the name in the host's record.
+    case unblocked(PairedMac)
+
     /// The host forgot the sending Mac and closes its connections.
     ///
     /// - Parameter leases: The number of the Mac's leases that the request ended.
@@ -980,7 +1004,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case code
         /// The end of an invitation.
         case expiresAt = "expires_at"
-        /// The Mac on the other side of a pairing, or the revoked Mac.
+        /// The Mac on the other side of a pairing, or the revoked or unblocked Mac.
         case mac
         /// The number of connections that a revocation closed.
         case connections
@@ -1041,6 +1065,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
                 connections: container.decode(Int.self, forKey: .connections),
                 leases: container.decode(Int.self, forKey: .leases),
             )
+        case "unblocked":
+            self = try .unblocked(container.decode(PairedMac.self, forKey: .mac))
         case "forgotten":
             self = try .forgotten(leases: container.decode(Int.self, forKey: .leases))
         default:
@@ -1070,6 +1096,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case .alreadyPaired: "already_paired"
         case .wrongCode: "wrong_code"
         case .revoked: "revoked"
+        case .unblocked: "unblocked"
         case .forgotten: "forgotten"
         }
     }
@@ -1103,7 +1130,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case let .invitation(code, expiresAt):
             try container.encode(code, forKey: .code)
             try container.encode(expiresAt, forKey: .expiresAt)
-        case let .paired(mac), let .alreadyPaired(mac):
+        case let .paired(mac), let .alreadyPaired(mac), let .unblocked(mac):
             try container.encode(mac, forKey: .mac)
         case .wrongCode:
             break

@@ -136,7 +136,7 @@ The host prints `paired` with the client's short key, and the client prints the 
 line with `macpool host revoke`.
 
 If `pool add` fails after the host printed `paired`, this Mac may have paired anyway. A revoked Mac
-can't pair again, so don't revoke yet. Run `host invite` and `pool add` again. The host prints
+can't pair again until `host unblock`, so don't revoke yet. Run `host invite` and `pool add` again. The host prints
 `already paired` for a Mac that paired before. The new `this_mac=` line then shows whether the
 first `paired` line named this Mac.
 [Commands](commands.md#host-invite) describes the pairing commands.
