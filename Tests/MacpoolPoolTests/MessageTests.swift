@@ -53,6 +53,8 @@ struct MessageTests {
             .connect(id),
             .access(id),
             .report(CoordinatorTests.report),
+            .granted(ticket: 7),
+            .declined(ticket: 7, reason: "this host has no available slot"),
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
@@ -78,6 +80,7 @@ struct MessageTests {
             .revoked(PairedMac(name: "runner", key: randomKey()), connections: 2, leases: 1),
             .unblocked(PairedMac(name: "runner", key: randomKey())),
             .forgotten(leases: 3),
+            .grant(HostGrant(ticket: 7, client: randomKey(), name: "agent", source: "base", priority: 1)),
         ]
         for reply in replies {
             let data = try MessageCoding.encoder.encode(reply)

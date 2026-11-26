@@ -128,3 +128,41 @@ public struct HostSummary: Codable, Sendable, Equatable {
         case reportAge = "report_age"
     }
 }
+
+/// A lease that a coordinator places on a host.
+///
+/// The host keeps the grant for 60 seconds. While it keeps the grant, the client that the grant
+/// names may connect to the host and request one lease of the source. The host admits the client
+/// without a record in its list of paired clients, because the host trusts its coordinator.
+public struct HostGrant: Codable, Sendable, Equatable {
+    /// The number by which the coordinator matches the host's answer to the grant.
+    public var ticket: UInt64
+
+    /// The fingerprint of the client's key.
+    public var client: KeyFingerprint
+
+    /// The client's name in the coordinator's list of paired clients.
+    public var name: String
+
+    /// The name of the offered source that the client leases.
+    public var source: String
+
+    /// The highest priority that the client may ask for in its request to the host.
+    public var priority: Int
+
+    /// Creates a grant.
+    ///
+    /// - Parameters:
+    ///   - ticket: The number that matches the host's answer.
+    ///   - client: The fingerprint of the client's key.
+    ///   - name: The client's name.
+    ///   - source: The name of the offered source.
+    ///   - priority: The highest priority that the client may ask for.
+    public init(ticket: UInt64, client: KeyFingerprint, name: String, source: String, priority: Int) {
+        self.ticket = ticket
+        self.client = client
+        self.name = name
+        self.source = source
+        self.priority = priority
+    }
+}

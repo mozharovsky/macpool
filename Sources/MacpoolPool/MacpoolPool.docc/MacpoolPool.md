@@ -285,6 +285,13 @@ hosts may take leases. The coordinator keeps each host's last report in memory w
 connection stays open. Every client of the coordinator sees the reports in ``PoolSummary/hosts``.
 After a restart of the coordinator, the hosts connect again and report within one interval.
 
+A coordinator places a lease on a host with ``PoolReply/grant(_:)`` on the host's connection. The
+host answers with ``PoolRequest/granted(ticket:)`` or ``PoolRequest/declined(ticket:reason:)``. An
+accepted grant lasts 60 seconds and takes one of the host's available slots. Until then, the host
+admits the Mac that the grant names without a record in its list of paired clients, and serves it
+one lease of the granted source. The lease records the coordinator. The Mac may attach to it again
+and reach its guest while the host's list of paired hosts names the coordinator.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
@@ -391,6 +398,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``ImageSummary``
 - ``HostReport``
 - ``HostSummary``
+- ``HostGrant``
 
 ### Supervisors
 
