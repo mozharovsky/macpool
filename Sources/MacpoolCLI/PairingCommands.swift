@@ -35,6 +35,16 @@ struct HostInviteCommand: AsyncParsableCommand {
     )
     var priorityCeiling = 0
 
+    /// Whether the Mac may report to this Mac's daemon as a host.
+    @Flag(
+        name: .customLong("may-host"),
+        help: """
+        Lets the Mac report to this Mac as a host, so that this Mac places leases on it as their \
+        coordinator. A Mac that is already paired gains this right too.
+        """,
+    )
+    var mayHost = false
+
     /// Rejects a negative priority ceiling.
     ///
     /// - Throws: `ValidationError` when the ceiling is below 0.
@@ -67,7 +77,7 @@ struct HostInviteCommand: AsyncParsableCommand {
         let directory = location.directory
         let channel = try await pool { () async throws(PoolError) in try await PoolClient.connect(to: directory) }
         defer { channel.close() }
-        let request = PoolRequest.invite(address: address, priorityCeiling: priorityCeiling)
+        let request = PoolRequest.invite(address: address, priorityCeiling: priorityCeiling, mayHost: mayHost)
         try pool { () throws(PoolError) in try channel.send(request) }
         while true {
             let reply = try await pool { () async throws(PoolError) in try await channel.receive(PoolReply.self) }

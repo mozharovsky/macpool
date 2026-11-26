@@ -25,6 +25,19 @@ struct PairingCommandTests {
         let clients = try TrustedClient.paired(in: host.directory)
         #expect(clients.map(\.key) == [key])
         #expect(clients.first?.priorityCeiling == 3)
+        #expect(clients.first?.mayHost == false)
+        await host.stop()
+    }
+
+    /// Lets the Mac that pairs report as a host with `--may-host`.
+    @Test func invitesAHost() async throws {
+        let host = try await PairingDaemon()
+        let invitation = try await host.invite("--may-host")
+        let client = try host.clientDirectory()
+        _ = try await PoolClient.pair(using: invitation.code, name: "mini", directory: client)
+        let key = try PairingDaemon.key(of: client)
+        #expect(try await invitation.finish() == ["paired \(PeerText.name("mini", key: key))"])
+        #expect(try TrustedClient.paired(in: host.directory).map(\.mayHost) == [true])
         await host.stop()
     }
 

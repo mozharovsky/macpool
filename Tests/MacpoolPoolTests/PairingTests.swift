@@ -114,16 +114,17 @@ struct PairingTests {
         #expect(opened.replaced == nil)
         #expect(invitation.isOpen(at: start))
         let accepted = PairingInvitation.Ended(inviter: first, wrongSecrets: 0)
-        #expect(invitation.redeem(opened.secret, at: start) == .accepted(accepted, priorityCeiling: 0))
+        #expect(invitation.redeem(opened.secret, at: start) == .accepted(accepted, priorityCeiling: 0, mayHost: false))
         #expect(!invitation.isOpen(at: start))
         #expect(invitation.redeem(opened.secret, at: start) == .closed)
 
-        let guessed = invitation.open(for: first, priorityCeiling: 5, at: start)
+        let guessed = invitation.open(for: first, priorityCeiling: 5, mayHost: true, at: start)
         for count in 1 ... 6 {
             #expect(invitation.redeem([0], at: start) == .rejected(inviter: first, wrongSecrets: count))
         }
         let guessedOnce = PairingInvitation.Ended(inviter: first, wrongSecrets: 6)
-        #expect(invitation.redeem(guessed.secret, at: start) == .accepted(guessedOnce, priorityCeiling: 5))
+        let redeemed = invitation.redeem(guessed.secret, at: start)
+        #expect(redeemed == .accepted(guessedOnce, priorityCeiling: 5, mayHost: true))
 
         let expiring = invitation.open(for: first, at: start)
         _ = invitation.redeem([0], at: start)
@@ -496,6 +497,34 @@ struct PairingTests {
         #expect(try TrustList<TrustedClient>.load(from: host.fixture.directory)[clientKey]?.priorityCeiling == 5)
         let paired = host.fixture.logs.entries("Paired a Mac")
         #expect(paired.map { $0.metadata["priority_ceiling"] } == ["5"])
+        await host.stop()
+    }
+
+    /// Records the host right of the code with a new client, and adds it to the record of a Mac
+    /// that was already paired.
+    @Test func recordsTheHostRightOfTheCode() async throws {
+        let host = try await PairingHost()
+        let client = try host.clientDirectory()
+        let first = try await host.invite(priorityCeiling: 3)
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: client)
+        let clientKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: client).keyDigest)
+        #expect(try TrustList<TrustedClient>.load(from: host.fixture.directory)[clientKey]?.mayHost == false)
+
+        let second = try await host.invite(mayHost: true)
+        _ = try await PoolClient.pair(using: second.code, name: "builder", directory: client)
+        #expect(try await next(second.channel) == .alreadyPaired(PairedMac(name: "runner", key: clientKey)))
+        let record = try TrustList<TrustedClient>.load(from: host.fixture.directory)[clientKey]
+        #expect(record?.mayHost == true)
+        #expect(record?.priorityCeiling == 3)
+        #expect(host.fixture.logs.entries("Allowed a paired Mac to report as a host").count == 1)
+
+        let other = try host.clientDirectory()
+        let third = try await host.invite(mayHost: true)
+        _ = try await PoolClient.pair(using: third.code, name: "mini", directory: other)
+        let otherKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: other).keyDigest)
+        #expect(try TrustList<TrustedClient>.load(from: host.fixture.directory)[otherKey]?.mayHost == true)
+        #expect(host.fixture.logs.entries("Opened an invitation").map { $0.metadata["may_host"] }
+            == ["false", "true", "true"])
         await host.stop()
     }
 
@@ -903,7 +932,7 @@ struct PairingTests {
 }
 
 /// A host daemon that listens for paired Macs on 127.0.0.1 under the name `example`.
-private final class PairingHost {
+final class PairingHost {
     /// The host's data directory and clock.
     let fixture: PoolFixture
 
@@ -937,12 +966,14 @@ private final class PairingHost {
 
     /// Opens an invitation through the local socket.
     ///
-    /// - Parameter priorityCeiling: The highest priority that the Mac that pairs may ask for.
+    /// - Parameters:
+    ///   - priorityCeiling: The highest priority that the Mac that pairs may ask for.
+    ///   - mayHost: Whether the Mac that pairs may report as a host.
     /// - Returns: The inviting connection and the code.
     /// - Throws: An error when the daemon refuses or sends no code.
-    func invite(priorityCeiling: Int = 0) async throws -> OpenInvitation {
+    func invite(priorityCeiling: Int = 0, mayHost: Bool = false) async throws -> OpenInvitation {
         let channel = try await PoolClient.connect(to: fixture.directory)
-        try channel.send(PoolRequest.invite(address: "127.0.0.1", priorityCeiling: priorityCeiling))
+        try channel.send(PoolRequest.invite(address: "127.0.0.1", priorityCeiling: priorityCeiling, mayHost: mayHost))
         guard case let .invitation(code, _) = try await next(channel) else {
             throw PoolError.connectionClosed
         }
@@ -981,7 +1012,7 @@ private func regularFileContents(_ directory: PoolDirectory) -> [String] {
 }
 
 /// An invitation and the local connection that keeps it open.
-private struct OpenInvitation {
+struct OpenInvitation {
     /// The inviting connection.
     let channel: MessageChannel
 

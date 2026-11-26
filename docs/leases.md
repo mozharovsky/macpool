@@ -176,6 +176,42 @@ If the host doesn't confirm the release when the command after `--` ends, `lease
 and still exits with the command's status. At Control-C, it fails instead. The host ends the lease
 60 seconds after it notices the closed connection.
 
+## Coordinating hosts
+
+A coordinator is a daemon that knows the other hosts of the pool. Each host connects to it and
+reports its free slots and sources every 10 seconds. Any Mac can be the coordinator, and it can
+run VMs itself. Pick one that stays awake.
+
+On the coordinator, start the daemon with `--listen` and print a code for each host with
+`--may-host`.
+
+```sh
+$macpool host invite --may-host
+```
+
+On the host, add the coordinator with the code and name it in `--coordinator` next to `--listen`
+and `--offer`. The host connects to the coordinator only while its own listener is up, because the
+coordinator's clients connect to that listener.
+
+```sh
+pbpaste | $macpool pool add
+$macpool daemon install --listen 192.0.2.30 --offer base="$PWD/.cache/vms/base" --coordinator hub
+```
+
+`list` on the coordinator, and `list --pool` on any Mac paired with it, then prints a table of the
+hosts with their addresses, free slots, leases, queued requests, sources, and the age of their last
+report. `list --json` has the same data under `hosts`.
+
+```text
+HOST                     ADDRESS          AVAILABLE  SLOTS  LEASES  QUEUED  REPORTED  SOURCES
+5cqb-u2vs-6fla-ylrd mini 192.0.2.30:7373  1          2      1       0       4s ago    base
+```
+
+`AVAILABLE` is the number of leases that the host can start now. The host computes it, and the
+coordinator keeps no list of hosts that may take leases. A host leaves the table when its
+connection to the coordinator closes. The coordinator keeps the reports only in memory, so the
+hosts report again within 10 seconds after it restarts.
+
 ## Restarts
 
 `--restart` decides when the daemon boots a leased VM again.

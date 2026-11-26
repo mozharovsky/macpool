@@ -387,6 +387,21 @@ public actor PoolDaemon {
     /// instead and also covers detached leases.
     private var loggedPhases: [LeaseID: LeasePhase] = [:]
 
+    /// The hosts that report to this daemon as their coordinator.
+    private var hostRegistry = HostRegistry()
+
+    /// The connection on which this daemon reports to its coordinator, while it has one.
+    private var coordinatorChannel: MessageChannel?
+
+    /// The reason of the last failure to reach the coordinator or of its last refusal, or `nil`
+    /// after a success.
+    ///
+    /// The daemon logs a failure at the notice level only when its reason differs from this one.
+    private var coordinatorFailure: String?
+
+    /// The interval at which the daemon reports to its coordinator.
+    static let reportInterval = Duration.seconds(10)
+
     /// The wait between checks of a lock and between connection attempts.
     private static let pollInterval = Duration.milliseconds(100)
 
@@ -500,6 +515,16 @@ public actor PoolDaemon {
                     try? await Task.sleep(for: peers.retryInterval)
                 }
             })
+            if let coordinator = peers.coordinator {
+                loops.append(Task { [weak self] in
+                    while !Task.isCancelled {
+                        guard await self?.linkCoordinator(named: coordinator) != nil else {
+                            return
+                        }
+                        try? await Task.sleep(for: peers.retryInterval)
+                    }
+                })
+            }
         }
     }
 
@@ -524,6 +549,8 @@ public actor PoolDaemon {
         for link in links.values {
             link.channel.close()
         }
+        coordinatorChannel?.close()
+        coordinatorChannel = nil
         endStreams { _ in true }
         clients = [:]
         links = [:]
@@ -579,6 +606,19 @@ public actor PoolDaemon {
         var summary = ledger.summary(for: .local)
         summary.images = configuration.directory.images()
         summary.listener = listenerSummary()
+        summary.hosts = hostRegistry.summaries(at: configuration.awakeTime())
+        return summary
+    }
+
+    /// Returns the pool's state for a paired client.
+    ///
+    /// - Parameter owner: The paired client.
+    /// - Returns: The client's own leases and queued requests, the slots, and the hosts that
+    ///   report to this daemon. The summary names no path on this Mac and nothing about the
+    ///   listener.
+    private func pairedSummary(for owner: LeaseOwner) -> PoolSummary {
+        var summary = ledger.summary(for: owner)
+        summary.hosts = hostRegistry.summaries(at: configuration.awakeTime())
         return summary
     }
 
@@ -846,7 +886,7 @@ public actor PoolDaemon {
                 reply(.wrongCode, to: inviter)
             }
             return .failure("the pairing code is wrong")
-        case let .accepted(ended, priorityCeiling):
+        case let .accepted(ended, priorityCeiling, mayHost):
             invitationEnded(ended)
             let host = PairedMac(name: hostName, key: hostKey)
             let client = TrustedClient(
@@ -855,6 +895,7 @@ public actor PoolDaemon {
                 pairedAt: now,
                 isBlocked: false,
                 priorityCeiling: priorityCeiling,
+                mayHost: mayHost,
             )
             return record(client, invitedBy: ended.inviter, host: host)
         }
@@ -887,6 +928,15 @@ public actor PoolDaemon {
                     configuration.logger.warning("A blocked Mac used a pairing code", metadata: ["key": "\(key)"])
                     reply(.failure("a blocked Mac used the code and ended the invitation"), to: inviter)
                     return .failure("the host blocked this Mac")
+                }
+                if client.mayHost, !known.mayHost {
+                    var widened = known
+                    widened.mayHost = true
+                    clients.insert(widened)
+                    if let saveError = save(clients) {
+                        throw saveError
+                    }
+                    configuration.logger.info("Allowed a paired Mac to report as a host", metadata: ["key": "\(key)"])
                 }
                 configuration.logger.info("A paired Mac used a pairing code", metadata: ["key": "\(key)"])
                 reply(.alreadyPaired(PairedMac(name: known.name, key: key)), to: inviter)
@@ -966,6 +1016,7 @@ public actor PoolDaemon {
     /// - Parameters:
     ///   - address: The host's address for the code, or `nil` for the listener's address.
     ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
+    ///   - mayHost: Whether the Mac that pairs may report to this daemon as a host.
     ///   - client: The inviting connection.
     ///   - owner: Who the client acts for.
     /// - Returns: The reply with the code.
@@ -975,6 +1026,7 @@ public actor PoolDaemon {
     private func invite(
         address: String?,
         priorityCeiling: Int,
+        mayHost: Bool,
         from client: ClientID,
         owner: LeaseOwner,
     ) throws(PoolError) -> PoolReply {
@@ -1006,7 +1058,12 @@ public actor PoolDaemon {
                 reason: "the host's name for clients contains a path on this Mac. Choose another name",
             )
         }
-        let opened = invitation.open(for: client, priorityCeiling: priorityCeiling, at: configuration.now())
+        let opened = invitation.open(
+            for: client,
+            priorityCeiling: priorityCeiling,
+            mayHost: mayHost,
+            at: configuration.now(),
+        )
         if let replaced = opened.replaced {
             invitationEnded(replaced)
             if replaced.inviter != client {
@@ -1016,6 +1073,7 @@ public actor PoolDaemon {
         configuration.logger.info("Opened an invitation", metadata: [
             "address": "\(address)",
             "priority_ceiling": "\(priorityCeiling)",
+            "may_host": "\(mayHost)",
         ])
         let code = PairingCode(address: address, port: listener.port, hostKey: listener.hostKey, secret: opened.secret)
         return .invitation(code, expiresAt: opened.expiresAt)
@@ -1040,6 +1098,114 @@ public actor PoolDaemon {
             return ListenerSummary(address: peers.address, port: peers.port, problem: problem, allowedSources: ranges)
         }
         return ListenerSummary(address: peers.address, port: peerListener.port, problem: nil, allowedSources: ranges)
+    }
+
+    // MARK: Coordinator
+
+    /// Connects to the coordinator, reports to it every ``reportInterval``, and returns when the
+    /// connection ends.
+    ///
+    /// The daemon connects only while it listens for paired Macs, because the coordinator's
+    /// clients could not reach this host otherwise. It reads the coordinator's record from the
+    /// list of paired hosts on each attempt. A new pairing with the coordinator therefore takes
+    /// effect at the next attempt.
+    ///
+    /// - Parameter name: The coordinator's name or short key in the list of paired hosts.
+    private func linkCoordinator(named name: String) async {
+        guard !isShutDown, peerListener != nil else {
+            return
+        }
+        let channel: MessageChannel
+        do throws(PoolError) {
+            let coordinator = try TrustedHost.named(name, in: configuration.directory)
+            channel = try await PoolClient.connect(to: coordinator, directory: configuration.directory)
+        } catch {
+            coordinatorFailed("The daemon cannot reach its coordinator", reason: error.description)
+            return
+        }
+        guard !isShutDown else {
+            channel.close()
+            return
+        }
+        coordinatorChannel = channel
+        coordinatorFailure = nil
+        configuration.logger.info("Connected to the coordinator", metadata: ["address": "\(channel.peer)"])
+        let reporter = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.sendReport()
+                try? await Task.sleep(for: Self.reportInterval)
+            }
+        }
+        defer { reporter.cancel() }
+        var reason = "the coordinator closed the connection"
+        while true {
+            do {
+                guard let reply = try await channel.receive(PoolReply.self) else {
+                    break
+                }
+                coordinatorReplied(reply)
+            } catch {
+                reason = error.description
+                break
+            }
+        }
+        channel.close()
+        if coordinatorChannel === channel {
+            coordinatorChannel = nil
+        }
+        if !isShutDown {
+            coordinatorFailed("The daemon lost its connection to the coordinator", reason: reason)
+        }
+    }
+
+    /// Sends this host's report on the connection to the coordinator, if the daemon has one.
+    private func sendReport() {
+        guard let channel = coordinatorChannel, let report = hostReport() else {
+            return
+        }
+        try? channel.send(PoolRequest.report(report))
+    }
+
+    /// Describes this host for its coordinator.
+    ///
+    /// - Returns: The report, or `nil` while the daemon does not listen for paired Macs. Clients
+    ///   could not reach this host then.
+    private func hostReport() -> HostReport? {
+        guard let peers = configuration.peers, let peerListener else {
+            return nil
+        }
+        let slots = configuration.policy.slots
+        let leases = ledger.leases.count
+        let queued = ledger.queue.count
+        return HostReport(
+            address: peers.address,
+            port: peerListener.port,
+            slots: slots,
+            leases: leases,
+            queued: queued,
+            available: max(0, slots - leases - queued),
+            sources: configuration.offeredSources.keys.sorted(),
+        )
+    }
+
+    /// Handles a reply from the coordinator.
+    ///
+    /// - Parameter reply: The reply. Only a failure needs handling, and the daemon logs it.
+    private func coordinatorReplied(_ reply: PoolReply) {
+        if case let .failure(message) = reply {
+            coordinatorFailed("The coordinator refused a report", reason: message)
+        }
+    }
+
+    /// Logs a failure of the link to the coordinator.
+    ///
+    /// - Parameters:
+    ///   - message: What failed.
+    ///   - reason: Why. A reason that repeats the previous one goes to the debug level.
+    private func coordinatorFailed(_ message: Logger.Message, reason: String) {
+        let level: Logger.Level = reason == coordinatorFailure ? .debug : .notice
+        coordinatorFailure = reason
+        configuration.logger.log(level: level, message, metadata: ["reason": "\(reason)"])
     }
 
     /// Reads a client's requests until it disconnects.
@@ -1085,7 +1251,26 @@ public actor PoolDaemon {
         guard !isShutDown, clients.removeValue(forKey: client) != nil else {
             return
         }
-        perform(ledger.clientDisconnected(client, owner: owner, awake: configuration.awakeTime()))
+        clientGone(client, owner: owner, awake: configuration.awakeTime())
+    }
+
+    /// Handles the end of a client's connection after the daemon stopped serving it.
+    ///
+    /// The client's queued requests leave the queue, its leases wait for another connection as
+    /// ``LeaseLedger/clientDisconnected(_:owner:awake:)`` describes, and a host that reported on
+    /// the connection leaves ``hostRegistry``.
+    ///
+    /// - Parameters:
+    ///   - client: The client whose connection ended.
+    ///   - owner: Who the client acted for.
+    ///   - awake: The current time on ``Configuration/awakeTime``.
+    private func clientGone(_ client: ClientID, owner: LeaseOwner, awake: SuspendingClock.Instant) {
+        if let host = hostRegistry.remove(client: client) {
+            configuration.logger.notice("A host stopped reporting to this coordinator", metadata: [
+                "key": "\(host.key)",
+            ])
+        }
+        perform(ledger.clientDisconnected(client, owner: owner, awake: awake))
     }
 
     /// Stops serving the paired Macs whose connections sent no request for
@@ -1113,7 +1298,7 @@ public actor PoolDaemon {
             // The serve(_:owner:on:) loop sees the missing client and ends without a second
             // disconnect.
             clients[client] = nil
-            perform(ledger.clientDisconnected(client, owner: connection.owner, awake: awake))
+            clientGone(client, owner: connection.owner, awake: awake)
             connection.channel.close()
         }
     }
@@ -1179,10 +1364,16 @@ public actor PoolDaemon {
                 try perform(ledger.renew(id, client: client, owner: owner, now: configuration.now()))
             case .status:
                 // A paired Mac gets no paths on this Mac's disk and nothing about the listener.
-                reply(.status(owner == .local ? summary() : ledger.summary(for: owner)), to: client)
-            case let .invite(address, priorityCeiling):
+                reply(.status(owner == .local ? summary() : pairedSummary(for: owner)), to: client)
+            case let .invite(address, priorityCeiling, mayHost):
                 try reply(
-                    invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),
+                    invite(
+                        address: address,
+                        priorityCeiling: priorityCeiling,
+                        mayHost: mayHost,
+                        from: client,
+                        owner: owner,
+                    ),
                     to: client,
                 )
             case let .pair(secret, name):
@@ -1214,11 +1405,42 @@ public actor PoolDaemon {
                 try reply(.access(guestAccess(of: id, for: owner)), to: client)
             case .heartbeat:
                 break
+            case let .report(report):
+                try recordReport(report, from: client, record: record)
             }
         } catch {
             reply(.failure(error.description), to: client)
         }
         return true
+    }
+
+    /// Records the report of a host for which this daemon is the coordinator.
+    ///
+    /// - Parameters:
+    ///   - report: The host's report.
+    ///   - client: The connection that carried it.
+    ///   - record: The sender's record in the list of paired clients, or `nil` for the local user.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the sender's record does not allow
+    ///   reports or ``HostReport/validate()`` refuses the report.
+    private func recordReport(_ report: HostReport, from client: ClientID, record: TrustedClient?) throws(PoolError) {
+        guard let record, record.mayHost else {
+            throw .invalidRequest(reason: "this Mac may not report as a host. Pair it with a code from macpool "
+                + "host invite --may-host")
+        }
+        try report.validate()
+        let isNew = hostRegistry.record(
+            report,
+            from: record.key,
+            name: record.name,
+            client: client,
+            at: configuration.awakeTime(),
+        )
+        if isNew {
+            configuration.logger.info("A host reports to this coordinator", metadata: [
+                "key": "\(record.key)",
+                "address": "\(report.address):\(report.port)",
+            ])
+        }
     }
 
     /// Blocks a paired Mac, closes its connections, and ends its leases that need a client.
@@ -1552,7 +1774,7 @@ public actor PoolDaemon {
         guard let connection = clients.removeValue(forKey: client) else {
             return
         }
-        perform(ledger.clientDisconnected(client, owner: connection.owner, awake: configuration.awakeTime()))
+        clientGone(client, owner: connection.owner, awake: configuration.awakeTime())
         try? connection.channel.send(visible(last, to: connection.owner))
     }
 
@@ -2822,6 +3044,7 @@ private extension PoolReply {
             [reason]
         case let .status(pool):
             pool.leases.flatMap(\.texts) + pool.queue.map(\.source) + pool.images.flatMap(\.texts)
+                + pool.hosts.map(\.name)
         case let .failure(message):
             [message]
         case let .invitation(code, _):

@@ -21,6 +21,8 @@ public struct PeerSettings: Sendable {
 
     /// The wait before the daemon tries to listen again after this Mac's key, the list of paired
     /// clients, or the port failed, or after the listener stopped.
+    ///
+    /// The daemon also waits this long before it connects to its coordinator again.
     public var retryInterval: Duration
 
     /// The ranges of addresses that may connect, or an empty array for every address.
@@ -28,6 +30,13 @@ public struct PeerSettings: Sendable {
     /// The listener closes a connection from another address before its TLS handshake starts.
     /// Such a connection takes no handshake place.
     public var allowedSources: [AddressRange]
+
+    /// The name or short key of the paired host that this daemon reports to as its coordinator,
+    /// or `nil` when the daemon reports to none.
+    ///
+    /// The daemon connects to that host and sends ``PoolRequest/report(_:)`` while it listens.
+    /// The host must have paired this Mac with a code from `macpool host invite --may-host`.
+    public var coordinator: String?
 
     /// Creates listener settings.
     ///
@@ -38,18 +47,21 @@ public struct PeerSettings: Sendable {
     ///   - retryInterval: The wait before another attempt to listen.
     ///   - allowedSources: The ranges of addresses that may connect, or an empty array for every
     ///     address.
+    ///   - coordinator: The paired host to report to, or `nil`.
     public init(
         name: String? = nil,
         address: String,
         port: UInt16,
         retryInterval: Duration = .seconds(10),
         allowedSources: [AddressRange] = [],
+        coordinator: String? = nil,
     ) {
         self.name = name ?? PairedMac.localName()
         self.address = address
         self.port = port
         self.retryInterval = retryInterval
         self.allowedSources = allowedSources
+        self.coordinator = coordinator
     }
 
     /// Reports whether the listener can bind to an address.

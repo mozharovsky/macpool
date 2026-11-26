@@ -423,6 +423,9 @@ public struct PoolSummary: Codable, Sendable, Equatable {
     /// Only clients on this Mac receive it.
     public var listener: ListenerSummary?
 
+    /// The hosts that report to this daemon as their coordinator, ordered by name and key.
+    public var hosts: [HostSummary]
+
     /// Creates a summary.
     ///
     /// - Parameters:
@@ -431,24 +434,27 @@ public struct PoolSummary: Codable, Sendable, Equatable {
     ///   - queue: The requests that wait for a slot.
     ///   - images: The images in the data directory.
     ///   - listener: The state of the listener for paired Macs, or `nil`.
+    ///   - hosts: The hosts that report to this daemon.
     public init(
         slots: Int,
         leases: [LeaseSummary],
         queue: [QueuedSummary],
         images: [ImageSummary] = [],
         listener: ListenerSummary? = nil,
+        hosts: [HostSummary] = [],
     ) {
         self.slots = slots
         self.leases = leases
         self.queue = queue
         self.images = images
         self.listener = listener
+        self.hosts = hosts
     }
 
     /// Decodes a summary and treats a missing `images` key as no images.
     ///
     /// A daemon from before images existed sends no such key, and one from before listeners
-    /// existed sends no `listener` key.
+    /// existed sends no `listener` key. A missing `hosts` key means that no host reports.
     ///
     /// - Parameter decoder: The decoder.
     /// - Throws: `DecodingError` when a key is missing or holds a value of the wrong type.
@@ -459,6 +465,7 @@ public struct PoolSummary: Codable, Sendable, Equatable {
         queue = try container.decode([QueuedSummary].self, forKey: .queue)
         images = try container.decodeIfPresent([ImageSummary].self, forKey: .images) ?? []
         listener = try container.decodeIfPresent(ListenerSummary.self, forKey: .listener)
+        hosts = try container.decodeIfPresent([HostSummary].self, forKey: .hosts) ?? []
     }
 
     /// The JSON keys of the summary.
@@ -473,6 +480,8 @@ public struct PoolSummary: Codable, Sendable, Equatable {
         case images
         /// The `listener` key.
         case listener
+        /// The `hosts` key.
+        case hosts
     }
 }
 
@@ -577,11 +586,15 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// The client that pairs with the code may ask for priorities up to `priorityCeiling`. A Mac
     /// that is already paired keeps its own ceiling.
     ///
+    /// If `mayHost` is set, the Mac that pairs may also send ``report(_:)``, and this daemon then
+    /// acts as its coordinator. A Mac that is already paired gains this right from such a code.
+    ///
     /// - Parameters:
     ///   - address: The host's address that the code carries to clients, such as
     ///     `example.local`, or `nil` for the address that the daemon listens on.
     ///   - priorityCeiling: The highest priority that the client may ask for, 0 or more.
-    case invite(address: String? = nil, priorityCeiling: Int = 0)
+    ///   - mayHost: Whether the Mac that pairs may report to this daemon as a host.
+    case invite(address: String? = nil, priorityCeiling: Int = 0, mayHost: Bool = false)
 
     /// Pairs the sending Mac with the host.
     ///
@@ -677,6 +690,15 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// every ``PoolClient/heartbeatInterval``.
     case heartbeat
 
+    /// Tells the coordinator the sending host's state.
+    ///
+    /// Only a paired Mac whose record allows it may report. See ``TrustedClient/mayHost``. The
+    /// coordinator sends no reply to a report it accepts. The latest report of each host replaces
+    /// the earlier one and appears in ``PoolSummary/hosts`` until the host's connection closes.
+    ///
+    /// - Parameter report: The host's state.
+    case report(HostReport)
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -689,6 +711,10 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case address
         /// The priority ceiling of an invitation.
         case priorityCeiling = "priority_ceiling"
+        /// Whether the Mac that pairs with an invitation may report as a host.
+        case mayHost = "may_host"
+        /// The report of a host.
+        case report
         /// The secret of a pairing.
         case secret
         /// The name of a pairing Mac.
@@ -721,6 +747,7 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = try .invite(
                 address: container.decodeIfPresent(String.self, forKey: .address),
                 priorityCeiling: container.decodeIfPresent(Int.self, forKey: .priorityCeiling) ?? 0,
+                mayHost: container.decodeIfPresent(Bool.self, forKey: .mayHost) ?? false,
             )
         case "pair":
             self = try .pair(
@@ -742,6 +769,8 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = try .access(container.decode(LeaseID.self, forKey: .lease))
         case "heartbeat":
             self = .heartbeat
+        case "report":
+            self = try .report(container.decode(HostReport.self, forKey: .report))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -772,10 +801,11 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(id, forKey: .lease)
         case .status:
             try container.encode("status", forKey: .request)
-        case let .invite(address, priorityCeiling):
+        case let .invite(address, priorityCeiling, mayHost):
             try container.encode("invite", forKey: .request)
             try container.encodeIfPresent(address, forKey: .address)
             try container.encode(priorityCeiling, forKey: .priorityCeiling)
+            try container.encode(mayHost, forKey: .mayHost)
         case let .pair(secret, name):
             try container.encode("pair", forKey: .request)
             try container.encode(secret, forKey: .secret)
@@ -798,6 +828,9 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             try container.encode(id, forKey: .lease)
         case .heartbeat:
             try container.encode("heartbeat", forKey: .request)
+        case let .report(report):
+            try container.encode("report", forKey: .request)
+            try container.encode(report, forKey: .report)
         }
     }
 }
