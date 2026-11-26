@@ -528,6 +528,46 @@ struct PairingTests {
         await host.stop()
     }
 
+    /// Adds the host right when the save fails after the rename only if the list holds the right
+    /// afterwards. Otherwise both sides receive failures and the record stays without the right.
+    ///
+    /// - Parameter isSaved: Whether the list holds the right after the failed save.
+    @Test(arguments: [true, false])
+    func addsTheHostRightWhenTheSaveFailsAfterTheRename(isSaved: Bool) async throws {
+        let host = try await PairingHost()
+        let directory = host.fixture.directory
+        defer { try? RevocationTests.setImmutable(false, listIn: directory) }
+        let client = try host.clientDirectory()
+        let first = try await host.invite()
+        _ = try await PoolClient.pair(using: first.code, name: "runner", directory: client)
+        let clientKey = try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: client).keyDigest)
+        let known = try #require(try TrustList<TrustedClient>.load(from: directory)[clientKey])
+        var widened = known
+        widened.mayHost = true
+        Self.saveAfterTheFailedSave(isSaved ? widened : known, in: host)
+        try RevocationTests.setImmutable(true, listIn: directory)
+
+        let second = try await host.invite(mayHost: true)
+        if isSaved {
+            _ = try await PoolClient.pair(using: second.code, name: "runner", directory: client)
+            #expect(try await next(second.channel) == .alreadyPaired(PairedMac(name: "runner", key: clientKey)))
+        } else {
+            await #expect(throws: PoolError.daemonRefused(message: "the host cannot record the pairing")) {
+                try await PoolClient.pair(using: second.code, name: "runner", directory: client)
+            }
+            guard case let .failure(reason) = try await next(second.channel) else {
+                Issue.record("the inviting connection received no reason")
+                return
+            }
+            #expect(reason.hasPrefix("the pairing failed: "))
+        }
+        #expect(try TrustList<TrustedClient>.load(from: directory)[clientKey]?.mayHost == isSaved)
+        let logs = host.fixture.logs
+        #expect(logs.entries("The host cannot save the list of paired Macs for a pairing").count == 1)
+        #expect(logs.entries("Allowed a paired Mac to report as a host").count == (isSaved ? 1 : 0))
+        await host.stop()
+    }
+
     /// Refuses requests of Macs on the network without a host path while the host cannot read its
     /// list of paired clients. The inviting connection gets the reason.
     @Test func refusesWithoutPathsWhenTheListCannotBeRead() async throws {
