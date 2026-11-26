@@ -59,10 +59,13 @@ struct DaemonCommandTests {
         }
     }
 
-    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, a range
-    /// with bits after its prefix, and options that need `--listen` without it.
+    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, more
+    /// sources than a report to the coordinator names, a range with bits after its prefix, and
+    /// options that need `--listen` without it.
     @Test func refusesInvalidListenerOptions() {
+        let tooMany = (0 ... HostReport.maximumSources).flatMap { ["--offer", "s\($0)=/vms/s\($0)"] }
         let invalid: [[String]] = [
+            ["--listen", "192.0.2.20", "--coordinator", "hub"] + tooMany,
             ["--offer", "base=/vms/base"],
             ["--host-name", "lab"],
             ["--allow-from", "192.0.2.0/24"],

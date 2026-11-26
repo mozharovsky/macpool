@@ -52,6 +52,31 @@ struct CoordinatorTests {
         await daemon.shutdown()
     }
 
+    /// Forgets a host when its reporting connection becomes a stream to a guest.
+    @Test func forgetsAHostWhoseConnectionCarriesAStream() async throws {
+        let guest = try await EchoServer()
+        defer { guest.close() }
+        let pool = try PoolFixture()
+        let daemon = try await pool.start(offeredSources: ["base": pool.source], guestSSH: guest.endpoint)
+        let owner = try LeaseLedgerTests.paired("a")
+        let leasing = try await pool.pairedClient(of: daemon, owner: owner, mayHost: true, name: "mini")
+        try leasing.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 3600, detached: true)))
+        #expect(try await next(leasing).lease?.phase == .starting)
+        let lease = try #require(await next(leasing).lease)
+        #expect(lease.phase == .ready)
+        let reporting = try await pool.pairedClient(of: daemon, owner: owner, mayHost: true, name: "mini")
+        try reporting.send(PoolRequest.report(Self.report))
+        #expect(await eventually { await daemon.summary().hosts.count == 1 })
+
+        try reporting.send(PoolRequest.connect(lease.id))
+        #expect(try await next(reporting) == .ready(lease))
+        #expect(await daemon.summary().hosts.isEmpty)
+        #expect(pool.logs.entries("A host stopped reporting to this coordinator").count == 1)
+        reporting.close()
+        leasing.close()
+        await daemon.shutdown()
+    }
+
     /// Refuses reports from the local user, from a paired Mac without the host right, and
     /// reports whose counts do not fit.
     @Test func refusesReportsOutOfPlace() async throws {

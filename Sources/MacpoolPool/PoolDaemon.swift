@@ -941,15 +941,10 @@ public actor PoolDaemon {
 
     /// Records a client whose secret was right and returns the reply to it.
     ///
-    /// If the save of the list fails, the daemon reads the list again. When the list holds the new
-    /// record as a save stores it, the pairing succeeds as after a save that succeeded. When the
-    /// list holds no such record, the client and the inviting connection receive failures, and only
-    /// the inviting connection learns the reason. When the list cannot be read again, the client
-    /// also receives a failure. The inviting connection then learns that the list may name the
-    /// client.
-    ///
-    /// A success after a failed save may not survive a loss of power, because the file system may
-    /// not have stored the rename yet. The client then pairs again with a new code.
+    /// If the client is already paired and the code carries the host right, the daemon adds the
+    /// right to the client's record. If a save of the list fails, ``save(_:holding:invitedBy:)``
+    /// reads the list again. When the list does not hold the record, the client and the inviting
+    /// connection receive failures, and only the inviting connection learns the reason.
     ///
     /// - Parameters:
     ///   - client: The new record, with the key that the client proved and the invitation's
@@ -971,8 +966,8 @@ public actor PoolDaemon {
                     var widened = known
                     widened.mayHost = true
                     clients.insert(widened)
-                    if let saveError = save(clients) {
-                        throw saveError
+                    if let refusal = try save(clients, holding: widened, invitedBy: inviter) {
+                        return refusal
                     }
                     configuration.logger.info("Allowed a paired Mac to report as a host", metadata: ["key": "\(key)"])
                 }
@@ -981,42 +976,8 @@ public actor PoolDaemon {
                 return .paired(host)
             }
             clients.insert(client)
-            if let saveError = save(clients) {
-                configuration.logger.error("The host cannot save the list of paired Macs for a pairing", metadata: [
-                    "key": "\(key)",
-                    "reason": "\(saveError)",
-                ])
-                // A save can fail after the rename that puts the new list in place, for example
-                // when the directory cannot be flushed. The host then trusts the Mac, and a
-                // refusal would hide that from both sides. No other request of this daemon runs
-                // between the save and this read. Only a person who edits the file can change it
-                // here. The daemon cannot tell who wrote a record, and the record must therefore
-                // equal the new one in every field.
-                let saved: TrustList<TrustedClient>
-                do throws(PoolError) {
-                    saved = try TrustList<TrustedClient>.load(from: configuration.directory)
-                } catch {
-                    configuration.logger.error(
-                        "The host cannot read the list of paired Macs after a failed save",
-                        metadata: [
-                            "key": "\(key)",
-                            "reason": "\(error)",
-                        ],
-                    )
-                    // A new code fails for a Mac with an unsaved block until a restart clears the block.
-                    let advice = unsavedBlocks.contains(key)
-                        ? "The host refuses the Mac until the daemon restarts, because it could not save an earlier "
-                        + "revocation. Check the list once it can be read, and pair the Mac again with a new code "
-                        + "after the restart"
-                        : "Check the list once it can be read, or pair the Mac again with a new code"
-                    let reason = "the host cannot tell whether it recorded the pairing: \(saveError). Reading its "
-                        + "list of paired Macs again failed: \(error). The list may name the Mac. \(advice)"
-                    reply(.failure(reason), to: inviter)
-                    return .failure("the host cannot record the pairing")
-                }
-                guard saved.holds(client) else {
-                    throw saveError
-                }
+            if let refusal = try save(clients, holding: client, invitedBy: inviter) {
+                return refusal
             }
             // A new code from the host's user ends a block that the daemon kept only in memory.
             unsavedBlocks.remove(key)
@@ -1035,6 +996,69 @@ public actor PoolDaemon {
         ])
         reply(.paired(PairedMac(name: client.name, key: key)), to: inviter)
         return .paired(host)
+    }
+
+    /// Saves the list of paired clients with a new or changed record of a client that pairs.
+    ///
+    /// If the save fails, the daemon reads the list again. When the list holds the record as a
+    /// save stores it, the call returns `nil` as after a save that succeeded. When the list cannot
+    /// be read again, the inviting connection learns that the list may hold the record.
+    ///
+    /// A success after a failed save may not survive a loss of power, because the file system may
+    /// not have stored the rename yet. The client then pairs again with a new code.
+    ///
+    /// - Parameters:
+    ///   - clients: The list with the record.
+    ///   - record: The record that the save must store.
+    ///   - inviter: The connection that opened the invitation.
+    /// - Returns: `nil` when the list holds the record, or the failure for the client when the list
+    ///   cannot be read again.
+    /// - Throws: The save's error when the list that the daemon reads again does not hold the
+    ///   record.
+    private func save(
+        _ clients: TrustList<TrustedClient>,
+        holding record: TrustedClient,
+        invitedBy inviter: ClientID,
+    ) throws(PoolError) -> PoolReply? {
+        guard let saveError = save(clients) else {
+            return nil
+        }
+        configuration.logger.error("The host cannot save the list of paired Macs for a pairing", metadata: [
+            "key": "\(record.key)",
+            "reason": "\(saveError)",
+        ])
+        // A save can fail after the rename that puts the new list in place, for example
+        // when the directory cannot be flushed. The host then trusts the Mac, and a
+        // refusal would hide that from both sides. No other request of this daemon runs
+        // between the save and this read. Only a person who edits the file can change it
+        // here. The daemon cannot tell who wrote a record, and the record must therefore
+        // equal the new one in every field.
+        let saved: TrustList<TrustedClient>
+        do throws(PoolError) {
+            saved = try TrustList<TrustedClient>.load(from: configuration.directory)
+        } catch {
+            configuration.logger.error(
+                "The host cannot read the list of paired Macs after a failed save",
+                metadata: [
+                    "key": "\(record.key)",
+                    "reason": "\(error)",
+                ],
+            )
+            // A new code fails for a Mac with an unsaved block until a restart clears the block.
+            let advice = unsavedBlocks.contains(record.key)
+                ? "The host refuses the Mac until the daemon restarts, because it could not save an earlier "
+                + "revocation. Check the list once it can be read, and pair the Mac again with a new code "
+                + "after the restart"
+                : "Check the list once it can be read, or pair the Mac again with a new code"
+            let reason = "the host cannot tell whether it recorded the pairing: \(saveError). Reading its "
+                + "list of paired Macs again failed: \(error). The list may name the Mac. \(advice)"
+            reply(.failure(reason), to: inviter)
+            return .failure("the host cannot record the pairing")
+        }
+        guard saved.holds(record) else {
+            throw saveError
+        }
+        return nil
     }
 
     /// Logs the count of wrong secrets that an invitation received, if any.
@@ -1450,12 +1474,19 @@ public actor PoolDaemon {
     ///   - owner: Who the client acted for.
     ///   - awake: The current time on ``Configuration/awakeTime``.
     private func clientGone(_ client: ClientID, owner: LeaseOwner, awake: SuspendingClock.Instant) {
+        forgetHost(on: client)
+        perform(ledger.clientDisconnected(client, owner: owner, awake: awake))
+    }
+
+    /// Removes the host that reports on a connection from ``hostRegistry``, if one does.
+    ///
+    /// - Parameter client: The connection that ended or became a stream.
+    private func forgetHost(on client: ClientID) {
         if let host = hostRegistry.remove(client: client) {
             configuration.logger.notice("A host stopped reporting to this coordinator", metadata: [
                 "key": "\(host.key)",
             ])
         }
-        perform(ledger.clientDisconnected(client, owner: owner, awake: awake))
     }
 
     /// Stops serving the paired Macs whose connections sent no request for
@@ -2312,8 +2343,8 @@ public actor PoolDaemon {
     ///
     /// The channel gives up the connection before the call returns, so `serve(_:owner:on:)` reads
     /// no line that the client sent after the request. The stream holds no lease, so its end
-    /// leaves the lease as it is. The connection to the guest and the reply follow in a task of
-    /// their own.
+    /// leaves the lease as it is. A host that reported on the connection leaves ``hostRegistry``.
+    /// The connection to the guest and the reply follow in a task of their own.
     ///
     /// - Parameters:
     ///   - id: The lease.
@@ -2338,6 +2369,8 @@ public actor PoolDaemon {
         }
         let stream = try channel.takeStream()
         clients[client] = nil
+        // serve(_:owner:on:) ends without clientGone(_:owner:awake:) once the entry is gone.
+        forgetHost(on: client)
         let number = nextStream
         nextStream += 1
         streams[number] = OpenStream(lease: id, owner: owner, client: stream)
