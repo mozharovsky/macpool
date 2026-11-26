@@ -81,6 +81,7 @@ struct MessageTests {
             .unblocked(PairedMac(name: "runner", key: randomKey())),
             .forgotten(leases: 3),
             .grant(HostGrant(ticket: 7, client: randomKey(), name: "agent", source: "base", priority: 1)),
+            .placed(PlacedHost(name: "mini", key: randomKey(), address: "192.0.2.10", port: 7373)),
         ]
         for reply in replies {
             let data = try MessageCoding.encoder.encode(reply)

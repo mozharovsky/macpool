@@ -166,3 +166,35 @@ public struct HostGrant: Codable, Sendable, Equatable {
         self.priority = priority
     }
 }
+
+/// The host that accepted a lease that a coordinator placed, as the coordinator's client sees it.
+///
+/// The client connects to ``address`` and ``port`` and requires the host to present ``key``.
+/// ``TrustedHost/introduce(_:in:)`` records the host in the client's list of paired hosts.
+public struct PlacedHost: Codable, Sendable, Equatable {
+    /// The name that the host gave for itself when it paired with the coordinator.
+    public var name: String
+
+    /// The fingerprint of the host's key.
+    public var key: KeyFingerprint
+
+    /// The address of the host's listener.
+    public var address: String
+
+    /// The port of the host's listener.
+    public var port: UInt16
+
+    /// Creates a placed host.
+    ///
+    /// - Parameters:
+    ///   - name: The host's name.
+    ///   - key: The fingerprint of the host's key.
+    ///   - address: The address of the host's listener.
+    ///   - port: The port of the host's listener.
+    public init(name: String, key: KeyFingerprint, address: String, port: UInt16) {
+        self.name = name
+        self.key = key
+        self.address = address
+        self.port = port
+    }
+}

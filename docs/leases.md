@@ -213,6 +213,32 @@ coordinator keeps no list of hosts that may take leases. A host leaves the table
 connection to the coordinator closes. The coordinator keeps the reports only in memory, so the
 hosts report again within 10 seconds after it restarts.
 
+A Mac paired with the coordinator leases through it with `--pool`. The coordinator sends the
+request to the host with the most free slots that offers the source. The coordinator counts as a
+host too when it offers the source, and it wins a tie.
+
+```sh
+$macpool lease --pool hub --from base --detach
+```
+
+```text
+placed host=5cqb-u2vs-6fla-ylrd
+lease_id=0a1b2c3d
+```
+
+`lease` records the host in this Mac's list of paired hosts and then leases from the host itself.
+Give the host's short key to `--pool` in `ssh`, `renew`, and `release` for that lease. The host
+admits the Mac because it trusts its coordinator. It serves the Mac only for leases that the
+coordinator placed, and only while its own list of paired hosts names the coordinator. The host's
+record stays in this Mac's list. Remove it with `pool remove --local`, because the host has no
+record of this Mac to forget.
+
+When no host has a free slot, the request waits in the coordinator's queue and `lease` prints
+`queued position=N`. `list --pool` on the coordinator shows the waiting requests after its own. If
+a host declines a request or doesn't answer within 5 seconds, it gets the request again only after
+its next report. If the coordinator is down, lease from a host directly with `--pool HOST`. That
+works only for a host that this Mac paired with itself.
+
 ## Restarts
 
 `--restart` decides when the daemon boots a leased VM again.
