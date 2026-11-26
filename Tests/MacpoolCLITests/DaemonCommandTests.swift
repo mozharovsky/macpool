@@ -12,10 +12,11 @@ struct DaemonCommandTests {
             try Macpool.parseAsRoot([
                 "daemon", "run", "--listen", "192.0.2.20:7480", "--host-name", "lab",
                 "--offer", "base=/vms/base", "--offer", "xcode=/vms/xcode/",
-                "--allow-from", "100.64.0.0/10", "--allow-from", "FD7A:115C:A1E0::/48",
+                "--allow-from", "100.64.0.0/10", "--allow-from", "FD7A:115C:A1E0::/48", "--coordinator", "hub",
             ]) as? DaemonRunCommand,
         )
         let settings = try #require(run.listening.settings)
+        #expect(settings.coordinator == "hub")
         #expect(settings.address == "192.0.2.20")
         #expect(settings.port == 7480)
         #expect(settings.name == "lab")
@@ -58,13 +59,17 @@ struct DaemonCommandTests {
         }
     }
 
-    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, a range
-    /// with bits after its prefix, and options that need `--listen` without it.
+    /// Refuses sources without a name or a bundle, a name with a slash, a name used twice, more
+    /// sources than a report to the coordinator names, a range with bits after its prefix, and
+    /// options that need `--listen` without it.
     @Test func refusesInvalidListenerOptions() {
+        let tooMany = (0 ... HostReport.maximumSources).flatMap { ["--offer", "s\($0)=/vms/s\($0)"] }
         let invalid: [[String]] = [
+            ["--listen", "192.0.2.20", "--coordinator", "hub"] + tooMany,
             ["--offer", "base=/vms/base"],
             ["--host-name", "lab"],
             ["--allow-from", "192.0.2.0/24"],
+            ["--coordinator", "hub"],
             ["--listen", "192.0.2.20", "--allow-from", "192.0.2.20/24"],
             ["--listen", "192.0.2.20", "--allow-from", "lab.local"],
             ["--listen", "192.0.2.20", "--offer", "/vms/base"],
@@ -87,6 +92,7 @@ struct DaemonCommandTests {
             try Macpool.parseAsRoot([
                 "daemon", "install", "--data-dir", "/pool", "--slots", "1", "--listen", "[2001:db8::20]:7480",
                 "--host-name", "lab", "--offer", "base=vms/base", "--allow-from", "2001:db8::/32",
+                "--coordinator", "hub",
             ]) as? DaemonInstallCommand,
         )
         let base = FileManager.default.currentDirectoryPath + "/vms/base"
@@ -94,6 +100,7 @@ struct DaemonCommandTests {
         #expect(agent.slots == 1)
         #expect(agent.peerArguments == [
             "--listen=[2001:db8::20]:7480", "--host-name=lab", "--offer=base=\(base)", "--allow-from=2001:db8::/32",
+            "--coordinator=hub",
         ])
         let run = try #require(try Macpool.parseAsRoot(["daemon", "run"] + agent.peerArguments) as? DaemonRunCommand)
         #expect(run.listening.settings?.address == "2001:db8::20")
@@ -101,6 +108,7 @@ struct DaemonCommandTests {
         #expect(run.listening.settings?.name == "lab")
         #expect(run.listening.offeredSources == ["base": base])
         #expect(run.listening.settings?.allowedSources == install.listening.allowedSources)
+        #expect(run.listening.settings?.coordinator == "hub")
 
         let local = try #require(try Macpool.parseAsRoot(["daemon", "install"]) as? DaemonInstallCommand)
         #expect(local.agent(running: URL(filePath: "/opt/macpool")).peerArguments.isEmpty)
@@ -155,4 +163,53 @@ struct DaemonCommandTests {
             "allowing connections only from 192.0.2.0/24, fd7a:115c:a1e0::/48",
         ])
     }
+
+    /// Prints a table of the hosts that report to the daemon as their coordinator.
+    @Test func printsTheHosts() throws {
+        let key = try #require(KeyFingerprint(String(repeating: "ab", count: 32)))
+        let report = HostReport(
+            address: "2001:db8::30",
+            port: 7373,
+            slots: 2,
+            leases: 1,
+            queued: 0,
+            available: 1,
+            sources: ["base", "xcode"],
+        )
+        let idle = HostReport(
+            address: "192.0.2.31",
+            port: 7480,
+            slots: 1,
+            leases: 0,
+            queued: 0,
+            available: 1,
+            sources: [],
+        )
+        let pool = PoolSummary(slots: 1, leases: [], queue: [], hosts: [
+            HostSummary(name: "mini", key: key, report: report, reportAge: 4),
+            HostSummary(name: "attic", key: key, report: idle, reportAge: 12),
+        ])
+        let host = PeerText.name("mini", key: key)
+        let other = PeerText.name("attic", key: key)
+        #expect(Array(LeaseOutput.table(pool).dropFirst()) == [
+            "HOST\(pad("HOST", other))  ADDRESS              AVAILABLE  SLOTS  LEASES  QUEUED  REPORTED  SOURCES",
+            "\(host)\(pad(host, other))  [2001:db8::30]:7373  1          2      1       0       4s ago    base, xcode",
+            "\(other)  192.0.2.31:7480      1          1      0       0       12s ago   -",
+        ])
+        // A paired coordinator's text passes through PeerText.escaped, which must not escape the
+        // isolates around the host's name a second time.
+        #expect(LeaseOutput.table(pool, shown: PeerText.escaped).last
+            == "\(other)  192.0.2.31:7480      1          1      0       0       12s ago   -")
+    }
+}
+
+/// Returns the spaces that pad a cell to the width of a longer one in the table of `list`.
+///
+/// - Parameters:
+///   - cell: The shorter cell.
+///   - widest: The longest cell of the column.
+/// - Returns: The spaces.
+private func pad(_ cell: String, _ widest: String) -> String {
+    let width = { (text: String) in text.count { $0 != PeerText.isolateStart && $0 != PeerText.isolateEnd } }
+    return String(repeating: " ", count: max(0, width(widest) - width(cell)))
 }

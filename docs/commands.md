@@ -142,6 +142,7 @@ pairs. The daemon on this Mac must listen for paired Macs. See
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | The data directory of the daemon. |
 | `--address ADDRESS` | the address that the daemon listens on | The address in the code, such as a DNS name of this Mac. It must lead to the address that the daemon listens on. |
 | `--priority-ceiling N` | `0` | The highest priority that the Mac may ask for when it leases. |
+| `--may-host` | off | Lets the Mac report to this Mac as a host. See [Coordinating hosts](leases.md#coordinating-hosts). |
 
 The command prints the code and its end, and then waits.
 
@@ -158,8 +159,8 @@ because anyone with the code can pair while it works.
 When a Mac pairs, the command prints its short key and name, such as
 `paired mzxw-6ytb-oi2d-k3lq runner`, and exits. Compare the short key with the `this_mac` key that
 `pool add` prints on the other Mac. If a Mac that paired before uses the code, the line starts with `already paired`, and the host
-keeps the Mac's name and priority ceiling. If a Mac sends a wrong code, the command warns and keeps
-the invitation open.
+keeps the Mac's name and priority ceiling. A code from `--may-host` still lets that Mac report as a
+host. If a Mac sends a wrong code, the command warns and keeps the invitation open.
 
 ## host revoke
 

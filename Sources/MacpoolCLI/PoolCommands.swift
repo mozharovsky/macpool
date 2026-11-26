@@ -122,7 +122,7 @@ struct ListCommand: AsyncParsableCommand {
         if json {
             return try [LeaseOutput.json(summary, describing: "the pool summary")]
         }
-        return LeaseOutput.table(summary).map(selection.shown)
+        return LeaseOutput.table(summary, shown: selection.shown)
     }
 }
 
@@ -175,10 +175,14 @@ enum LeaseOutput {
     ///
     /// A line about the listener for paired Macs follows the first line when the summary has one.
     /// When the listener admits only some ranges of addresses, a line that names them comes next.
+    /// The hosts that report to the daemon as their coordinator get a table after the images.
     ///
-    /// - Parameter pool: The pool.
+    /// - Parameters:
+    ///   - pool: The pool.
+    ///   - shown: Prepares the daemon's text for a terminal. A host's name passes through
+    ///     ``PeerText/name(_:key:)`` instead, which already escapes it.
     /// - Returns: The lines without line breaks.
-    static func table(_ pool: PoolSummary) -> [String] {
+    static func table(_ pool: PoolSummary, shown: (String) -> String = { $0 }) -> [String] {
         var lines = [
             "slots \(pool.slots), leases \(pool.leases.count), queued \(pool.queue.count), images \(pool.images.count)",
         ]
@@ -215,6 +219,23 @@ enum LeaseOutput {
                 let builds = image.builds.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }
                 let detail = image.problem ?? (builds.isEmpty ? "-" : builds.joined(separator: ", "))
                 return [image.name, image.isReady ? "yes" : "no", detail]
+            })
+        }
+        lines = lines.map(shown)
+        if !pool.hosts.isEmpty {
+            let header = ["HOST", "ADDRESS", "AVAILABLE", "SLOTS", "LEASES", "QUEUED", "REPORTED", "SOURCES"]
+            lines += aligned([header] + pool.hosts.map { host in
+                let report = host.report
+                return [
+                    PeerText.name(host.name, key: host.key),
+                    shown(ListenAddress(address: report.address, port: report.port).description),
+                    String(report.available),
+                    String(report.slots),
+                    String(report.leases),
+                    String(report.queued),
+                    "\(host.reportAge)s ago",
+                    report.sources.isEmpty ? "-" : shown(report.sources.joined(separator: ", ")),
+                ]
             })
         }
         return lines

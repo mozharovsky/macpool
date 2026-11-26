@@ -171,12 +171,13 @@ connections. If the guest refuses the connection, a paired Mac's failure names n
 ### Pairing
 
 A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
-code with ``PoolRequest/invite(address:priorityCeiling:)``. The code carries the host's address
+code with ``PoolRequest/invite(address:priorityCeiling:mayHost:)``. The code carries the host's address
 and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Without an
 address, the code carries the address that the daemon listens on. Pass it to
 the person who pairs the client, because anyone with the code can pair in that client's place. The
 client gets the invitation's priority ceiling when the host records it. A Mac that the host
-already knows keeps its record and its ceiling.
+already knows keeps its record and its ceiling. An invitation with `mayHost` set lets the Mac
+report as a host, and a Mac that the host already knows gains that right from it.
 
 ``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
 it sends the secret. The host then adds the client to `clients.json`, and the client adds the
@@ -269,6 +270,20 @@ When the list no longer names the client, the daemon forgets the client. Otherwi
 fails and the daemon changes nothing. The daemon refuses this request from a blocked client. A
 blocked record therefore stays. After the host forgot the client, or when the host cannot be
 reached, ``TrustedHost/remove(_:from:)`` removes the host from the client's list.
+
+### Coordinators
+
+A daemon that listens for paired Macs can act as the coordinator of other hosts. A host pairs with
+the coordinator like a client, with a code from an invitation that sets `mayHost`. The host's
+daemon then names the coordinator in ``PeerSettings/coordinator``. While the host listens, it
+connects to the coordinator and sends ``PoolRequest/report(_:)`` every 10 seconds. The report holds
+the listener's address and port, the slots, leases, and queued requests, and the names of the
+offered sources.
+
+The host computes ``HostReport/available`` itself, so the coordinator keeps no rule about which
+hosts may take leases. The coordinator keeps each host's last report in memory while the host's
+connection stays open. Every client of the coordinator sees the reports in ``PoolSummary/hosts``.
+After a restart of the coordinator, the hosts connect again and report within one interval.
 
 ### Supervisors
 
@@ -374,6 +389,8 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``PoolSummary``
 - ``ListenerSummary``
 - ``ImageSummary``
+- ``HostReport``
+- ``HostSummary``
 
 ### Supervisors
 

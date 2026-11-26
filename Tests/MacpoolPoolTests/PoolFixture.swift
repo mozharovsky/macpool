@@ -189,12 +189,14 @@ final class PoolFixture {
     /// The test's own socket stands in for the network listener. The daemon receives the
     /// accepted connection with the owner that a handshake would establish. If the owner is a
     /// paired client and `recording` is set, its record in the list of paired clients gets
-    /// `priorityCeiling` first.
+    /// `priorityCeiling`, `mayHost`, and `name` first.
     ///
     /// - Parameters:
     ///   - daemon: The daemon.
     ///   - owner: Who the client acts for.
     ///   - priorityCeiling: The highest priority that the client may ask for.
+    ///   - mayHost: Whether the client may report as a host.
+    ///   - name: The client's name in its record.
     ///   - recording: Whether the call writes the client's record. Without it, the record stays
     ///     as it is, blocked or not.
     /// - Returns: The client's end of the connection.
@@ -204,16 +206,19 @@ final class PoolFixture {
         of daemon: PoolDaemon,
         owner: LeaseOwner,
         priorityCeiling: Int = 0,
+        mayHost: Bool = false,
+        name: String = "client",
         recording: Bool = true,
     ) async throws -> MessageChannel {
         if recording, case let .client(key) = owner {
             var clients = try TrustList<TrustedClient>.load(from: directory)
             clients.insert(TrustedClient(
                 key: key,
-                name: "client",
+                name: name,
                 pairedAt: Date(),
                 isBlocked: false,
                 priorityCeiling: priorityCeiling,
+                mayHost: mayHost,
             ))
             try clients.save(to: directory)
         }

@@ -55,13 +55,27 @@ struct ListenOptions: ParsableArguments {
     )
     var allowedSources: [AddressRange] = []
 
+    /// The paired host that the daemon reports to as its coordinator, by name or short key.
+    @Option(
+        name: .customLong("coordinator"),
+        help: ArgumentHelp(
+            """
+            A paired host from macpool pool list, by name or short key, that coordinates the \
+            pool. The daemon reports its free slots and sources to it. Needs --listen.
+            """,
+            valueName: "host",
+        ),
+    )
+    var coordinator: String?
+
     /// Rejects options that need `--listen` without it, an invalid host name, and a source name
     /// that appears twice.
     ///
     /// - Throws: `ValidationError` for each of these cases.
     func validate() throws {
-        guard address != nil || (hostName == nil && offers.isEmpty && allowedSources.isEmpty) else {
-            throw ValidationError("--host-name, --offer, and --allow-from need --listen.")
+        guard address != nil || (hostName == nil && offers.isEmpty && allowedSources.isEmpty && coordinator == nil)
+        else {
+            throw ValidationError("--host-name, --offer, --allow-from, and --coordinator need --listen.")
         }
         if let hostName, !PairedMac.isValidName(hostName) {
             throw ValidationError("--host-name takes \(PairedMac.nameRule).")
@@ -70,12 +84,22 @@ struct ListenOptions: ParsableArguments {
         for offer in offers where !names.insert(offer.name).inserted {
             throw ValidationError("--offer names the source \(offer.name) twice.")
         }
+        // The coordinator refuses a report with more sources, so the host would never appear there.
+        if coordinator != nil, offers.count > HostReport.maximumSources {
+            throw ValidationError("A daemon with --coordinator offers at most \(HostReport.maximumSources) sources.")
+        }
     }
 
     /// The listener's settings for the daemon, or `nil` without `--listen`.
     var settings: PeerSettings? {
         address.map {
-            PeerSettings(name: hostName, address: $0.address, port: $0.port, allowedSources: allowedSources)
+            PeerSettings(
+                name: hostName,
+                address: $0.address,
+                port: $0.port,
+                allowedSources: allowedSources,
+                coordinator: coordinator,
+            )
         }
     }
 
@@ -101,6 +125,9 @@ struct ListenOptions: ParsableArguments {
         }
         for range in allowedSources {
             arguments.append("--allow-from=\(range)")
+        }
+        if let coordinator {
+            arguments.append("--coordinator=\(coordinator)")
         }
         return arguments
     }

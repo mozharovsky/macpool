@@ -37,6 +37,9 @@ final class PairingInvitation: Sendable {
 
         /// The highest priority that the client who pairs may ask for.
         let priorityCeiling: Int
+
+        /// Whether the Mac that pairs may report to this coordinator as a host.
+        let mayHost: Bool
     }
 
     /// A new invitation.
@@ -67,7 +70,8 @@ final class PairingInvitation: Sendable {
         /// - Parameters:
         ///   - ended: The invitation.
         ///   - priorityCeiling: The highest priority that the new client may ask for.
-        case accepted(Ended, priorityCeiling: Int)
+        ///   - mayHost: Whether the new client may report to this coordinator as a host.
+        case accepted(Ended, priorityCeiling: Int, mayHost: Bool)
 
         /// The secret was wrong, and the invitation stays open.
         ///
@@ -88,9 +92,10 @@ final class PairingInvitation: Sendable {
     /// - Parameters:
     ///   - inviter: The connection that asks for the invitation.
     ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
+    ///   - mayHost: Whether the Mac that pairs may report to this coordinator as a host.
     ///   - now: The current time.
     /// - Returns: The new invitation's secret and end.
-    func open(for inviter: ClientID, priorityCeiling: Int = 0, at now: Date) -> Opened {
+    func open(for inviter: ClientID, priorityCeiling: Int = 0, mayHost: Bool = false, at now: Date) -> Opened {
         let secret = SymmetricKey(size: .bits128).withUnsafeBytes { Array($0) }
         let expiresAt = now.addingTimeInterval(Self.lifetime)
         let replaced = ticket.withLock { ticket in
@@ -101,6 +106,7 @@ final class PairingInvitation: Sendable {
                     wrongSecrets: 0,
                     inviter: inviter,
                     priorityCeiling: priorityCeiling,
+                    mayHost: mayHost,
                 )
             }
             return ticket.map { Ended(inviter: $0.inviter, wrongSecrets: $0.wrongSecrets) }
@@ -133,6 +139,7 @@ final class PairingInvitation: Sendable {
                 return .accepted(
                     Ended(inviter: open.inviter, wrongSecrets: open.wrongSecrets),
                     priorityCeiling: open.priorityCeiling,
+                    mayHost: open.mayHost,
                 )
             }
             ticket?.wrongSecrets += 1

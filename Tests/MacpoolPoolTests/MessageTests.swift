@@ -44,6 +44,7 @@ struct MessageTests {
             .renew(id),
             .status,
             .invite(address: "127.0.0.1", priorityCeiling: 3),
+            .invite(mayHost: true),
             .invite(),
             .revoke(key: "mzxw-6ytb-oi2d-k3lq", endLeases: true),
             .unblock(key: "mzxw-6ytb-oi2d-k3lq"),
@@ -51,6 +52,7 @@ struct MessageTests {
             .heartbeat,
             .connect(id),
             .access(id),
+            .report(CoordinatorTests.report),
         ]
         for request in requests {
             let data = try MessageCoding.encoder.encode(request)
@@ -66,6 +68,9 @@ struct MessageTests {
             .renewed(lease),
             .released(id),
             .status(PoolSummary(slots: 2, leases: [lease], queue: [])),
+            .status(PoolSummary(slots: 1, leases: [], queue: [], hosts: [
+                HostSummary(name: "mini", key: randomKey(), report: CoordinatorTests.report, reportAge: 3),
+            ])),
             .failure("no lease"),
             .paired(PairedMac(name: "runner", key: randomKey())),
             .alreadyPaired(PairedMac(name: "runner", key: randomKey())),
@@ -82,6 +87,10 @@ struct MessageTests {
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: invite) == .invite(address: "127.0.0.1"))
         let listenerInvite = Data(#"{"request":"invite"}"#.utf8)
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: listenerInvite) == .invite())
+        let report = try MessageCoding.encoder.encode(PoolRequest.report(CoordinatorTests.report))
+        #expect(String(decoding: report, as: UTF8.self).hasPrefix(#"{"report":{"address":"192.0.2.10","available":1,"#))
+        let summary = Data(#"{"slots":1,"leases":[],"queue":[]}"#.utf8)
+        #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: summary).hosts.isEmpty)
         let revoke = Data(#"{"request":"revoke","key":"mzxw-6ytb-oi2d-k3lq"}"#.utf8)
         #expect(try MessageCoding.decoder.decode(PoolRequest.self, from: revoke) == .revoke(key: "mzxw-6ytb-oi2d-k3lq"))
         let forget = Data(#"{"request":"forget"}"#.utf8)

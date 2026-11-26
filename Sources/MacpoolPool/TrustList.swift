@@ -49,6 +49,12 @@ public struct TrustedClient: TrustRecord {
     /// record with a ceiling of 0. The field therefore needs no new format version of the list.
     public var priorityCeiling = 0
 
+    /// Whether the client may report its free slots and sources to this Mac as a host, with this
+    /// Mac as its coordinator.
+    ///
+    /// The field only widens what a client may do, like ``priorityCeiling``.
+    public var mayHost = false
+
     /// The JSON keys of a record.
     private enum CodingKeys: String, CodingKey {
         /// The key's fingerprint.
@@ -61,12 +67,15 @@ public struct TrustedClient: TrustRecord {
         case isBlocked = "blocked"
         /// The highest priority that the client may ask for.
         case priorityCeiling = "priority_ceiling"
+        /// Whether the client may report as a host.
+        case mayHost = "may_host"
     }
 }
 
 /// The decoding of a client record. It also reads records from before priority ceilings.
 public extension TrustedClient {
-    /// Decodes a record. A record without a ceiling gets a ceiling of 0.
+    /// Decodes a record. A record without a ceiling gets a ceiling of 0, and a record without
+    /// `may_host` may not report as a host.
     ///
     /// - Parameter decoder: The decoder to read from.
     /// - Throws: `DecodingError` when a field is missing or malformed, or when the ceiling is
@@ -89,6 +98,7 @@ public extension TrustedClient {
             pairedAt: container.decode(Date.self, forKey: .pairedAt),
             isBlocked: container.decode(Bool.self, forKey: .isBlocked),
             priorityCeiling: priorityCeiling,
+            mayHost: container.decodeIfPresent(Bool.self, forKey: .mayHost) ?? false,
         )
     }
 }
