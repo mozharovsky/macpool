@@ -245,7 +245,7 @@ struct LeaseCommand: AsyncParsableCommand {
                 break loop
             case .reply(.released), .reply(.renewed), .reply(.status), .reply(.invitation), .reply(.paired),
                  .reply(.alreadyPaired), .reply(.wrongCode), .reply(.revoked), .reply(.forgotten), .reply(.access),
-                 .releaseTimedOut:
+                 .reply(.unblocked), .releaseTimedOut:
                 break
             case .disconnected:
                 guard let id else {

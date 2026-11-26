@@ -198,7 +198,7 @@ the invitation ends, the daemon logs how many wrong secrets it received.
 If a pairing fails after the host recorded the client, the client pairs again with a new code. For
 example, the host's reply may never arrive. The host then leaves its record of the client
 unchanged, and the inviting connection receives ``PoolReply/alreadyPaired(_:)``. A blocked client
-cannot pair again.
+cannot pair again until the local user unblocks it.
 
 If the save of `clients.json` fails, the daemon reads the list again, because a save can fail after
 the rename that puts the new list in place. When the list holds the new record unchanged, the
@@ -233,8 +233,12 @@ asks for the full key.
 
 A revocation marks the record as blocked and keeps its other fields. The daemon then closes every
 connection of the client. The client's waiting requests leave the queue, and its leases end. Only a
-detached lease whose VM was ready runs on until it expires, unless `endLeases` is set. Nothing
-unblocks a client. It cannot pair again while its record stays in `clients.json`.
+detached lease whose VM was ready runs on until it expires, unless `endLeases` is set. The client
+cannot connect or pair again while its record stays blocked.
+
+The local user lets a revoked client in again with ``PoolRequest/unblock(key:)``. The daemon clears
+the block and keeps the record's name and priority ceiling. It also drops a block that it keeps in
+memory. The client then connects with its key as before and needs no new code.
 
 If the first save of the block fails, the daemon saves it once more after it closed the connections.
 If that save fails too, the daemon reads the list again, because a save can fail after the rename

@@ -117,6 +117,25 @@ struct PairingCommandTests {
         await host.stop()
     }
 
+    /// Unblocks a revoked Mac by its short key in any case and prints the Mac.
+    @Test func unblocksAMac() async throws {
+        let host = try await PairingDaemon()
+        let client = try await host.pairedClient()
+        let key = try PairingDaemon.key(of: client)
+        let revoke = try #require(
+            try Macpool.parseAsRoot(["host", "revoke", "--data-dir", host.path, key.shortKey]) as? HostRevokeCommand,
+        )
+        _ = try await revoke.lines()
+
+        let unblock = try #require(
+            try Macpool.parseAsRoot(["host", "unblock", "--data-dir", host.path, key.shortKey.uppercased()])
+                as? HostUnblockCommand,
+        )
+        #expect(try await unblock.lines() == ["unblocked \(PeerText.name("runner", key: key))"])
+        #expect(try TrustedClient.paired(in: host.directory).first?.isBlocked == false)
+        await host.stop()
+    }
+
     /// Pairs with the code and prints the host and this Mac's key, which the host prints too.
     @Test func addsAHost() async throws {
         let host = try await PairingDaemon()

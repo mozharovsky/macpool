@@ -7,7 +7,7 @@ struct HostCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "host",
         abstract: "Manages the Macs that may lease VMs from this Mac.",
-        subcommands: [HostListCommand.self, HostInviteCommand.self, HostRevokeCommand.self],
+        subcommands: [HostListCommand.self, HostInviteCommand.self, HostRevokeCommand.self, HostUnblockCommand.self],
     )
 }
 

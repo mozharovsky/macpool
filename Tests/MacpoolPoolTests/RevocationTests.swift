@@ -105,6 +105,100 @@ struct RevocationTests {
         await daemon.shutdown()
     }
 
+    /// Lets a revoked Mac connect again with its name and priority ceiling, by a short key in any
+    /// case. A second unblock changes nothing, and only the local user may unblock.
+    @Test func unblocksARevokedMac() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        let first = try await pool.pairedClient(of: daemon, owner: owner, priorityCeiling: 3)
+        let before = try #require(TrustList<TrustedClient>.load(from: pool.directory)[key])
+        _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        #expect(try await next(first) == Self.notAccepted)
+        let blocked = try await pool.pairedClient(of: daemon, owner: owner, recording: false)
+        try blocked.send(PoolRequest.status)
+        #expect(try await next(blocked) == Self.notAccepted)
+
+        let unblocked = PoolReply.unblocked(PairedMac(name: "client", key: key))
+        #expect(try await PoolClient.send(.unblock(key: key.shortKey), to: pool.directory) == unblocked)
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory).records == [before])
+        let again = try await pool.pairedClient(of: daemon, owner: owner, recording: false)
+        try again.send(PoolRequest.status)
+        guard case .status = try await next(again) else {
+            Issue.record("the unblocked Mac got no status")
+            return
+        }
+        #expect(try await PoolClient.send(.unblock(key: key.rawValue), to: pool.directory) == unblocked)
+
+        try again.send(PoolRequest.unblock(key: key.rawValue))
+        #expect(try await next(again) ==
+            .failure(ClientRightsTests.refusal("only the host's own user can unblock Macs")))
+        let unknown = "no paired Mac has the key mzxw-6ytb-oi2d-k3lq. Give its short key or its full key"
+        await #expect(throws: PoolError.daemonRefused(message: ClientRightsTests.refusal(unknown))) {
+            try await PoolClient.send(.unblock(key: "mzxw-6ytb-oi2d-k3lq"), to: pool.directory)
+        }
+        #expect(pool.logs.entries("Unblocked a paired Mac").count == 2)
+        again.close()
+        await daemon.shutdown()
+    }
+
+    /// Drops a block that the daemon kept in memory after a revocation could not save it.
+    @Test func unblocksABlockKeptInMemory() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        _ = try await pool.pairedClient(of: daemon, owner: owner)
+        try Self.setImmutable(true, listIn: pool.directory)
+        await #expect(throws: PoolError.self) {
+            try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        }
+        try Self.setImmutable(false, listIn: pool.directory)
+        #expect(await daemon.unsavedBlocks == [key])
+
+        let reply = try await PoolClient.send(.unblock(key: key.shortKey), to: pool.directory)
+        #expect(reply == .unblocked(PairedMac(name: "client", key: key)))
+        #expect(await daemon.unsavedBlocks.isEmpty)
+        let again = try await pool.pairedClient(of: daemon, owner: owner, recording: false)
+        try again.send(PoolRequest.status)
+        guard case .status = try await next(again) else {
+            Issue.record("the unblocked Mac got no status")
+            return
+        }
+        again.close()
+        await daemon.shutdown()
+    }
+
+    /// Keeps the Mac blocked and reports the failed save when the list cannot be saved.
+    @Test func keepsTheBlockWhenTheUnblockCannotBeSaved() async throws {
+        let pool = try PoolFixture()
+        let daemon = try await pool.start()
+        let owner = try LeaseLedgerTests.paired("a")
+        guard case let .client(key) = owner else {
+            return
+        }
+        _ = try await pool.pairedClient(of: daemon, owner: owner)
+        _ = try await PoolClient.send(.revoke(key: key.shortKey), to: pool.directory)
+        try Self.setImmutable(true, listIn: pool.directory)
+        defer { try? Self.setImmutable(false, listIn: pool.directory) }
+
+        do {
+            _ = try await PoolClient.send(.unblock(key: key.shortKey), to: pool.directory)
+            Issue.record("the unblock succeeded without a saved list")
+        } catch let .daemonRefused(message) {
+            #expect(message.contains("the host cannot save its list of paired Macs, so the Mac stays blocked"))
+        }
+        #expect(try TrustList<TrustedClient>.load(from: pool.directory)[key]?.isBlocked == true)
+        let logs = pool.logs.entries("The host cannot save the list of paired Macs to unblock a Mac")
+        #expect(logs.map(\.level) == [.error])
+        await daemon.shutdown()
+    }
+
     /// Closes the connections of the named Mac when the list of paired clients cannot be read,
     /// keeps the block in memory, and reports the list's error.
     @Test func closesConnectionsWhenTheListCannotBeRead() async throws {
