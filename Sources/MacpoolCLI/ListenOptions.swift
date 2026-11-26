@@ -60,8 +60,8 @@ struct ListenOptions: ParsableArguments {
         name: .customLong("coordinator"),
         help: ArgumentHelp(
             """
-            A paired host from macpool pool list, by name or short key, that coordinates the \
-            pool. The daemon reports its free slots and sources to it. Needs --listen.
+            A paired host from macpool pool list, by name or short key, that places leases on \
+            this Mac. The daemon reports its free slots and sources to it. Needs --listen.
             """,
             valueName: "host",
         ),

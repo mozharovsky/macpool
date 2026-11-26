@@ -49,8 +49,8 @@ public struct TrustedClient: TrustRecord {
     /// record with a ceiling of 0. The field therefore needs no new format version of the list.
     public var priorityCeiling = 0
 
-    /// Whether the client may report its free slots and sources to this Mac as a host, with this
-    /// Mac as its coordinator.
+    /// Whether the client may report its free slots and sources to this Mac as a host. This Mac
+    /// then places leases on the client as its coordinator.
     ///
     /// The field only widens what a client may do, like ``priorityCeiling``.
     public var mayHost = false

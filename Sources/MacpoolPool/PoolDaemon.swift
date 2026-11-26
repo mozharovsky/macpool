@@ -1613,7 +1613,9 @@ public actor PoolDaemon {
         do throws(PoolError) {
             switch request {
             case let .lease(terms):
-                if let record, !isIntroduced, coordinatesSource(terms.source) {
+                // A paired Mac with a grant from this host's own coordinator was placed here already.
+                if let record, !isIntroduced, coordinatesSource(terms.source),
+                   introductionIndex(for: record.key, terms: terms) == nil {
                     try enqueuePlacement(terms, from: client, record: record)
                     break
                 }
@@ -2639,7 +2641,7 @@ public actor PoolDaemon {
     ///   when the channel began to close.
     private func openStream(to id: LeaseID, for client: ClientID, owner: LeaseOwner) throws(PoolError) {
         let target = try ledger.streamTarget(id, for: owner)
-        guard !ledger.isBusy(client) else {
+        guard !ledger.isBusy(client), !placements.requests.contains(where: { $0.client == client }) else {
             throw .invalidRequest(reason: "a connection that waits for or holds a lease cannot carry a stream. Open "
                 + "another connection")
         }

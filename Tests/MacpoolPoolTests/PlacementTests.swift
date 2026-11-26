@@ -207,6 +207,64 @@ struct PlacementTests {
         await coordinator.stop()
     }
 
+    /// Refuses a stream on a connection whose request waits in the coordinator's queue.
+    @Test func refusesAStreamWhileARequestWaits() async throws {
+        let coordinator = try await Coordinator(available: 0, offersBase: true)
+        let detached = LeaseTerms(source: "base", timeToLive: 60, detached: true)
+        try coordinator.client.send(PoolRequest.lease(detached))
+        #expect(try await next(coordinator.client).lease?.phase == .starting)
+        let lease = try #require(try await next(coordinator.client).lease)
+        #expect(lease.phase == .ready)
+        let waiting = try await coordinator.pool.pairedClient(
+            of: coordinator.daemon,
+            owner: .client(coordinator.clientKey),
+            priorityCeiling: 1,
+            name: "agent",
+        )
+        try waiting.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        #expect(try await next(waiting) == .queued(position: 1))
+
+        try waiting.send(PoolRequest.connect(lease.id))
+        let busy = ClientRightsTests.refusal(
+            "a connection that waits for or holds a lease cannot carry a stream. Open another connection",
+        )
+        #expect(try await next(waiting) == .failure(busy))
+        waiting.close()
+        await coordinator.stop()
+    }
+
+    /// Serves a paired Mac with its own ledger when the Mac brings a grant from this daemon's own
+    /// coordinator, although a host that reports to this daemon has more free slots.
+    @Test func servesAGrantOfItsOwnCoordinator() async throws {
+        let pool = try PoolFixture()
+        _ = try listClients([], in: pool.directory)
+        let upstream = randomKey()
+        var hosts = TrustList<TrustedHost>()
+        hosts.insert(TrustedHost(key: upstream, name: "hub", address: "192.0.2.40", port: 7373, pairedAt: Date()))
+        try hosts.save(to: pool.directory)
+        let daemon = try await pool.start(slots: 2, offeredSources: ["base": pool.source], peers: loopbackSettings())
+        // The daemon declines grants until its listener has a port.
+        _ = try await listeningPort(of: daemon)
+        let hostOwner = try LeaseLedgerTests.paired("a")
+        let host = try await pool.pairedClient(of: daemon, owner: hostOwner, mayHost: true, name: "mini")
+        try host.send(PoolRequest.report(Self.report(2)))
+        #expect(await eventually { await daemon.summary().hosts.count == 1 })
+        let clientOwner = try LeaseLedgerTests.paired("b")
+        guard case let .client(clientKey) = clientOwner else {
+            return
+        }
+        let client = try await pool.pairedClient(of: daemon, owner: clientOwner, name: "agent")
+        let grant = HostGrant(ticket: 1, client: clientKey, name: "agent", source: "base", priority: 0)
+        #expect(await daemon.introduce(grant, by: upstream) == .granted(ticket: 1))
+
+        try client.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        #expect(try await next(client).lease?.phase == .starting)
+        #expect(await daemon.hostReport()?.available == 1)
+        host.close()
+        client.close()
+        await daemon.shutdown()
+    }
+
     /// Places a client's request through a real coordinator on a host that reports to it over
     /// TLS. The client then leases from the host, which admits it through the grant.
     @Test func leasesThroughTheCoordinator() async throws {

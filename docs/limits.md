@@ -40,6 +40,9 @@ with an iOS simulator runtime doesn't fit on a 64 GB disk.
   commands that wait in its queue exit with an error, and the hosts report again after it starts.
 - One Mac may have at most 8 requests in a coordinator's queue. A host's report counts for
   placement for 30 seconds.
+- Paired Macs must run the same macpool build. Builds share protocol version 1 but may differ in
+  their messages, and an older client can't read a coordinator's reply that places its lease on a
+  host.
 - Without `--allow-from`, any device that reaches the listener's port can start a TLS handshake.
   Only a paired key finishes it, except while `host invite` waits. Then any key finishes it and
   can try a pairing code. Listen on an address that only your Macs reach, or name their ranges
