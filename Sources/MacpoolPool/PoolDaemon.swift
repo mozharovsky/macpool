@@ -1028,17 +1028,18 @@ public actor PoolDaemon {
 
     /// Describes the listener for paired Macs for the local user.
     ///
-    /// - Returns: The address, the port, and the reason of the last failure, or `nil` when the
-    ///   configuration sets no listener.
+    /// - Returns: The address, the port, the reason of the last failure, and the allowed ranges, or
+    ///   `nil` when the configuration sets no listener.
     private func listenerSummary() -> ListenerSummary? {
         guard let peers = configuration.peers else {
             return nil
         }
+        let ranges = peers.allowedSources.map(\.description)
         guard let peerListener else {
             let problem = peerListenerFailure ?? "the daemon has not started to listen yet"
-            return ListenerSummary(address: peers.address, port: peers.port, problem: problem)
+            return ListenerSummary(address: peers.address, port: peers.port, problem: problem, allowedSources: ranges)
         }
-        return ListenerSummary(address: peers.address, port: peerListener.port, problem: nil)
+        return ListenerSummary(address: peers.address, port: peerListener.port, problem: nil, allowedSources: ranges)
     }
 
     /// Reads a client's requests until it disconnects.

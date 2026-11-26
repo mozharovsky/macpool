@@ -171,11 +171,20 @@ struct ImageTests {
         #expect(!String(decoding: data, as: UTF8.self).contains("listener"))
         #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: data).images == [image])
 
-        let listener = ListenerSummary(address: "192.0.2.20", port: 7373, problem: "the port is busy")
+        let listener = ListenerSummary(
+            address: "192.0.2.20",
+            port: 7373,
+            problem: "the port is busy",
+            allowedSources: ["192.0.2.0/24"],
+        )
         let withListener = PoolSummary(slots: 1, leases: [], queue: [], listener: listener)
         let listening = try MessageCoding.encoder.encode(withListener)
         #expect(String(decoding: listening, as: UTF8.self).contains(#""listener":{"#))
+        #expect(String(decoding: listening, as: UTF8.self).contains(#""allowed_sources":["#))
         #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: listening).listener == listener)
+        let older = Data(#"{"address":"192.0.2.20","port":7373}"#.utf8)
+        #expect(try MessageCoding.decoder.decode(ListenerSummary.self, from: older)
+            == ListenerSummary(address: "192.0.2.20", port: 7373, problem: nil))
     }
 }
 

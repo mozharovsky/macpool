@@ -491,16 +491,51 @@ public struct ListenerSummary: Codable, Sendable, Equatable {
     /// The daemon tries again after ``PeerSettings/retryInterval``.
     public var problem: String?
 
+    /// The ranges of addresses that may connect in CIDR notation, such as `192.0.2.0/24`, or an
+    /// empty array when every address may connect.
+    ///
+    /// The ranges follow the order of ``PeerSettings/allowedSources``.
+    public var allowedSources: [String]
+
     /// Creates a summary of the listener.
     ///
     /// - Parameters:
     ///   - address: The address that the listener binds to.
     ///   - port: The port of the listener, or the port that the daemon tries.
     ///   - problem: Why the daemon does not listen, or `nil` while it listens.
-    public init(address: String, port: UInt16, problem: String?) {
+    ///   - allowedSources: The ranges of addresses that may connect, or an empty array for every
+    ///     address.
+    public init(address: String, port: UInt16, problem: String?, allowedSources: [String] = []) {
         self.address = address
         self.port = port
         self.problem = problem
+        self.allowedSources = allowedSources
+    }
+
+    /// Decodes a summary and treats a missing `allowed_sources` key as every address.
+    ///
+    /// A daemon from before the ranges existed sends no such key.
+    ///
+    /// - Parameter decoder: The decoder.
+    /// - Throws: `DecodingError` when a key is missing or holds a value of the wrong type.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        address = try container.decode(String.self, forKey: .address)
+        port = try container.decode(UInt16.self, forKey: .port)
+        problem = try container.decodeIfPresent(String.self, forKey: .problem)
+        allowedSources = try container.decodeIfPresent([String].self, forKey: .allowedSources) ?? []
+    }
+
+    /// The JSON keys of the summary.
+    private enum CodingKeys: String, CodingKey {
+        /// The `address` key.
+        case address
+        /// The `port` key.
+        case port
+        /// The `problem` key.
+        case problem
+        /// The `allowed_sources` key.
+        case allowedSources = "allowed_sources"
     }
 }
 

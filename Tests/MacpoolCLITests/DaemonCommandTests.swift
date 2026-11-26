@@ -139,5 +139,20 @@ struct DaemonCommandTests {
         )
         #expect(LeaseOutput.table(waiting).last
             == "not listening for paired Macs on 192.0.2.20:7373: the address is not available")
+        let restricted = PoolSummary(
+            slots: 2,
+            leases: [],
+            queue: [],
+            listener: ListenerSummary(
+                address: "192.0.2.20",
+                port: 7373,
+                problem: nil,
+                allowedSources: ["192.0.2.0/24", "fd7a:115c:a1e0::/48"],
+            ),
+        )
+        #expect(LeaseOutput.table(restricted).suffix(2) == [
+            "listening for paired Macs on 192.0.2.20:7373",
+            "allowing connections only from 192.0.2.0/24, fd7a:115c:a1e0::/48",
+        ])
     }
 }

@@ -411,17 +411,20 @@ struct PeerConnectionTests {
     /// the local socket.
     @Test func reportsTheListenerOnlyToLocalClients() async throws {
         let fixture = try PoolFixture()
-        let daemon = try await fixture.start(peers: loopbackSettings())
+        var settings = loopbackSettings()
+        settings.allowedSources = try [#require(AddressRange("127.0.0.0/8")), #require(AddressRange("::1"))]
+        let daemon = try await fixture.start(peers: settings)
         let port = try await listeningPort(of: daemon)
 
         let local = try await PoolClient.send(.status, to: fixture.directory)
-        #expect(local == .status(PoolSummary(
-            slots: 2,
-            leases: [],
-            queue: [],
-            listener: ListenerSummary(address: "127.0.0.1", port: port, problem: nil),
-        )))
-        #expect(await daemon.summary().listener == ListenerSummary(address: "127.0.0.1", port: port, problem: nil))
+        let listener = ListenerSummary(
+            address: "127.0.0.1",
+            port: port,
+            problem: nil,
+            allowedSources: ["127.0.0.0/8", "::1/128"],
+        )
+        #expect(local == .status(PoolSummary(slots: 2, leases: [], queue: [], listener: listener)))
+        #expect(await daemon.summary().listener == listener)
         let remote = try await fixture.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
         try remote.send(PoolRequest.status)
         #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
