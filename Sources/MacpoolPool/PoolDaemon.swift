@@ -261,6 +261,28 @@ public actor PoolDaemon {
         }
     }
 
+    /// A grant of the coordinator that waits for its client's lease request.
+    private struct Introduction {
+        /// The coordinator's grant.
+        let grant: HostGrant
+
+        /// The fingerprint of the coordinator's key.
+        let coordinator: KeyFingerprint
+
+        /// When the daemon drops the grant, on ``Configuration/awakeTime``.
+        let expiresAt: SuspendingClock.Instant
+    }
+
+    /// The record of a Mac that the daemon serves.
+    private struct PeerRecord {
+        /// The Mac's record, or one that the daemon made for a Mac that its coordinator introduced.
+        let record: TrustedClient
+
+        /// Whether the list of paired clients has no record of the Mac, and the daemon admits it
+        /// only because its coordinator introduced it.
+        let isIntroduced: Bool
+    }
+
     /// The outcome of one attempt to listen for paired Macs.
     private enum PeerListenerAttempt {
         /// The listener is ready.
@@ -401,6 +423,16 @@ public actor PoolDaemon {
 
     /// The interval at which the daemon reports to its coordinator.
     static let reportInterval = Duration.seconds(10)
+
+    /// The grants of the coordinator that no lease request has used yet, in arrival order.
+    private var introductions: [Introduction] = []
+
+    /// The keys of the Macs that the coordinator introduced, for the handshakes of the listener.
+    private let introducedKeys = IntroducedKeys()
+
+    /// How long the daemon keeps a grant of its coordinator for the client to arrive, on
+    /// ``Configuration/awakeTime``.
+    static let introductionLifetime = Duration.seconds(60)
 
     /// The wait between checks of a lock and between connection attempts.
     private static let pollInterval = Duration.milliseconds(100)
@@ -571,6 +603,8 @@ public actor PoolDaemon {
             reply(.failure("the invitation expired"), to: expired.inviter)
         }
         let awake = configuration.awakeTime()
+        introductions.removeAll { $0.expiresAt <= awake }
+        refreshIntroducedKeys()
         closeSilentPeers(at: awake)
         perform(ledger.tick(now: now, awake: awake))
         let stopGrace = configuration.stopGrace / .seconds(1)
@@ -664,6 +698,7 @@ public actor PoolDaemon {
             _ = try TrustList<TrustedClient>.load(from: configuration.directory)
             let clients = ClientListReader(directory: configuration.directory, logger: configuration.logger)
             let invitation = invitation
+            let introduced = introducedKeys
             let now = configuration.now
             started = try await PeerListener(
                 identity: identity,
@@ -677,8 +712,9 @@ public actor PoolDaemon {
                     if let record = list[key] {
                         return !record.isBlocked
                     }
-                    // A Mac that the host does not know gets in only to pair.
-                    return invitation.isOpen(at: now())
+                    // A Mac that the host does not know gets in only to pair or with a grant of the
+                    // coordinator. acceptPeer(_:) checks the grant again.
+                    return introduced.contains(key) || invitation.isOpen(at: now())
                 },
                 handshakeLimit: PeerListener.handshakeLimit,
                 sourceHandshakeLimit: PeerListener.sourceHandshakeLimit,
@@ -750,6 +786,8 @@ public actor PoolDaemon {
             } else {
                 acceptPairedMac(peer)
             }
+        } else if isIntroduced(peer.fingerprint) {
+            acceptPairedMac(peer)
         } else if invitation.isOpen(at: configuration.now()) {
             acceptPairingMac(peer)
         } else {
@@ -1115,9 +1153,10 @@ public actor PoolDaemon {
         guard !isShutDown, peerListener != nil else {
             return
         }
+        let coordinator: TrustedHost
         let channel: MessageChannel
         do throws(PoolError) {
-            let coordinator = try TrustedHost.named(name, in: configuration.directory)
+            coordinator = try TrustedHost.named(name, in: configuration.directory)
             channel = try await PoolClient.connect(to: coordinator, directory: configuration.directory)
         } catch {
             coordinatorFailed("The daemon cannot reach its coordinator", reason: error.description)
@@ -1143,7 +1182,7 @@ public actor PoolDaemon {
                 guard let reply = try await channel.receive(PoolReply.self) else {
                     break
                 }
-                coordinatorReplied(reply)
+                coordinatorReplied(reply, from: coordinator.key, on: channel)
             } catch {
                 reason = error.description
                 break
@@ -1170,7 +1209,7 @@ public actor PoolDaemon {
     ///
     /// - Returns: The report, or `nil` while the daemon does not listen for paired Macs. Clients
     ///   could not reach this host then.
-    private func hostReport() -> HostReport? {
+    func hostReport() -> HostReport? {
         guard let peers = configuration.peers, let peerListener else {
             return nil
         }
@@ -1183,18 +1222,164 @@ public actor PoolDaemon {
             slots: slots,
             leases: leases,
             queued: queued,
-            available: max(0, slots - leases - queued),
+            available: max(0, slots - leases - queued - introductions.count),
             sources: configuration.offeredSources.keys.sorted(),
         )
     }
 
     /// Handles a reply from the coordinator.
     ///
-    /// - Parameter reply: The reply. Only a failure needs handling, and the daemon logs it.
-    private func coordinatorReplied(_ reply: PoolReply) {
-        if case let .failure(message) = reply {
+    /// The daemon answers a grant on the same connection and logs a failure.
+    ///
+    /// - Parameters:
+    ///   - reply: The reply.
+    ///   - coordinator: The fingerprint of the coordinator's key.
+    ///   - channel: The connection to the coordinator.
+    private func coordinatorReplied(_ reply: PoolReply, from coordinator: KeyFingerprint, on channel: MessageChannel) {
+        switch reply {
+        case let .grant(grant):
+            try? channel.send(introduce(grant, by: coordinator))
+        case let .failure(message):
             coordinatorFailed("The coordinator refused a report", reason: message)
+        default:
+            break
         }
+    }
+
+    /// Keeps a grant of the coordinator if this host can serve it.
+    ///
+    /// The host refuses a grant when it does not offer the source, blocks the client, cannot read
+    /// its list of paired clients, or has no available slot. A kept grant counts against
+    /// ``HostReport/available`` until the client requests its lease or
+    /// ``introductionLifetime`` passes.
+    ///
+    /// - Parameters:
+    ///   - grant: The grant.
+    ///   - coordinator: The fingerprint of the coordinator's key.
+    /// - Returns: The answer to the coordinator.
+    func introduce(_ grant: HostGrant, by coordinator: KeyFingerprint) -> PoolRequest {
+        if let reason = refusal(of: grant) {
+            configuration.logger.info("Refused a lease that the coordinator placed", metadata: [
+                "key": "\(grant.client)",
+                "reason": "\(reason)",
+            ])
+            return .declined(ticket: grant.ticket, reason: reason)
+        }
+        let awake = configuration.awakeTime()
+        introductions.append(Introduction(
+            grant: grant,
+            coordinator: coordinator,
+            expiresAt: awake.advanced(by: Self.introductionLifetime),
+        ))
+        refreshIntroducedKeys()
+        configuration.logger.info("The coordinator placed a lease on this host", metadata: [
+            "key": "\(grant.client)",
+            "source": "\(grant.source)",
+        ])
+        return .granted(ticket: grant.ticket)
+    }
+
+    /// Returns why the host refuses a grant of the coordinator, if it does.
+    ///
+    /// - Parameter grant: The grant.
+    /// - Returns: The reason for the coordinator, or `nil` when the host keeps the grant.
+    private func refusal(of grant: HostGrant) -> String? {
+        guard PairedMac.isValidName(grant.name), grant.priority >= 0 else {
+            return "the grant names no valid client"
+        }
+        guard configuration.offeredSources[grant.source] != nil else {
+            return "this host does not offer the source"
+        }
+        guard let clients = try? TrustList<TrustedClient>.load(from: configuration.directory) else {
+            return "this host cannot read its list of paired Macs"
+        }
+        if unsavedBlocks.contains(grant.client) || clients[grant.client]?.isBlocked == true {
+            return "this host blocked the Mac"
+        }
+        guard let report = hostReport(), report.available > 0 else {
+            return "this host has no available slot"
+        }
+        return nil
+    }
+
+    /// Reports whether the coordinator introduced a Mac that the list of paired clients does not
+    /// name.
+    ///
+    /// The coordinator introduced the Mac while a grant for it waits. The Mac also stays
+    /// introduced while it owns a lease that a grant started, if the list of paired hosts still
+    /// names the coordinator of that grant.
+    ///
+    /// - Parameter key: The fingerprint of the Mac's key.
+    /// - Returns: Whether the daemon admits the Mac without a record.
+    private func isIntroduced(_ key: KeyFingerprint) -> Bool {
+        guard !unsavedBlocks.contains(key) else {
+            return false
+        }
+        let awake = configuration.awakeTime()
+        if introductions.contains(where: { $0.grant.client == key && awake < $0.expiresAt }) {
+            return true
+        }
+        let owner = LeaseOwner.client(key)
+        let coordinators = Set(ledger.leases.values.filter { $0.owner == owner && $0.phase != .stopping }
+            .compactMap(\.introducedBy))
+        guard !coordinators.isEmpty, let hosts = try? TrustList<TrustedHost>.load(from: configuration.directory)
+        else {
+            return false
+        }
+        return coordinators.contains { hosts[$0] != nil }
+    }
+
+    /// Makes a record for a Mac that the coordinator introduced.
+    ///
+    /// - Parameter key: The fingerprint of the Mac's key.
+    /// - Returns: A record with the name and the highest priority of the Mac's waiting grants, or
+    ///   `nil` when the coordinator did not introduce the Mac.
+    private func introducedRecord(_ key: KeyFingerprint) -> TrustedClient? {
+        guard isIntroduced(key) else {
+            return nil
+        }
+        let grants = introductions.map(\.grant).filter { $0.client == key }
+        return TrustedClient(
+            key: key,
+            name: grants.last?.name ?? "introduced",
+            pairedAt: configuration.now(),
+            isBlocked: false,
+            priorityCeiling: grants.map(\.priority).max() ?? 0,
+        )
+    }
+
+    /// Removes the waiting grant that a lease request uses.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the requesting Mac's key.
+    ///   - terms: The terms of the request, with the source's name.
+    /// - Returns: The fingerprint of the grant's coordinator, or `nil` when no grant for the Mac
+    ///   names the source and allows the priority.
+    private func takeIntroduction(for key: KeyFingerprint, terms: LeaseTerms) -> KeyFingerprint? {
+        let awake = configuration.awakeTime()
+        guard let index = introductions.firstIndex(where: { introduction in
+            introduction.grant.client == key && introduction.grant.source == terms.source
+                && terms.priority <= introduction.grant.priority && awake < introduction.expiresAt
+        }) else {
+            return nil
+        }
+        let coordinator = introductions.remove(at: index).coordinator
+        refreshIntroducedKeys()
+        return coordinator
+    }
+
+    /// Gives the listener's handshakes the keys of the Macs that the coordinator introduced.
+    ///
+    /// The keys are the clients of waiting grants and the owners of leases that a grant started.
+    private func refreshIntroducedKeys() {
+        let awake = configuration.awakeTime()
+        var keys = Set(introductions.filter { awake < $0.expiresAt }.map(\.grant.client))
+        for record in ledger.leases.values where record.introducedBy != nil && record.phase != .stopping {
+            if case let .client(key) = record.owner {
+                keys.insert(key)
+            }
+        }
+        introducedKeys.replace(with: keys)
     }
 
     /// Logs a failure of the link to the coordinator.
@@ -1322,9 +1507,12 @@ public actor PoolDaemon {
             return false
         }
         var record: TrustedClient?
+        var isIntroduced = false
         if case let .client(key) = owner {
             do throws(PoolError) {
-                record = try pairedRecord(key)
+                let found = try peerRecord(key)
+                record = found?.record
+                isIntroduced = found?.isIntroduced ?? false
             } catch {
                 // A person's mistake in the file should not end the attached leases of every Mac.
                 // A heartbeat gets no reply, because a client that waits for a lease would take an
@@ -1344,6 +1532,14 @@ public actor PoolDaemon {
             switch request {
             case let .lease(terms):
                 let admitted = try admit(terms, from: record)
+                var coordinator: KeyFingerprint?
+                if case let .client(key) = owner {
+                    coordinator = takeIntroduction(for: key, terms: terms)
+                    guard coordinator != nil || !isIntroduced else {
+                        throw .invalidRequest(reason: "the coordinator placed no such lease on this host, so ask "
+                            + "the coordinator again")
+                    }
+                }
                 configuration.logger.info("Queued a lease request", metadata: [
                     "source": "\(admitted.terms.source)",
                     "owner": "\(owner)",
@@ -1353,6 +1549,7 @@ public actor PoolDaemon {
                     from: client,
                     owner: owner,
                     sourceName: admitted.sourceName,
+                    introducedBy: coordinator,
                     now: configuration.now(),
                 ))
             case let .attach(id):
@@ -1392,7 +1589,7 @@ public actor PoolDaemon {
                 }
                 try reply(unblock(key), to: client)
             case let .forget(endLeases):
-                guard case let .client(key) = owner else {
+                guard case let .client(key) = owner, !isIntroduced else {
                     throw .invalidRequest(reason: "only a paired Mac can ask the host to forget it")
                 }
                 try forget(key, endLeases: endLeases, from: client)
@@ -1407,6 +1604,8 @@ public actor PoolDaemon {
                 break
             case let .report(report):
                 try recordReport(report, from: client, record: record)
+            case .granted, .declined:
+                throw .invalidRequest(reason: "this daemon placed no lease with that ticket")
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1933,6 +2132,34 @@ public actor PoolDaemon {
         return AdmittedRequest(terms: admitted, sourceName: terms.source)
     }
 
+    /// Reads the record of a Mac that the daemon serves.
+    ///
+    /// - Parameter key: The fingerprint of the Mac's key.
+    /// - Returns: The record from the list of paired clients, a record that the daemon made for a
+    ///   Mac that its coordinator introduced, or `nil` when the daemon no longer admits the Mac.
+    /// - Throws: The errors of ``pairedRecord(_:)``.
+    private func peerRecord(_ key: KeyFingerprint) throws(PoolError) -> PeerRecord? {
+        if let record = try pairedRecord(key) {
+            return PeerRecord(record: record, isIntroduced: false)
+        }
+        guard !hasRecord(key), let record = introducedRecord(key) else {
+            return nil
+        }
+        return PeerRecord(record: record, isIntroduced: true)
+    }
+
+    /// Reports whether the list of paired clients names a key, blocked or not.
+    ///
+    /// - Parameter key: The fingerprint of a Mac's key.
+    /// - Returns: Whether the list has a record of the key. A list that cannot be read counts as
+    ///   one with the record, so the daemon admits no introduced Mac in its place.
+    private func hasRecord(_ key: KeyFingerprint) -> Bool {
+        guard let clients = try? TrustList<TrustedClient>.load(from: configuration.directory) else {
+            return true
+        }
+        return clients[key] != nil
+    }
+
     /// Reads the record of a paired client from the list of paired clients.
     ///
     /// - Parameter key: The fingerprint of the client's key.
@@ -2273,6 +2500,7 @@ public actor PoolDaemon {
             configuration.logger.error("The pool state could not be saved", metadata: ["error": "\(error)"])
         }
         logChanges()
+        refreshIntroducedKeys()
         // The guest's SSH server goes away with the VM, so a stream outlives no change of phase.
         endStreams { ledger.leases[$0.lease]?.phase != .ready }
         for action in actions {
@@ -3051,6 +3279,8 @@ private extension PoolReply {
             [code.description]
         case let .paired(mac), let .alreadyPaired(mac), let .revoked(mac, _, _), let .unblocked(mac):
             [mac.name]
+        case let .grant(grant):
+            [grant.name, grant.source]
         }
     }
 }

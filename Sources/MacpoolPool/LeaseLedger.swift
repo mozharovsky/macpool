@@ -137,6 +137,13 @@ struct LeaseRecord: Codable, Sendable, Equatable {
     /// The process identifier of the current supervisor, when the daemon started one.
     var supervisorProcessID: Int32?
 
+    /// The fingerprint of the coordinator whose grant started the lease, or `nil` for a lease that
+    /// no coordinator placed.
+    ///
+    /// The host admits the lease's owner without a record while the list of paired hosts names
+    /// this coordinator.
+    var introducedBy: KeyFingerprint?
+
     /// The JSON keys of a record.
     private enum CodingKeys: String, CodingKey {
         /// The `id` key.
@@ -163,6 +170,8 @@ struct LeaseRecord: Codable, Sendable, Equatable {
         case endReason = "end_reason"
         /// The `supervisor_pid` key.
         case supervisorProcessID = "supervisor_pid"
+        /// The `introduced_by` key.
+        case introducedBy = "introduced_by"
     }
 
     /// Whether the lease ends when it has no client.
@@ -212,6 +221,7 @@ extension LeaseRecord {
             restartAt: container.decodeIfPresent(Date.self, forKey: .restartAt),
             endReason: container.decodeIfPresent(String.self, forKey: .endReason),
             supervisorProcessID: container.decodeIfPresent(Int32.self, forKey: .supervisorProcessID),
+            introducedBy: container.decodeIfPresent(KeyFingerprint.self, forKey: .introducedBy),
         )
     }
 }
@@ -253,6 +263,9 @@ struct QueuedRequest: Sendable, Equatable {
 
     /// The name of the source that a paired client asked for, or `nil` for a local request.
     let sourceName: String?
+
+    /// The fingerprint of the coordinator whose grant the request used, or `nil`.
+    var introducedBy: KeyFingerprint?
 
     /// The arrival time.
     let since: Date
@@ -370,6 +383,7 @@ struct LeaseLedger {
     ///   - owner: Who requests the lease and later acts on it.
     ///   - sourceName: The name of the source that a paired client asked for, or `nil` for a
     ///     local request.
+    ///   - introducedBy: The coordinator whose grant the request used, or `nil`.
     ///   - now: The current time.
     /// - Returns: The replies and launches that follow.
     mutating func request(
@@ -377,6 +391,7 @@ struct LeaseLedger {
         from client: ClientID,
         owner: LeaseOwner,
         sourceName: String? = nil,
+        introducedBy: KeyFingerprint? = nil,
         now: Date,
     ) -> [LedgerAction] {
         let request = QueuedRequest(
@@ -385,6 +400,7 @@ struct LeaseLedger {
             owner: owner,
             terms: terms,
             sourceName: sourceName,
+            introducedBy: introducedBy,
             since: now,
         )
         nextTicket += 1
@@ -845,6 +861,7 @@ struct LeaseLedger {
                 phase: .starting,
                 grantedAt: now,
                 restarts: 0,
+                introducedBy: request.introducedBy,
             )
             leases[id] = record
             clients[id] = request.client

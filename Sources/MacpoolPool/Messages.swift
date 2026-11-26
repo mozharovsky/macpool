@@ -699,6 +699,20 @@ public enum PoolRequest: Sendable, Equatable, Codable {
     /// - Parameter report: The host's state.
     case report(HostReport)
 
+    /// Tells the coordinator that this host accepted a lease that the coordinator placed on it.
+    ///
+    /// The host sends it in answer to ``PoolReply/grant(_:)``. See ``HostGrant``.
+    ///
+    /// - Parameter ticket: The ticket of the grant.
+    case granted(ticket: UInt64)
+
+    /// Tells the coordinator that this host refused a lease that the coordinator placed on it.
+    ///
+    /// - Parameters:
+    ///   - ticket: The ticket of the grant.
+    ///   - reason: Why the host refused.
+    case declined(ticket: UInt64, reason: String)
+
     /// The JSON keys of a request.
     private enum CodingKeys: String, CodingKey {
         /// The kind of request.
@@ -715,6 +729,10 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case mayHost = "may_host"
         /// The report of a host.
         case report
+        /// The ticket of a grant.
+        case ticket
+        /// Why a host refused a grant.
+        case reason
         /// The secret of a pairing.
         case secret
         /// The name of a pairing Mac.
@@ -771,6 +789,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
             self = .heartbeat
         case "report":
             self = try .report(container.decode(HostReport.self, forKey: .report))
+        case "granted":
+            self = try .granted(ticket: container.decode(UInt64.self, forKey: .ticket))
+        case "declined":
+            self = try .declined(
+                ticket: container.decode(UInt64.self, forKey: .ticket),
+                reason: container.decode(String.self, forKey: .reason),
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .request,
@@ -831,6 +856,13 @@ public enum PoolRequest: Sendable, Equatable, Codable {
         case let .report(report):
             try container.encode("report", forKey: .request)
             try container.encode(report, forKey: .report)
+        case let .granted(ticket):
+            try container.encode("granted", forKey: .request)
+            try container.encode(ticket, forKey: .ticket)
+        case let .declined(ticket, reason):
+            try container.encode("declined", forKey: .request)
+            try container.encode(ticket, forKey: .ticket)
+            try container.encode(reason, forKey: .reason)
         }
     }
 }
@@ -1054,6 +1086,14 @@ public enum PoolReply: Sendable, Equatable, Codable {
     /// - Parameter leases: The number of the Mac's leases that the request ended.
     case forgotten(leases: Int)
 
+    /// Places a lease on the receiving host, from its coordinator.
+    ///
+    /// The coordinator sends it on the connection on which the host reports. The host answers
+    /// with ``PoolRequest/granted(ticket:)`` or ``PoolRequest/declined(ticket:reason:)``.
+    ///
+    /// - Parameter grant: The lease's client, source, and priority.
+    case grant(HostGrant)
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -1080,6 +1120,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case leases
         /// The access to a lease's guest.
         case guest
+        /// A lease that the coordinator places on a host.
+        case grant
     }
 
     /// Decodes a reply.
@@ -1137,6 +1179,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
             self = try .unblocked(container.decode(PairedMac.self, forKey: .mac))
         case "forgotten":
             self = try .forgotten(leases: container.decode(Int.self, forKey: .leases))
+        case "grant":
+            self = try .grant(container.decode(HostGrant.self, forKey: .grant))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -1166,6 +1210,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case .revoked: "revoked"
         case .unblocked: "unblocked"
         case .forgotten: "forgotten"
+        case .grant: "grant"
         }
     }
 
@@ -1208,6 +1253,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
             try container.encode(leases, forKey: .leases)
         case let .forgotten(leases):
             try container.encode(leases, forKey: .leases)
+        case let .grant(grant):
+            try container.encode(grant, forKey: .grant)
         }
     }
 }
