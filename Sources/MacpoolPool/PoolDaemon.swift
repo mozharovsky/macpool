@@ -1322,7 +1322,7 @@ public actor PoolDaemon {
     /// The daemon also drops a block of the key that it keeps in ``unsavedBlocks``. If the save of
     /// the list fails, the daemon reads the list again, because a save can fail after the rename
     /// that puts the new list in place. When the record there is not blocked, the call succeeds as
-    /// after a save that succeeded.
+    /// after a save that succeeded. Otherwise the daemon keeps the block in ``unsavedBlocks``.
     ///
     /// - Parameter text: The Mac's short key or full fingerprint.
     /// - Returns: The reply to the local user.
@@ -1338,6 +1338,9 @@ public actor PoolDaemon {
             if let saveError = save(unblocked) {
                 let saved = try? TrustList<TrustedClient>.load(from: configuration.directory)
                 guard saved?[record.key]?.isBlocked == false else {
+                    // The failed save may have put the unblocked list in place before the read
+                    // failed, so the block stays in memory.
+                    unsavedBlocks.insert(record.key)
                     configuration.logger.error(
                         "The host cannot save the list of paired Macs to unblock a Mac",
                         metadata: ["key": "\(record.key)", "reason": "\(saveError)"],
