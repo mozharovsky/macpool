@@ -121,6 +121,59 @@ struct IntroductionTests {
         await host.daemon.shutdown()
     }
 
+    /// Serves a granted lease with a negative priority, as the host serves a paired Mac's.
+    @Test func servesANegativePriority() async throws {
+        let host = try await Host()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        #expect(await host.grant(clientKey, priority: -1) == .granted(ticket: 1))
+        let channel = try await PoolClient.connect(to: host.endpoint, as: client, hostKey: host.key)
+        try channel.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60, priority: -1)))
+        #expect(try await next(channel).lease?.phase == .starting)
+        channel.close()
+        await host.daemon.shutdown()
+    }
+
+    /// Admits no Mac on the grant of a coordinator that the list of paired hosts no longer names.
+    @Test func refusesTheGrantOfAForgottenCoordinator() async throws {
+        let host = try await Host()
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        #expect(await host.grant(clientKey) == .granted(ticket: 1))
+        try TrustedHost.remove(host.coordinator, from: host.pool.directory)
+        await #expect(throws: PoolError.self) {
+            let channel = try await PoolClient.connect(to: host.endpoint, as: client, hostKey: host.key)
+            try channel.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+            _ = try await next(channel)
+        }
+        #expect(await host.daemon.summary().leases.isEmpty)
+        await host.daemon.shutdown()
+    }
+
+    /// Keeps serving a Mac whose granted request waits in the queue because a local lease took
+    /// the slot first.
+    @Test func keepsAQueuedRequestOfAGrant() async throws {
+        let host = try await Host(slots: 1)
+        let client = try makeIdentity()
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        #expect(await host.grant(clientKey) == .granted(ticket: 1))
+        let local = try await host.pool.readyLease(host.pool.terms())
+
+        let channel = try await PoolClient.connect(to: host.endpoint, as: client, hostKey: host.key)
+        try channel.send(PoolRequest.lease(LeaseTerms(source: "base", timeToLive: 60)))
+        #expect(try await next(channel) == .queued(position: 1))
+        try channel.send(PoolRequest.heartbeat)
+        try channel.send(PoolRequest.status)
+        guard case .status = try await next(channel) else {
+            Issue.record("the host stopped serving the Mac while its request waited")
+            return
+        }
+        local.client.close()
+        #expect(try await next(channel).lease?.phase == .starting)
+        channel.close()
+        await host.daemon.shutdown()
+    }
+
     /// Lets the owner of a lease that a grant started attach again after its connection broke,
     /// while the list of paired hosts names the coordinator.
     @Test func keepsTheOwnerOfAnIntroducedLease() async throws {

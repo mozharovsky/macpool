@@ -1308,7 +1308,7 @@ public actor PoolDaemon {
     /// - Parameter grant: The grant.
     /// - Returns: The reason for the coordinator, or `nil` when the host keeps the grant.
     private func refusal(of grant: HostGrant) -> String? {
-        guard PairedMac.isValidName(grant.name), grant.priority >= 0 else {
+        guard PairedMac.isValidName(grant.name) else {
             return "the grant names no valid client"
         }
         guard configuration.offeredSources[grant.source] != nil else {
@@ -1330,8 +1330,8 @@ public actor PoolDaemon {
     /// name.
     ///
     /// The coordinator introduced the Mac while a grant for it waits. The Mac also stays
-    /// introduced while it owns a lease that a grant started, if the list of paired hosts still
-    /// names the coordinator of that grant.
+    /// introduced while it owns a lease or a queued request that a grant started. In each case
+    /// the list of paired hosts must still name the coordinator of that grant.
     ///
     /// - Parameter key: The fingerprint of the Mac's key.
     /// - Returns: Whether the daemon admits the Mac without a record.
@@ -1340,12 +1340,12 @@ public actor PoolDaemon {
             return false
         }
         let awake = configuration.awakeTime()
-        if introductions.contains(where: { $0.grant.client == key && awake < $0.expiresAt }) {
-            return true
-        }
         let owner = LeaseOwner.client(key)
-        let coordinators = Set(ledger.leases.values.filter { $0.owner == owner && $0.phase != .stopping }
-            .compactMap(\.introducedBy))
+        let granted = introductions.filter { $0.grant.client == key && awake < $0.expiresAt }.map(\.coordinator)
+        let leased = ledger.leases.values.filter { $0.owner == owner && $0.phase != .stopping }
+            .compactMap(\.introducedBy)
+        let queued = ledger.queue.filter { $0.owner == owner }.compactMap(\.introducedBy)
+        let coordinators = Set(granted + leased + queued)
         guard !coordinators.isEmpty, let hosts = try? TrustList<TrustedHost>.load(from: configuration.directory)
         else {
             return false
@@ -1377,14 +1377,10 @@ public actor PoolDaemon {
     /// - Parameters:
     ///   - key: The fingerprint of the requesting Mac's key.
     ///   - terms: The terms of the request, with the source's name.
-    /// - Returns: The fingerprint of the grant's coordinator, or `nil` when no grant for the Mac
-    ///   names the source and allows the priority.
+    /// - Returns: The fingerprint of the grant's coordinator, or `nil` when
+    ///   ``introductionIndex(for:terms:)`` finds no grant.
     private func takeIntroduction(for key: KeyFingerprint, terms: LeaseTerms) -> KeyFingerprint? {
-        let awake = configuration.awakeTime()
-        guard let index = introductions.firstIndex(where: { introduction in
-            introduction.grant.client == key && introduction.grant.source == terms.source
-                && terms.priority <= introduction.grant.priority && awake < introduction.expiresAt
-        }) else {
+        guard let index = introductionIndex(for: key, terms: terms) else {
             return nil
         }
         let coordinator = introductions.remove(at: index).coordinator
@@ -1392,16 +1388,40 @@ public actor PoolDaemon {
         return coordinator
     }
 
+    /// Finds the waiting grant that a lease request can use.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the requesting Mac's key.
+    ///   - terms: The terms of the request, with the source's name.
+    /// - Returns: The grant's index in ``introductions``, or `nil` when no grant for the Mac names
+    ///   the source, allows the priority, and comes from a coordinator that the list of paired
+    ///   hosts still names. A list that cannot be read names no coordinator.
+    private func introductionIndex(for key: KeyFingerprint, terms: LeaseTerms) -> Int? {
+        // Most requests come from Macs without a grant, and those need no read of the list.
+        guard introductions.contains(where: { $0.grant.client == key }),
+              let hosts = try? TrustList<TrustedHost>.load(from: configuration.directory)
+        else {
+            return nil
+        }
+        let awake = configuration.awakeTime()
+        return introductions.firstIndex { introduction in
+            introduction.grant.client == key && introduction.grant.source == terms.source
+                && terms.priority <= introduction.grant.priority && awake < introduction.expiresAt
+                && hosts[introduction.coordinator] != nil
+        }
+    }
+
     /// Gives the listener's handshakes the keys of the Macs that the coordinator introduced.
     ///
-    /// The keys are the clients of waiting grants and the owners of leases that a grant started.
+    /// The keys are the clients of waiting grants and the owners of leases and queued requests
+    /// that a grant started. ``isIntroduced(_:)`` checks each request again.
     private func refreshIntroducedKeys() {
         let awake = configuration.awakeTime()
         var keys = Set(introductions.filter { awake < $0.expiresAt }.map(\.grant.client))
-        for record in ledger.leases.values where record.introducedBy != nil && record.phase != .stopping {
-            if case let .client(key) = record.owner {
-                keys.insert(key)
-            }
+        let leased = ledger.leases.values.filter { $0.introducedBy != nil && $0.phase != .stopping }.map(\.owner)
+        let queued = ledger.queue.filter { $0.introducedBy != nil }.map(\.owner)
+        for case let .client(key) in leased + queued {
+            keys.insert(key)
         }
         introducedKeys.replace(with: keys)
     }
