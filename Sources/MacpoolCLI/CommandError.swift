@@ -100,6 +100,13 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
     ///   - reason: The last refusal.
     case reattachRefused(seconds: Int, reason: String)
 
+    /// A paired host did not forget this Mac, so `macpool pool remove` kept the host in the list.
+    ///
+    /// - Parameters:
+    ///   - host: The host's short key and name, prepared for a terminal.
+    ///   - reason: Why the request failed, with the host's text escaped.
+    case hostKeptPairing(host: String, reason: String)
+
     /// A step of an image build failed.
     ///
     /// - Parameters:
@@ -166,6 +173,9 @@ enum CommandError: Error, Equatable, CustomStringConvertible {
         case let .reattachRefused(seconds, reason):
             "the host refused every attempt to attach to the lease for \(seconds) seconds and no longer holds it: "
                 + reason
+        case let .hostKeptPairing(host, reason):
+            "the host \(host) did not forget this Mac, so it stays in macpool pool list: \(reason). Pass "
+                + "--end-leases to end this Mac's leases there, or --local to remove the host from this Mac's list only"
         case let .supervisedRunFailed(reason):
             reason
         case let .standardIO(operation, reason):

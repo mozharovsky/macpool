@@ -376,7 +376,7 @@ struct PeerConnectionTests {
     }
 
     /// Keeps serving the local socket while another process holds the port, and listens once
-    /// the port is free.
+    /// the port is free. The local user's status names the problem until then.
     @Test func keepsTheLocalSocketWithABusyPort() async throws {
         let fixture = try PoolFixture()
         let holder = try await LoopbackListener()
@@ -388,13 +388,70 @@ struct PeerConnectionTests {
         }
         #expect(await eventually { !fixture.logs.entries("The listener for paired Macs cannot start").isEmpty })
         #expect(await daemon.peerPort == nil)
-
-        holder.close()
-        #expect(try await listeningPort(of: daemon) == holder.port)
-        guard case .status = try await PoolClient.send(.status, to: fixture.directory) else {
+        guard case let .status(busy) = try await PoolClient.send(.status, to: fixture.directory) else {
             Issue.record("the local socket did not answer")
             return
         }
+        let listener = try #require(busy.listener)
+        #expect(listener.address == "127.0.0.1")
+        #expect(listener.port == holder.port)
+        #expect(listener.problem?.isEmpty == false)
+
+        holder.close()
+        #expect(try await listeningPort(of: daemon) == holder.port)
+        guard case let .status(listening) = try await PoolClient.send(.status, to: fixture.directory) else {
+            Issue.record("the local socket did not answer")
+            return
+        }
+        #expect(listening.listener == ListenerSummary(address: "127.0.0.1", port: holder.port, problem: nil))
+        await daemon.shutdown()
+    }
+
+    /// Reports the listener to the local user only, and no listener when the daemon serves only
+    /// the local socket.
+    @Test func reportsTheListenerOnlyToLocalClients() async throws {
+        let fixture = try PoolFixture()
+        let daemon = try await fixture.start(peers: loopbackSettings())
+        let port = try await listeningPort(of: daemon)
+
+        let local = try await PoolClient.send(.status, to: fixture.directory)
+        #expect(local == .status(PoolSummary(
+            slots: 2,
+            leases: [],
+            queue: [],
+            listener: ListenerSummary(address: "127.0.0.1", port: port, problem: nil),
+        )))
+        #expect(await daemon.summary().listener == ListenerSummary(address: "127.0.0.1", port: port, problem: nil))
+        let remote = try await fixture.pairedClient(of: daemon, owner: LeaseLedgerTests.paired("a"))
+        try remote.send(PoolRequest.status)
+        #expect(try await next(remote) == .status(PoolSummary(slots: 2, leases: [], queue: [])))
+        await daemon.shutdown()
+
+        let quiet = try PoolFixture()
+        let localOnly = try await quiet.start()
+        guard case let .status(summary) = try await PoolClient.send(.status, to: quiet.directory) else {
+            Issue.record("the local socket did not answer")
+            return
+        }
+        #expect(summary.listener == nil)
+        await localOnly.shutdown()
+    }
+
+    /// Keeps serving the local socket while the address is on no interface of this Mac.
+    @Test func keepsTheLocalSocketWithAnAddressOfNoInterface() async throws {
+        let fixture = try PoolFixture()
+        // RFC 5737 reserves 192.0.2.0/24 for documentation, so no interface has this address.
+        let settings = PeerSettings(address: "192.0.2.1", port: 0, retryInterval: .milliseconds(100))
+        let daemon = try await fixture.start(peers: settings)
+
+        #expect(await eventually { !fixture.logs.entries("The listener for paired Macs cannot start").isEmpty })
+        guard case let .status(summary) = try await PoolClient.send(.status, to: fixture.directory) else {
+            Issue.record("the local socket did not answer")
+            return
+        }
+        #expect(summary.listener?.address == "192.0.2.1")
+        #expect(summary.listener?.problem?.isEmpty == false)
+        #expect(await daemon.peerPort == nil)
         await daemon.shutdown()
     }
 
@@ -441,6 +498,7 @@ struct PeerConnectionTests {
         ]
         for (address, host) in accepted {
             #expect(PeerListener.listeningHost(for: address).map { "\($0)" } == host, "\(address)")
+            #expect(PeerSettings.isValidAddress(address), "\(address)")
         }
         for address in [
             "",
@@ -457,6 +515,7 @@ struct PeerConnectionTests {
             "fe80::1%lo0",
         ] {
             #expect(PeerListener.listeningHost(for: address) == nil, "\(address)")
+            #expect(!PeerSettings.isValidAddress(address), "\(address)")
         }
     }
 
@@ -713,6 +772,49 @@ struct PeerConnectionTests {
             channel.close()
             return true
         })
+    }
+
+    /// Closes a connection from outside the allowed sources before its handshake and warns once a
+    /// minute. Admits a connection from inside them.
+    @Test func admitsOnlyTheAllowedSources() async throws {
+        let host = try makeIdentity()
+        let client = try makeIdentity()
+        let hostKey = KeyFingerprint(digest: host.keyDigest)
+        let clientKey = KeyFingerprint(digest: client.keyDigest)
+        let parameters = try PeerSecurity.parameters(identity: client, isServer: false) { $0 == hostKey }
+        let logs = LogRecorder()
+        var elsewhere = loopbackSettings()
+        elsewhere.allowedSources = try [#require(AddressRange("192.0.2.0/24"))]
+        let refusing = try await PeerListener(
+            identity: host,
+            settings: elsewhere,
+            logger: testLogger(logs),
+            admits: { $0 == clientKey },
+        )
+        defer { refusing.close() }
+        let refused = try loopback(refusing.port)
+        #expect(await refusesAtOnce(refused, using: parameters))
+        #expect(await refusesAtOnce(refused, using: parameters))
+        let warnings = logs.entries("Refused a connection from outside the allowed sources")
+        #expect(warnings.map(\.level) == [.warning, .debug])
+        #expect(warnings.allSatisfy { $0.metadata["address"]?.hasPrefix("127.0.0.1:") == true })
+
+        var loopbackOnly = loopbackSettings()
+        loopbackOnly.allowedSources = try [
+            #require(AddressRange("192.0.2.0/24")),
+            #require(AddressRange("127.0.0.0/8")),
+        ]
+        let admitting = try await PeerListener(
+            identity: host,
+            settings: loopbackOnly,
+            logger: testLogger(),
+            admits: { $0 == clientKey },
+        )
+        defer { admitting.close() }
+        let channel = try await MessageChannel.connect(to: loopback(admitting.port), using: parameters)
+        defer { channel.close() }
+        var connections = admitting.connections.makeAsyncIterator()
+        #expect(try #require(await connections.next()).fingerprint == clientKey)
     }
 
     /// Frees a connection's place when its owner releases it, while the connection stays open.

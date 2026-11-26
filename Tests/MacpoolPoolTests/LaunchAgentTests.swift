@@ -28,4 +28,22 @@ struct LaunchAgentTests {
         #expect(LaunchAgent.propertyListFile.path(percentEncoded: false)
             .hasSuffix("/Library/LaunchAgents/macpool.daemon.plist"))
     }
+
+    /// Passes the listener's arguments to the daemon after the other arguments.
+    @Test func passesTheListenerArguments() throws {
+        let agent = LaunchAgent(
+            executable: URL(filePath: "/opt/macpool/bin/macpool"),
+            directory: PoolDirectory(root: URL(filePath: "/Users/me/pool")),
+            slots: 2,
+            peerArguments: ["--listen", "192.0.2.20:7373", "--offer", "base=/Users/me/vms/base"],
+        )
+        let job = try #require(
+            try PropertyListSerialization.propertyList(from: agent.propertyList(), format: nil) as? [String: Any],
+        )
+        #expect(job["ProgramArguments"] as? [String] == [
+            "/opt/macpool/bin/macpool", "daemon", "run", "--data-dir", "/Users/me/pool",
+            "--slots", "2", "--log-level", "info",
+            "--listen", "192.0.2.20:7373", "--offer", "base=/Users/me/vms/base",
+        ])
+    }
 }

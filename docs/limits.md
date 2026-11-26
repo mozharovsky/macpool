@@ -36,6 +36,12 @@ with an iOS simulator runtime doesn't fit on a 64 GB disk.
 - Requests that wait in the queue aren't stored. When the daemon stops, their `lease` commands exit
   with an error.
 - `logs/daemon.log` grows without rotation.
+- Without `--allow-from`, any device that reaches the listener's port can start a TLS handshake.
+  Only a paired key finishes it, except while `host invite` waits. Then any key finishes it and
+  can try a pairing code. Listen on an address that only your Macs reach, or name their ranges
+  with `--allow-from`.
+- If the macOS firewall is on, allow incoming connections for `macpool` in System Settings >
+  Network > Firewall > Options.
 - `run` finds the guest's host process by comparing process listings from before and after the
   start. When another VM starts in the same moment, `run` skips the priority change and the memory
   sample.

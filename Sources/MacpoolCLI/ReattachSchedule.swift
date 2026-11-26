@@ -27,6 +27,9 @@ struct ReattachSchedule: Sendable {
     /// `PoolDaemon.peerSilenceLimit` and keeps the lease for its reattach grace after that. Longer
     /// refusals mean that the lease has ended. The schedule measures this limit on ``awakeTime``,
     /// because the host does not count the time that it sleeps.
+    ///
+    /// The limit takes the grace of `PoolPolicy` in this build. If a program on the host sets a
+    /// longer grace, the host may still hold the lease when the attempts stop.
     static let refusalLimit = PoolDaemon.peerSilenceLimit + PoolPolicy().reattachGrace
 
     /// The time after which no attempt starts.

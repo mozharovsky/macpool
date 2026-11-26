@@ -294,7 +294,8 @@ public actor PoolDaemon {
     /// the limit, or `nil` when the limit cannot be read.
     private var openFileLimit: rlim_t?
 
-    /// Why the listener for paired Macs last failed to start, or `nil` after it started.
+    /// Why the listener for paired Macs last failed to start or stopped, or `nil` after it
+    /// started.
     ///
     /// The daemon logs a failure only when its reason differs from this one. A failure that
     /// repeats on every attempt therefore appears in the log once.
@@ -573,10 +574,11 @@ public actor PoolDaemon {
 
     /// Describes the pool.
     ///
-    /// - Returns: The slots, leases, queue, and images, as the local user sees them.
+    /// - Returns: The slots, leases, queue, images, and listener, as the local user sees them.
     public func summary() -> PoolSummary {
         var summary = ledger.summary(for: .local)
         summary.images = configuration.directory.images()
+        summary.listener = listenerSummary()
         return summary
     }
 
@@ -681,6 +683,7 @@ public actor PoolDaemon {
         }
         stopped.close()
         peerListener = nil
+        peerListenerFailure = "the listener stopped"
         configuration.logger.error("The listener for paired Macs stopped")
     }
 
@@ -961,7 +964,7 @@ public actor PoolDaemon {
     /// Opens an invitation for the local user.
     ///
     /// - Parameters:
-    ///   - address: The host's address for the code.
+    ///   - address: The host's address for the code, or `nil` for the listener's address.
     ///   - priorityCeiling: The highest priority that the client who pairs may ask for.
     ///   - client: The inviting connection.
     ///   - owner: Who the client acts for.
@@ -970,7 +973,7 @@ public actor PoolDaemon {
     ///   cannot be part of a code, the ceiling is below 0, the daemon does not listen for paired
     ///   Macs, or the host's name for clients is not a valid name or contains a host path.
     private func invite(
-        address: String,
+        address: String?,
         priorityCeiling: Int,
         from client: ClientID,
         owner: LeaseOwner,
@@ -978,7 +981,7 @@ public actor PoolDaemon {
         guard owner == .local else {
             throw .invalidRequest(reason: "only the host's own user can invite Macs")
         }
-        guard PairingCode.isValidAddress(address) else {
+        if let address, !PairingCode.isValidAddress(address) {
             throw .invalidRequest(reason: "\(address) is not a host name or an IP address")
         }
         // A negative ceiling would restrict the client, and a build that does not know the field
@@ -986,11 +989,13 @@ public actor PoolDaemon {
         guard priorityCeiling >= 0 else {
             throw .invalidRequest(reason: "the priority ceiling must be 0 or more")
         }
-        guard let listener = peerListener else {
+        guard let listener = peerListener, let peers = configuration.peers else {
             throw .invalidRequest(reason: "the host does not listen for paired Macs"
                 + (peerListenerFailure.map { ": \($0)" } ?? ""))
         }
-        let hostName = configuration.peers?.name ?? ""
+        // The listener binds only a numeric address, which a code can always carry.
+        let address = address ?? peers.address
+        let hostName = peers.name
         guard PairedMac.isValidName(hostName) else {
             throw .invalidRequest(reason: "the host's name for clients must have \(PairedMac.nameRule)")
         }
@@ -1019,6 +1024,21 @@ public actor PoolDaemon {
     /// The port on which the daemon listens for paired Macs, or `nil` while it does not listen.
     var peerPort: UInt16? {
         peerListener?.port
+    }
+
+    /// Describes the listener for paired Macs for the local user.
+    ///
+    /// - Returns: The address, the port, and the reason of the last failure, or `nil` when the
+    ///   configuration sets no listener.
+    private func listenerSummary() -> ListenerSummary? {
+        guard let peers = configuration.peers else {
+            return nil
+        }
+        guard let peerListener else {
+            let problem = peerListenerFailure ?? "the daemon has not started to listen yet"
+            return ListenerSummary(address: peers.address, port: peers.port, problem: problem)
+        }
+        return ListenerSummary(address: peers.address, port: peerListener.port, problem: nil)
     }
 
     /// Reads a client's requests until it disconnects.
@@ -1157,12 +1177,8 @@ public actor PoolDaemon {
             case let .renew(id):
                 try perform(ledger.renew(id, client: client, owner: owner, now: configuration.now()))
             case .status:
-                var summary = ledger.summary(for: owner)
-                // A paired Mac gets no paths on this Mac's disk.
-                if owner == .local {
-                    summary.images = configuration.directory.images()
-                }
-                reply(.status(summary), to: client)
+                // A paired Mac gets no paths on this Mac's disk and nothing about the listener.
+                reply(.status(owner == .local ? summary() : ledger.summary(for: owner)), to: client)
             case let .invite(address, priorityCeiling):
                 try reply(
                     invite(address: address, priorityCeiling: priorityCeiling, from: client, owner: owner),

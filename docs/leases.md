@@ -17,12 +17,50 @@ next daemon picks them up.
 | --- | --- | --- |
 | `--slots N` | 2 | How many VMs run at once, 1 or 2. `run` and `install` take it. |
 | `--data-dir DIR` | `~/Library/Application Support/macpool` | Where the daemon keeps its state, clones, sockets, and logs. |
+| `--listen ADDRESS[:PORT]` | off | Listens for paired Macs. See [Listening for other Macs](#listening-for-other-macs). |
+| `--host-name NAME` | this Mac's name | The name that a Mac sees for this host when it pairs. Needs `--listen`. |
+| `--offer NAME=BUNDLE` | none | A stopped source that paired Macs may lease by its name. Repeat it for more sources. Needs `--listen`. |
+| `--allow-from CIDR` | every address | A range of addresses that may connect, such as `100.64.0.0/10`. Repeat it for more ranges. Needs `--listen`. |
 | `--log-level LEVEL` | `warning` | Diagnostics on standard error. Only `run` takes it. |
+
+`install` writes these options into the job, so the next start of the daemon uses them too. To
+change them, run `install` again with the new options.
 
 Every pool command except `daemon uninstall` takes `--data-dir`. A daemon's data directory must be
 on the same APFS volume as its sources. With `--pool`, the directory holds only this Mac's key and
 paired hosts, and it need not be on the same volume as any source. The daemon refuses a directory
 that belongs to another user or that other users can write to.
+
+## Listening for other Macs
+
+With `--listen`, the daemon also accepts paired Macs over TLS on one numeric address of this Mac,
+such as `192.0.2.20` or `[2001:db8::20]:7480`. The default port is 7373. A host name, `0.0.0.0`,
+and `::` don't work, because the daemon would then listen on every interface. Other Macs connect
+only to this address, so pick one that they reach, such as a LAN or Tailscale address. A loopback
+address such as `127.0.0.1` serves no other Mac. A Tailscale address stays the same when the Mac
+changes networks, so it suits a Mac that moves.
+
+```sh
+$macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base"
+$macpool list
+```
+
+`list` then prints `listening for paired Macs on 192.0.2.20:7373`. If the address isn't on an
+interface yet or another process holds the port, `list` prints why the daemon isn't listening. The
+daemon keeps serving this Mac and tries again every 10 seconds.
+
+With `--allow-from`, the listener closes a connection from any other address before the TLS
+handshake. A range takes a numeric address and a prefix length, and the bits after the prefix must
+be zero. One address without a prefix length allows that address alone. Tailscale gives your
+devices addresses in `100.64.0.0/10` and `fd7a:115c:a1e0::/48`.
+
+```sh
+$macpool daemon install --listen 192.0.2.20 --offer base="$PWD/.cache/vms/base" \
+  --allow-from 192.0.2.0/24
+```
+
+A paired Mac leases only the sources that `--offer` names, by their names. It can't share a
+directory of this Mac with its guest.
 
 ## Leasing a clone
 
@@ -78,10 +116,33 @@ When a lease ends, the daemon stops the VM by force and deletes the clone.
 
 ## Leasing from another Mac
 
+The host is the Mac that runs the VMs, and the client is the Mac that leases them. Pair them once.
+On the host, start the daemon with `--listen` and `--offer`, as in
+[Listening for other Macs](#listening-for-other-macs), and print a code.
+
+```sh
+$macpool host invite
+```
+
+On the client, pair within 10 minutes. Copy the code to the client's clipboard over a channel that
+you trust, because anyone with the code can pair while it works.
+
+```sh
+pbpaste | $macpool pool add
+```
+
+The host prints `paired` with the client's short key, and the client prints the same key as
+`this_mac=`. If the keys differ, another Mac used the code. Revoke the key from the host's `paired`
+line with `macpool host revoke`.
+
+If `pool add` fails after the host printed `paired`, this Mac may have paired anyway. A revoked Mac
+can't pair again, so don't revoke yet. Run `host invite` and `pool add` again. The host prints
+`already paired` for a Mac that paired before. The new `this_mac=` line then shows whether the
+first `paired` line named this Mac.
+[Commands](commands.md#host-invite) describes the pairing commands.
+
 `lease`, `list`, `renew`, and `release` take `--pool HOST` to ask a paired host instead of the
-daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`. The
-command line can't pair Macs yet. `--pool` works only with a host that a program paired through
-`MacpoolPool`.
+daemon on this Mac. `HOST` is a name or short key from `macpool pool list`, as with `connect`.
 
 With `--pool`, `--from` takes the name of a source that the host offers instead of a path, and
 `--share` isn't allowed. The host shows this Mac only its own leases and no paths on its disk.

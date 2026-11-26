@@ -108,14 +108,17 @@ requests only after that line. Both sides then exchange the same lines as on the
 
 The daemon loads the key when it starts listening. A key or a list that cannot be loaded, or a
 port that another process holds, leaves the local socket serving. The daemon logs the failure and
-tries again after ``PeerSettings/retryInterval``.
+tries again after ``PeerSettings/retryInterval``. A status reply to the local user carries a
+``ListenerSummary`` with the address, the port, and the reason of the last failure.
 
 Every connection holds a file descriptor. When the daemon starts, it raises the process's soft
 limit of open files to 4096, or to the hard limit or `kern.maxfilesperproc` when either is lower.
 If the process may still open fewer than 1024 files, the daemon does not listen for paired Macs.
 
 Anyone who reaches the port can start a handshake, because a client proves its key only at the
-end. At most 16 connections hold a handshake place at once, and at most 4 of them come from one
+end. If ``PeerSettings/allowedSources`` holds an ``AddressRange``, the host closes a connection
+from an address outside every range before its handshake. Such a connection takes no place.
+At most 16 connections hold a handshake place at once, and at most 4 of them come from one
 address. The host closes a connection beyond either limit before its handshake begins. It logs a
 warning about an address at the limit at most once a minute. An IPv6 address outside the /64 of
 the listener's address counts by its /64, because one party usually controls a whole /64. Inside
@@ -169,16 +172,18 @@ connections. If the guest refuses the connection, a paired Mac's failure names n
 
 A client Mac pairs with a host once, with a ``PairingCode``. The local user asks the daemon for a
 code with ``PoolRequest/invite(address:priorityCeiling:)``. The code carries the host's address
-and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Pass it to
+and port, the first 128 bits of the digest of the host's key, and a secret of 128 bits. Without an
+address, the code carries the address that the daemon listens on. Pass it to
 the person who pairs the client, because anyone with the code can pair in that client's place. The
 client gets the invitation's priority ceiling when the host records it. A Mac that the host
 already knows keeps its record and its ceiling.
 
 ``PoolClient/pair(using:name:directory:timeout:)`` checks the host's key against the code before
 it sends the secret. The host then adds the client to `clients.json`, and the client adds the
-host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``. If the two
-texts differ, someone else used the code. ``TrustedClient/paired(in:)`` and
-``TrustedHost/paired(in:)`` read the two lists without a running daemon.
+host to `hosts.json`. Both sides can show the client's ``KeyFingerprint/shortKey``, and
+``KeyFingerprint/thisMac(in:)`` returns it on the client. If the two texts differ, someone else
+used the code. ``TrustedClient/paired(in:)`` and ``TrustedHost/paired(in:)`` read the two lists
+without a running daemon.
 
 A Mac that the host does not know may send one ``PoolRequest/pair(secret:name:)`` request within
 5 seconds, and at most 4 such Macs connect at once. The invitation ends when a client pairs, after
@@ -258,7 +263,8 @@ cannot be read, the request fails and the daemon changes nothing. If the save fa
 reads the list again, because a save can fail after the rename that puts the new list in place.
 When the list no longer names the client, the daemon forgets the client. Otherwise the request
 fails and the daemon changes nothing. The daemon refuses this request from a blocked client. A
-blocked record therefore stays.
+blocked record therefore stays. After the host forgot the client, or when the host cannot be
+reached, ``TrustedHost/remove(_:from:)`` removes the host from the client's list.
 
 ### Supervisors
 
@@ -339,6 +345,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``PoolPolicy``
 - ``PoolDirectory``
 - ``PeerSettings``
+- ``AddressRange``
 - ``LaunchAgent``
 
 ### Clients
@@ -361,6 +368,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``LeaseSummary``
 - ``QueuedSummary``
 - ``PoolSummary``
+- ``ListenerSummary``
 - ``ImageSummary``
 
 ### Supervisors

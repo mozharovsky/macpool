@@ -185,3 +185,22 @@ struct MacIdentity: Sendable {
         return key
     }
 }
+
+/// The public reading of this Mac's key.
+public extension KeyFingerprint {
+    /// Returns the fingerprint of this Mac's key, which other Macs show for this Mac.
+    ///
+    /// The call creates the key when the data directory has neither a key nor a list of paired
+    /// Macs.
+    ///
+    /// - Parameter directory: The data directory.
+    /// - Returns: The fingerprint.
+    /// - Throws: ``PoolError/missingIdentity(path:lists:)`` when the key file is missing and a
+    ///   list of paired Macs exists, ``PoolError/insecureDirectory(path:reason:)`` or
+    ///   ``PoolError/unusableIdentity(path:reason:)`` when other users can reach the key or the
+    ///   key is unusable, or ``PoolError/fileSystem(operation:path:reason:)`` when a file
+    ///   operation fails.
+    static func thisMac(in directory: PoolDirectory) throws(PoolError) -> KeyFingerprint {
+        try KeyFingerprint(digest: MacIdentity.loadOrCreate(in: directory).keyDigest)
+    }
+}

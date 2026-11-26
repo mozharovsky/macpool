@@ -399,4 +399,24 @@ public extension TrustedHost {
         }
         return host
     }
+
+    /// Removes a host from this Mac's list without telling the host.
+    ///
+    /// The host keeps its record of this Mac. Ask the host to forget this Mac first with
+    /// ``PoolRequest/forget(endLeases:)`` when it can be reached. The call changes nothing when the
+    /// list has no record of the key.
+    ///
+    /// - Parameters:
+    ///   - key: The fingerprint of the host's key.
+    ///   - directory: The data directory.
+    /// - Throws: The errors of ``paired(in:)``, or ``PoolError/fileSystem(operation:path:reason:)``
+    ///   when the list cannot be saved.
+    static func remove(_ key: KeyFingerprint, from directory: PoolDirectory) throws(PoolError) {
+        var hosts = try TrustList<Self>.load(from: directory)
+        guard hosts[key] != nil else {
+            return
+        }
+        hosts.remove(key)
+        try hosts.save(to: directory)
+    }
 }

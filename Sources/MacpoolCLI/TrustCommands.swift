@@ -1,13 +1,13 @@
 import ArgumentParser
 import MacpoolPool
 
-/// Shows the Macs that paired with this Mac as clients.
+/// Pairs other Macs with this Mac as clients and shows them.
 struct HostCommand: ParsableCommand {
     /// The subcommand's name, summary, and subcommands.
     static let configuration = CommandConfiguration(
         commandName: "host",
-        abstract: "Shows the Macs that may lease VMs from this Mac.",
-        subcommands: [HostListCommand.self],
+        abstract: "Manages the Macs that may lease VMs from this Mac.",
+        subcommands: [HostListCommand.self, HostInviteCommand.self, HostRevokeCommand.self],
     )
 }
 
@@ -60,13 +60,13 @@ struct HostListCommand: ParsableCommand {
     }
 }
 
-/// Shows the hosts that this Mac paired with as a client.
+/// Pairs this Mac with hosts and shows them.
 struct PoolCommand: ParsableCommand {
     /// The subcommand's name, summary, and subcommands.
     static let configuration = CommandConfiguration(
         commandName: "pool",
-        abstract: "Shows the Macs that this Mac may lease VMs from.",
-        subcommands: [PoolListCommand.self],
+        abstract: "Manages the Macs that this Mac may lease VMs from.",
+        subcommands: [PoolListCommand.self, PoolAddCommand.self, PoolRemoveCommand.self],
     )
 }
 

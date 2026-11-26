@@ -168,7 +168,14 @@ struct ImageTests {
         let image = ImageSummary(name: "xcode", path: "/pool/images/xcode", isReady: true, builds: ["xcode": "1"])
         let data = try MessageCoding.encoder.encode(PoolSummary(slots: 1, leases: [], queue: [], images: [image]))
         #expect(String(decoding: data, as: UTF8.self).contains(#""ready":true"#))
+        #expect(!String(decoding: data, as: UTF8.self).contains("listener"))
         #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: data).images == [image])
+
+        let listener = ListenerSummary(address: "192.0.2.20", port: 7373, problem: "the port is busy")
+        let withListener = PoolSummary(slots: 1, leases: [], queue: [], listener: listener)
+        let listening = try MessageCoding.encoder.encode(withListener)
+        #expect(String(decoding: listening, as: UTF8.self).contains(#""listener":{"#))
+        #expect(try MessageCoding.decoder.decode(PoolSummary.self, from: listening).listener == listener)
     }
 }
 

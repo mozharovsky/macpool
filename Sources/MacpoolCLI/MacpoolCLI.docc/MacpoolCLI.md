@@ -56,7 +56,9 @@ provisioning only once.
 ### Pool
 
 `macpool daemon` runs the pool daemon from MacpoolPool in the foreground, and
-`macpool daemon install` registers it as a launchd job in the user's session. `macpool lease`
+`macpool daemon install` registers it as a launchd job in the user's session. ``ListenOptions``
+makes either one listen for paired Macs on a ``ListenAddress`` and offer each ``OfferedSource`` to
+them. The listener admits every address unless `--allow-from` names ranges. `macpool lease`
 waits for a slot, prints the clone's lease identifier, bundle, and address, and holds the lease
 until Control-C, the end of a command after `--`, or `--detach` hands it to the daemon.
 `macpool release`, `macpool renew`, and `macpool list` act on leases by their identifiers. With
@@ -67,6 +69,11 @@ the hosts that this Mac paired with. Both read the lists in the data directory w
 Another Mac chose the names and addresses in these lists. ``PeerText`` escapes them before a
 terminal shows them. Each table prints a Mac's short key in a column before its name, because a
 name can imitate a short key.
+
+`macpool host invite` asks the daemon for a pairing code and waits until a Mac pairs with it.
+`macpool host revoke` asks the daemon to block a paired client. On the client, `macpool pool add`
+pairs with the code, and `macpool pool remove` asks the host to forget this Mac before it removes
+the host from the list.
 
 `macpool connect` relays its standard input and output to the SSH server of a lease's guest, for
 the `ProxyCommand` option of `ssh`. ``HostSelection`` picks the daemon on this Mac or a paired
@@ -113,8 +120,12 @@ lease one that is not ready.
 - ``SshCommand``
 - ``HostCommand``
 - ``HostListCommand``
+- ``HostInviteCommand``
+- ``HostRevokeCommand``
 - ``PoolCommand``
 - ``PoolListCommand``
+- ``PoolAddCommand``
+- ``PoolRemoveCommand``
 - ``SuperviseCommand``
 
 ### Image commands
@@ -135,6 +146,9 @@ lease one that is not ready.
 - ``LogLevel``
 - ``MachineSession``
 - ``PoolOptions``
+- ``ListenOptions``
+- ``ListenAddress``
+- ``OfferedSource``
 - ``HostSelection``
 - ``ReattachSchedule``
 - ``StandardRelay``
