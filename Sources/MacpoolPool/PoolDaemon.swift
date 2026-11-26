@@ -424,6 +424,21 @@ public actor PoolDaemon {
     /// The interval at which the daemon reports to its coordinator.
     static let reportInterval = Duration.seconds(10)
 
+    /// The lease requests of paired Macs that wait for a host that reports to this daemon.
+    private var placements = PlacementQueue()
+
+    /// Whether ``placeWaiting()`` runs.
+    ///
+    /// A lease that it starts on this Mac changes the ledger, and the change must not place the
+    /// same requests again.
+    private var isPlacing = false
+
+    /// The longest wait for a host's answer to a grant.
+    static let grantTimeout = Duration.seconds(5)
+
+    /// The age after which a host's last report no longer makes it a choice for a lease.
+    static let reportFreshness = Duration.seconds(30)
+
     /// The grants of the coordinator that no lease request has used yet, in arrival order.
     private var introductions: [Introduction] = []
 
@@ -606,7 +621,15 @@ public actor PoolDaemon {
         introductions.removeAll { $0.expiresAt <= awake }
         refreshIntroducedKeys()
         closeSilentPeers(at: awake)
+        let expired = placements.expireGrants(at: awake)
+        for request in expired {
+            configuration.logger.notice("A host did not answer a lease that this coordinator placed", metadata: [
+                "owner": "\(request.key)",
+                "source": "\(request.terms.source)",
+            ])
+        }
         perform(ledger.tick(now: now, awake: awake))
+        announceWaiting(expired)
         let stopGrace = configuration.stopGrace / .seconds(1)
         for (id, record) in ledger.leases.sorted(by: { $0.key < $1.key }) {
             let idle = links[id] == nil && !connecting.contains(id)
@@ -641,6 +664,7 @@ public actor PoolDaemon {
         summary.images = configuration.directory.images()
         summary.listener = listenerSummary()
         summary.hosts = hostRegistry.summaries(at: configuration.awakeTime())
+        summary.queue += placementSummaries(for: .local)
         return summary
     }
 
@@ -653,6 +677,7 @@ public actor PoolDaemon {
     private func pairedSummary(for owner: LeaseOwner) -> PoolSummary {
         var summary = ledger.summary(for: owner)
         summary.hosts = hostRegistry.summaries(at: configuration.awakeTime())
+        summary.queue += placementSummaries(for: owner)
         return summary
     }
 
@@ -1222,7 +1247,7 @@ public actor PoolDaemon {
             slots: slots,
             leases: leases,
             queued: queued,
-            available: max(0, slots - leases - queued - introductions.count),
+            available: localAvailable,
             sources: configuration.offeredSources.keys.sorted(),
         )
     }
@@ -1450,12 +1475,16 @@ public actor PoolDaemon {
     ///   - owner: Who the client acted for.
     ///   - awake: The current time on ``Configuration/awakeTime``.
     private func clientGone(_ client: ClientID, owner: LeaseOwner, awake: SuspendingClock.Instant) {
+        placements.remove(client: client)
+        var withdrawn: [PlacementQueue.Request] = []
         if let host = hostRegistry.remove(client: client) {
             configuration.logger.notice("A host stopped reporting to this coordinator", metadata: [
                 "key": "\(host.key)",
             ])
+            withdrawn = placements.hostLeft(host.key)
         }
         perform(ledger.clientDisconnected(client, owner: owner, awake: awake))
+        announceWaiting(withdrawn)
     }
 
     /// Stops serving the paired Macs whose connections sent no request for
@@ -1531,6 +1560,10 @@ public actor PoolDaemon {
         do throws(PoolError) {
             switch request {
             case let .lease(terms):
+                if let record, !isIntroduced, coordinatesSource(terms.source) {
+                    try enqueuePlacement(terms, from: client, record: record)
+                    break
+                }
                 let admitted = try admit(terms, from: record)
                 var coordinator: KeyFingerprint?
                 if case let .client(key) = owner {
@@ -1604,8 +1637,10 @@ public actor PoolDaemon {
                 break
             case let .report(report):
                 try recordReport(report, from: client, record: record)
-            case .granted, .declined:
-                throw .invalidRequest(reason: "this daemon placed no lease with that ticket")
+            case let .granted(ticket):
+                try answerGrant(ticket, from: record, isAccepted: true, reason: nil)
+            case let .declined(ticket, reason):
+                try answerGrant(ticket, from: record, isAccepted: false, reason: reason)
             }
         } catch {
             reply(.failure(error.description), to: client)
@@ -1640,6 +1675,8 @@ public actor PoolDaemon {
                 "address": "\(report.address):\(report.port)",
             ])
         }
+        placements.hostReported(record.key)
+        placeWaiting()
     }
 
     /// Blocks a paired Mac, closes its connections, and ends its leases that need a client.
@@ -2306,6 +2343,230 @@ public actor PoolDaemon {
         return parent.pathComponents == images.pathComponents
     }
 
+    // MARK: Placement
+
+    /// The number of leases that this daemon can start now.
+    ///
+    /// Each lease, queued request, and kept grant takes a slot.
+    private var localAvailable: Int {
+        max(0, configuration.policy.slots - ledger.leases.count - ledger.queue.count - introductions.count)
+    }
+
+    /// Reports whether a host that reports to this daemon offers a source.
+    ///
+    /// A request for such a source waits in ``placements``. Other requests go to this daemon's
+    /// own ledger.
+    ///
+    /// - Parameter source: The name of an offered source.
+    /// - Returns: Whether the last report of any host names the source.
+    private func coordinatesSource(_ source: String) -> Bool {
+        hostRegistry.entries.values.contains { $0.report.sources.contains(source) }
+    }
+
+    /// Puts a paired Mac's lease request in the queue of ``placements`` and places it when a host
+    /// can take it now.
+    ///
+    /// The coordinator checks what it can check without the source. The host checks the source
+    /// and its own limits when the Mac sends the request there. If no host can take the request
+    /// now, the Mac gets ``PoolReply/queued(position:)``.
+    ///
+    /// - Parameters:
+    ///   - terms: The requested terms with the source's offered name.
+    ///   - client: The connection that sent the request.
+    ///   - record: The Mac's record in the list of paired clients.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the request asks for a shared
+    ///   directory or a priority above the Mac's ceiling, or when the Mac already has
+    ///   ``PlacementQueue/maximumRequestsPerMac`` requests in the queue. The errors of
+    ///   ``LeaseTerms/validate()`` propagate.
+    private func enqueuePlacement(
+        _ terms: LeaseTerms,
+        from client: ClientID,
+        record: TrustedClient,
+    ) throws(PoolError) {
+        guard terms.sharedDirectory == nil else {
+            throw .invalidRequest(reason: "a paired client cannot share a host directory")
+        }
+        guard terms.priority <= record.priorityCeiling else {
+            throw .invalidRequest(reason: "this Mac may ask for a priority of at most \(record.priorityCeiling)")
+        }
+        guard placements.count(of: record.key) < PlacementQueue.maximumRequestsPerMac else {
+            throw .invalidRequest(reason: "this Mac already has \(PlacementQueue.maximumRequestsPerMac) requests in "
+                + "the coordinator's queue")
+        }
+        // The host resolves the source's name, and validate() takes only a path.
+        var checked = terms
+        checked.source = "/"
+        try checked.validate()
+        placements.enqueue(PlacementQueue.Request(
+            client: client,
+            key: record.key,
+            name: record.name,
+            terms: terms,
+            since: configuration.now(),
+        ))
+        configuration.logger.info("Queued a lease request for a host", metadata: [
+            "source": "\(terms.source)",
+            "owner": "\(record.key)",
+        ])
+        placeWaiting()
+        if let position = placements.waitingPosition(of: client) {
+            reply(.queued(position: position), to: client)
+        }
+    }
+
+    /// Chooses hosts for the waiting requests in ``placements`` and sends the grants.
+    ///
+    /// The candidates are the hosts whose last report is at most ``reportFreshness`` old and this
+    /// daemon itself. A request that this daemon takes goes through ``admit(_:from:)`` and the
+    /// ledger like a request that no host can serve.
+    private func placeWaiting() {
+        guard !isShutDown, !isPlacing, !placements.requests.isEmpty else {
+            return
+        }
+        isPlacing = true
+        defer { isPlacing = false }
+        let awake = configuration.awakeTime()
+        let local = PlacementQueue.Candidate(
+            key: nil,
+            available: localAvailable,
+            sources: Set(configuration.offeredSources.keys),
+        )
+        var candidates = [local]
+        candidates += hostRegistry.entries.values
+            .filter { $0.receivedAt.duration(to: awake) <= Self.reportFreshness }
+            .sorted { ($0.name, $0.key.rawValue) < ($1.name, $1.key.rawValue) }
+            .map {
+                PlacementQueue.Candidate(key: $0.key, available: $0.report.available, sources: Set($0.report.sources))
+            }
+        for placement in placements.place(on: candidates, until: awake + Self.grantTimeout) {
+            switch placement {
+            case let .local(request):
+                leaseLocally(request)
+            case let .remote(grant, host):
+                guard let entry = hostRegistry.entries[host] else {
+                    continue
+                }
+                hostRegistry.reserve(host)
+                reply(.grant(grant), to: entry.client)
+                configuration.logger.info("Offered a lease to a host", metadata: [
+                    "host": "\(host)",
+                    "owner": "\(grant.client)",
+                    "source": "\(grant.source)",
+                    "ticket": "\(grant.ticket)",
+                ])
+            }
+        }
+    }
+
+    /// Serves a placed request with this daemon's own ledger.
+    ///
+    /// - Parameter request: The request that left ``placements``.
+    private func leaseLocally(_ request: PlacementQueue.Request) {
+        guard clients[request.client] != nil else {
+            return
+        }
+        let owner = LeaseOwner.client(request.key)
+        do throws(PoolError) {
+            guard let record = try pairedRecord(request.key) else {
+                reply(.failure(Self.notAcceptedReason), to: request.client)
+                return
+            }
+            let admitted = try admit(request.terms, from: record)
+            configuration.logger.info("Queued a lease request", metadata: [
+                "source": "\(admitted.terms.source)",
+                "owner": "\(owner)",
+            ])
+            perform(ledger.request(
+                admitted.terms,
+                from: request.client,
+                owner: owner,
+                sourceName: admitted.sourceName,
+                now: configuration.now(),
+            ))
+        } catch {
+            reply(.failure(error.description), to: request.client)
+        }
+    }
+
+    /// Applies a host's answer to a grant that this daemon sent.
+    ///
+    /// When the host accepts, the Mac that requested the lease gets ``PoolReply/placed(_:)``.
+    /// When the host declines, the request waits for another host.
+    ///
+    /// - Parameters:
+    ///   - ticket: The grant's ticket.
+    ///   - record: The sender's record in the list of paired clients, or `nil` for the local user.
+    ///   - isAccepted: Whether the host accepted the grant.
+    ///   - reason: Why the host declined, or `nil` when it accepted.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the sender does not report to this
+    ///   daemon as a host.
+    private func answerGrant(
+        _ ticket: UInt64,
+        from record: TrustedClient?,
+        isAccepted: Bool,
+        reason: String?,
+    ) throws(PoolError) {
+        guard let record, record.mayHost, let entry = hostRegistry.entries[record.key] else {
+            throw .invalidRequest(reason: "this daemon placed no lease with that ticket")
+        }
+        switch placements.answer(ticket: ticket, from: record.key, isAccepted: isAccepted) {
+        case .unknown:
+            // The Mac left, or the grant expired before the answer arrived.
+            configuration.logger.debug("A host answered a grant that no request waits for", metadata: [
+                "host": "\(record.key)",
+                "ticket": "\(ticket)",
+            ])
+        case let .accepted(request):
+            configuration.logger.info("A host took a lease that this coordinator placed", metadata: [
+                "host": "\(record.key)",
+                "owner": "\(request.key)",
+                "source": "\(request.terms.source)",
+            ])
+            reply(.placed(PlacedHost(
+                name: entry.name,
+                key: entry.key,
+                address: entry.report.address,
+                port: entry.report.port,
+            )), to: request.client)
+        case let .declined(request):
+            configuration.logger.info("A host declined a lease that this coordinator placed", metadata: [
+                "host": "\(record.key)",
+                "owner": "\(request.key)",
+                "reason": "\(reason ?? "")",
+            ])
+            placeWaiting()
+            announceWaiting([request])
+        }
+    }
+
+    /// Tells each Mac whose request lost its grant and still waits its place in the queue.
+    ///
+    /// - Parameter requests: The requests that lost their grants.
+    private func announceWaiting(_ requests: [PlacementQueue.Request]) {
+        for request in requests {
+            if let position = placements.waitingPosition(of: request.client) {
+                reply(.queued(position: position), to: request.client)
+            }
+        }
+    }
+
+    /// Describes the waiting requests in ``placements`` that an owner may see.
+    ///
+    /// - Parameter owner: Who asks.
+    /// - Returns: The requests with positions after the requests in the ledger's queue.
+    private func placementSummaries(for owner: LeaseOwner) -> [QueuedSummary] {
+        placements.requests.enumerated()
+            .filter { owner.mayAct(on: .client($1.key)) }
+            .map { index, request in
+                QueuedSummary(
+                    position: ledger.queue.count + index + 1,
+                    source: request.terms.source,
+                    priority: request.terms.priority,
+                    since: request.since,
+                )
+            }
+    }
+
     // MARK: Streams
 
     /// Hands a client's connection to a new stream to the SSH server of a lease's guest.
@@ -2517,6 +2778,7 @@ public actor PoolDaemon {
                 startRecovery(id)
             }
         }
+        placeWaiting()
     }
 
     /// Logs the leases whose phase changed since the last call and the leases that left the pool.
@@ -3281,6 +3543,8 @@ private extension PoolReply {
             [mac.name]
         case let .grant(grant):
             [grant.name, grant.source]
+        case let .placed(host):
+            [host.name, host.address]
         }
     }
 }

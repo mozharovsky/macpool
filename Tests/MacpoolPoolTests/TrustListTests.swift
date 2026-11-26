@@ -86,6 +86,31 @@ struct TrustListTests {
         }
     }
 
+    /// Records the host that a coordinator placed a lease on, and changes only the address and port
+    /// of a host that the list already names.
+    @Test func recordsAPlacedHost() throws {
+        let root = try ShortDirectory()
+        let directory = PoolDirectory(root: root.url.appending(path: "pool", directoryHint: .isDirectory))
+        let key = randomKey()
+        let placed = PlacedHost(name: "mini", key: key, address: "192.0.2.10", port: 7373)
+        let host = try TrustedHost.introduce(placed, in: directory)
+        #expect(host.name == "mini")
+        #expect(try TrustedHost.paired(in: directory).map(\.key) == [key])
+        #expect(try TrustedHost.named(key.shortKey, in: directory).address == "192.0.2.10")
+
+        var moved = placed
+        moved.name = "renamed"
+        moved.address = "192.0.2.11"
+        try TrustedHost.introduce(moved, in: directory)
+        let record = try #require(try TrustedHost.paired(in: directory).first)
+        #expect(record.name == "mini")
+        #expect(record.address == "192.0.2.11")
+        #expect(try TrustedHost.paired(in: directory).count == 1)
+
+        moved.address = "example host"
+        #expect(throws: PoolError.self) { try TrustedHost.introduce(moved, in: directory) }
+    }
+
     /// Removes one host and leaves the list alone for a key that it does not hold.
     @Test func removesAHost() throws {
         let root = try ShortDirectory()

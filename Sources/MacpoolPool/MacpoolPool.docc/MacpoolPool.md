@@ -292,6 +292,12 @@ admits the Mac that the grant names without a record in its list of paired clien
 one lease of the granted source. The lease records the coordinator. The Mac may attach to it again
 and reach its guest while the host's list of paired hosts names the coordinator.
 
+When a paired Mac asks the coordinator for a source that a host reports, the coordinator keeps the
+request in a queue of its own. It sends a grant to the host with the most available slots, and it
+serves the request itself when it offers the source and has at least as many. After the host
+accepts, the Mac gets ``PoolReply/placed(_:)``. The Mac then records the host with
+``TrustedHost/introduce(_:in:)`` and sends the same request to the host.
+
 ### Supervisors
 
 Each leased VM runs in its own supervisor process, which ``SupervisorLauncher`` starts in a
@@ -399,6 +405,7 @@ rewrites the file in version 2 before any lease changes. An earlier build then r
 - ``HostReport``
 - ``HostSummary``
 - ``HostGrant``
+- ``PlacedHost``
 
 ### Supervisors
 

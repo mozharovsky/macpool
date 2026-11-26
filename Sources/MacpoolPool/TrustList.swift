@@ -421,6 +421,47 @@ public extension TrustedHost {
         return host
     }
 
+    /// Records a host that a coordinator placed a lease on, unless the list already names its key.
+    ///
+    /// The coordinator vouches for the host's key, so this Mac connects to the host as to a host it
+    /// paired with. If the list names the key with another address or port, the call replaces
+    /// them and keeps the record's name. Commands then reach the host by its short key.
+    ///
+    /// - Parameters:
+    ///   - placed: The host from ``PoolReply/placed(_:)``.
+    ///   - directory: The data directory.
+    /// - Returns: The host's record in the list.
+    /// - Throws: ``PoolError/invalidRequest(reason:)`` when the host's name or address is not
+    ///   valid, the errors of ``paired(in:)``, or ``PoolError/fileSystem(operation:path:reason:)``
+    ///   when the list cannot be saved.
+    @discardableResult
+    static func introduce(_ placed: PlacedHost, in directory: PoolDirectory) throws(PoolError) -> TrustedHost {
+        guard PairedMac.isValidName(placed.name), PairingCode.isValidAddress(placed.address), placed.port > 0 else {
+            throw .invalidRequest(reason: "the coordinator sent a host without a valid name, address, and port")
+        }
+        var hosts = try TrustList<Self>.load(from: directory)
+        if var known = hosts[placed.key] {
+            guard known.address != placed.address || known.port != placed.port else {
+                return known
+            }
+            known.address = placed.address
+            known.port = placed.port
+            hosts.insert(known)
+            try hosts.save(to: directory)
+            return known
+        }
+        let host = TrustedHost(
+            key: placed.key,
+            name: placed.name,
+            address: placed.address,
+            port: placed.port,
+            pairedAt: Date(),
+        )
+        hosts.insert(host)
+        try hosts.save(to: directory)
+        return host
+    }
+
     /// Removes a host from this Mac's list without telling the host.
     ///
     /// The host keeps its record of this Mac. Ask the host to forget this Mac first with

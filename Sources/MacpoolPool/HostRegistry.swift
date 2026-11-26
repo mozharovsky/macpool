@@ -48,6 +48,19 @@ struct HostRegistry {
         return isNew
     }
 
+    /// Takes one available slot from a host's last report until its next report.
+    ///
+    /// The coordinator calls it for each grant it sends, so the next placement does not count the
+    /// same slot again.
+    ///
+    /// - Parameter key: The fingerprint of the host's key.
+    mutating func reserve(_ key: KeyFingerprint) {
+        guard let available = entries[key]?.report.available, available > 0 else {
+            return
+        }
+        entries[key]?.report.available = available - 1
+    }
+
     /// Removes the host that reports on a connection.
     ///
     /// - Parameter client: A connection that ended.

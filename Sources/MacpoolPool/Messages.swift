@@ -1094,6 +1094,15 @@ public enum PoolReply: Sendable, Equatable, Codable {
     /// - Parameter grant: The lease's client, source, and priority.
     case grant(HostGrant)
 
+    /// Sends the client of a coordinator to the host that accepted its lease.
+    ///
+    /// The coordinator sends it in answer to ``PoolRequest/lease(_:)`` after the host accepted the
+    /// coordinator's grant. The client then connects to the host and sends the same lease request
+    /// there within 60 seconds.
+    ///
+    /// - Parameter host: The host's name, key, and listener.
+    case placed(PlacedHost)
+
     /// The JSON keys of a reply.
     private enum CodingKeys: String, CodingKey {
         /// The kind of reply.
@@ -1122,6 +1131,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case guest
         /// A lease that the coordinator places on a host.
         case grant
+        /// The host that accepted a lease of the coordinator.
+        case host
     }
 
     /// Decodes a reply.
@@ -1181,6 +1192,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
             self = try .forgotten(leases: container.decode(Int.self, forKey: .leases))
         case "grant":
             self = try .grant(container.decode(HostGrant.self, forKey: .grant))
+        case "placed":
+            self = try .placed(container.decode(PlacedHost.self, forKey: .host))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .reply,
@@ -1211,6 +1224,7 @@ public enum PoolReply: Sendable, Equatable, Codable {
         case .unblocked: "unblocked"
         case .forgotten: "forgotten"
         case .grant: "grant"
+        case .placed: "placed"
         }
     }
 
@@ -1255,6 +1269,8 @@ public enum PoolReply: Sendable, Equatable, Codable {
             try container.encode(leases, forKey: .leases)
         case let .grant(grant):
             try container.encode(grant, forKey: .grant)
+        case let .placed(host):
+            try container.encode(host, forKey: .host)
         }
     }
 }

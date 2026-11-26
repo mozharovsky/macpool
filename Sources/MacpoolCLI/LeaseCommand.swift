@@ -26,6 +26,11 @@ import System
 /// offers. The lease then has no bundle or address on this Mac, so `MACPOOL_BUNDLE` and
 /// `MACPOOL_ADDRESS` are empty. Reach the guest with `macpool ssh --pool`.
 ///
+/// When `--pool` names a coordinator, the coordinator may choose another host that offers the
+/// source. The command then prints `placed host=` with that host's short key, records the host in
+/// the list of paired hosts, and sends the request to the host. Give the short key to `--pool` in
+/// later commands for the lease.
+///
 /// When the connection to a paired host breaks, the command connects again and attaches to the
 /// lease. The host keeps the lease for 60 seconds of its awake time after it notices the break.
 /// The command tries until the lease expires, because the host may sleep for longer. See
@@ -170,7 +175,7 @@ struct LeaseCommand: AsyncParsableCommand {
     ///   does not confirm the release at Control-C.
     private func perform() async throws(CommandError) -> Int32 {
         let directory = location.directory
-        let selection = selection
+        var selection = selection
         let terms = terms
         if selection.host == nil {
             // A paired host checks the source by name, and validate() requires a path.
@@ -191,6 +196,7 @@ struct LeaseCommand: AsyncParsableCommand {
         }
 
         var id: LeaseID?
+        var isPlaced = false
         var expiry: Date?
         var isReady = false
         var interruption: Int32?
@@ -214,6 +220,21 @@ struct LeaseCommand: AsyncParsableCommand {
             switch event {
             case let .reply(.queued(position)):
                 Report.line("queued position=\(position)")
+            case let .reply(.placed(placed)):
+                // Only a coordinator places a request, and only before a host grants the lease.
+                guard id == nil, !isPlaced else {
+                    failure = .pool(.malformedMessage(reason: "a placement arrived after the request was placed"))
+                    break loop
+                }
+                isPlaced = true
+                let host = try pool { () throws(PoolError) in try TrustedHost.introduce(placed, in: directory) }
+                Report.line("placed host=\(host.key.shortKey)")
+                reader.cancel()
+                channel.close()
+                selection.host = host.key.shortKey
+                channel = try await selection.connect(in: directory)
+                try pool { () throws(PoolError) in try channel.send(PoolRequest.lease(terms)) }
+                reader = Self.read(channel, into: sink)
             case let .reply(.starting(lease)):
                 if id == nil {
                     id = lease.id

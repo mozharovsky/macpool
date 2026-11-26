@@ -36,6 +36,10 @@ with an iOS simulator runtime doesn't fit on a 64 GB disk.
 - Requests that wait in the queue aren't stored. When the daemon stops, their `lease` commands exit
   with an error.
 - `logs/daemon.log` grows without rotation.
+- A coordinator keeps its queue and the hosts' reports in memory. When it stops, the `lease`
+  commands that wait in its queue exit with an error, and the hosts report again after it starts.
+- One Mac may have at most 8 requests in a coordinator's queue. A host's report counts for
+  placement for 30 seconds.
 - Without `--allow-from`, any device that reaches the listener's port can start a TLS handshake.
   Only a paired key finishes it, except while `host invite` waits. Then any key finishes it and
   can try a pairing code. Listen on an address that only your Macs reach, or name their ranges
